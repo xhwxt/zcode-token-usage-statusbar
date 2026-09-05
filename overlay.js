@@ -5,6 +5,10 @@
  * 视觉（v28）：半透明胶囊底 + 组间 │ 分隔 + 上下文微进度条（三档色）+ 子代理呼吸灯；
  *       条面只放主数值，明细进 hover title。
  * 数据：主进程泵推 window.__zusageUpdate；显示项可在 ⚙ 面板配置（localStorage 持久化）。
+ * 当前会话（v34）：泵按窗口注入 payload.mine（客户端渲染端经 IPC 向主进程上报的焦点会话 id，
+ *       可为空串）；overlay 优先显示 mine 对应的池条目，池里还没有（新会话没数据）就显示
+ *       零值 —— 绝不回退到"别的会话"的数字（多窗口共享 localStorage 时旧启发式必错，实测）。
+ *       mine 缺失（辅助窗口/旧泵）才走 localStorage 键启发式 pickCurrent。
  * 热更新：主进程 mtime 检测 + new Function 语法校验后重注入；代际守卫防旧实例打架。
  * 诊断：异常与挂载信息写 window.__zusageDiag，由主进程泵取回写 diag-<n>.json。 */
 (function () {
@@ -25,7 +29,7 @@
   }, 0);
 
   function main$() {
-    var VERSION = "v33";   // 每轮递增；悬停状态条可见，用于确认热更新到达
+    var VERSION = "v34";   // 每轮递增；悬停状态条可见，用于确认热更新到达
     var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv" };
 
     /* ---------- 状态 ---------- */
@@ -276,11 +280,13 @@
       return { s: items.join('<span class="sep">│</span>') || '<span class="dim">全部显示项已关闭</span>', tips: tips };
     }
 
-    /* 当前会话识别：ZCode 在 localStorage 的 "zcode-v4-last-session:v1:<工作区路径>" 键里
-     * 保存每个工作区当前打开的会话 id，手动切换会话即更新（实测跟踪可靠）。
-     * 取所有键值与 payload.recent 的 sid 求交集；多个工作区候选时：某键的值刚变化
-     * （=刚切换过去的）优先，否则取最近活跃（数值 last_at 比较，勿用 HH:MM:SS 字符串，
-     * 跨午夜会排错）；没有交集→回退"最近活跃会话"。
+    /* 当前会话识别（v34 起 mine 优先，此处为兜底启发式）：ZCode 在 localStorage 的
+     * "zcode-v4-last-session:v1:<工作区路径>" 键里保存每个工作区当前打开的会话 id。
+     * 键随会话切换由应用更新（新开空会话时应用还会删键）；但 localStorage 全窗口共享、
+     * 键对"自动新建的会话"更新滞后，多窗口下根本分不清哪个键属于本窗口 ——
+     * 所以 v34 起正常路径是泵按窗口注入的 mine（渲染端经 IPC 上报的焦点会话），
+     * 只有泵无该窗口信息时（辅助窗口/旧泵）才落到这里：取所有键值与 payload.recent
+     * 的 sid 求交集；多候选取最近活跃（数值 last_at 比较，勿用 HH:MM:SS 字符串，跨午夜会排错）。
      * v32：键值即使不在 recent 池里也作为 want 返回（挂 window.__zusageWantSid），
      * 泵把它传给 zusage.py 强制纳入快照——刚开的新会话/超出 6+6 池的会话也能显示自己的数据。
      * 注意：会话标题不在可扫描的 DOM 文本节点里（顶栏标题扫描方案实测永远失败，勿回退）。 */
@@ -328,18 +334,48 @@
     /* 子代理查看视图识别：子代理会话的任务提示词会作为聊天气泡文本出现在消息流里，
      * 用 recent 中 is_sub 候选的标题前缀（前 30 字）在 DOM 文本里匹配。
      * （主会话的标题不在 DOM 文本里，但子代理视图的气泡是普通文本，可匹配。） */
+    /* 零值会话 stub：当前会话在共享池里还没有数据行（新会话没发过消息/还没拉到）时，
+     * 显示"当前会话的 0 值"。绝不回退到池里别的会话 —— 显示错会话的数字正是 v34 修的 bug。 */
+    function stubFor(sid) {
+      return { sid: String(sid || ""), title: "", active: false, turns: 0, requests: 0,
+        input: 0, output: 0, reasoning: 0, cache_read: 0, cache_write: 0, total: 0,
+        tool_calls: 0, retries: 0, ctx: 0, updated: "", last_at: 0, ctx_exc: 0,
+        last_turn: {requests: 0, retries: 0, tool_calls: 0, tool_errors: 0, input: 0, output: 0,
+          reasoning: 0, cache_read: 0, cache_write: 0, total: 0, duration_ms: 0, ttft_ms: 0},
+        last: {duration_ms: 0, ttft_ms: 0, model: "", tps: 0},
+        code: {add: null, del: null, files: null},
+        tools: {total: 0, errors: 0, list: []},
+        sub: {requests: 0, total: 0, input: 0, output: 0, cache_read: 0, reasoning: 0,
+          cache_write: 0, active: false, list: []},
+        context_window: 0, context_auto: false };
+    }
     function render(d) {
       state.data = d;
-      var pc = pickCurrent(d);
-      var p = pc ? pc.sess : null;
-      pickedSid = p ? p.sid : "";
-      window.__zusageWantSid = (pc && pc.want) || "";   // 泵读取后让 zusage.py 强制纳入该会话
-      var view = p ? {
+      var mine = d.mine;   // 泵按窗口注入：string=本窗口焦点会话（空串=该窗口当前无会话），undefined=泵无该窗口信息
+      var pc = null, p = null;
+      if (typeof mine === "string") {
+        pickedSid = mine;
+        window.__zusageWantSid = mine;
+        if (mine) {
+          var rec = d.recent || [];
+          for (var i = 0; i < rec.length; i++) if (rec[i].sid === mine) { p = rec[i]; break; }
+          if (!p) p = stubFor(mine);
+        } else {
+          p = stubFor("");
+        }
+      } else {
+        pc = pickCurrent(d);
+        p = pc ? pc.sess : null;
+        pickedSid = p ? p.sid : "";
+        window.__zusageWantSid = (pc && pc.want) || "";   // 泵读取后让 zusage.py 强制纳入该会话
+        if (!p) p = stubFor((pc && pc.want) || "");
+      }
+      var view = {
         session: p, last_turn: p.last_turn || {}, last: p.last || {},
         today: d.today, context_window: p.context_window, context_auto: p.context_auto,
         code: p.code, ctx_exc: p.ctx_exc, tools: p.tools,
         sub: p.sub || {requests: 0, total: 0, input: 0, output: 0, cache_read: 0, active: false, list: []},
-      } : d;
+      };
       var h = html(view);
       /* 内容没变就不重建 DOM：泵每 1.5s 推送一次，无条件 innerHTML 会重建条面+重启呼吸灯
        * 动画+触发 tooltip 重画 = 悬停时周期性闪烁（v33 修复）。变化时才重建。 */
@@ -684,8 +720,13 @@
         }
       }
       if (state.data) {
-        var pc = pickCurrent(state.data);
-        var pSid = pc ? (pc.sess ? pc.sess.sid : pc.want) : "";
+        var msid = typeof state.data.mine === "string" ? state.data.mine : null;
+        var pSid;
+        if (msid !== null) pSid = msid;   // mine 模式：泵会在会话切换时推新 payload，这里只需同步 pickedSid
+        else {
+          var pc = pickCurrent(state.data);
+          pSid = pc ? (pc.sess ? pc.sess.sid : pc.want) : "";
+        }
         if (pSid !== pickedSid) render(state.data);   // 切换了会话：立即按缓存 payload 重渲染
       }
     }

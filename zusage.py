@@ -5,6 +5,7 @@
 也可被 usage_mcp.py import 为查询库。
 """
 import json
+import re
 import sqlite3
 import sys
 import time
@@ -393,13 +394,18 @@ _EMPTY_TURN = {"requests": 0, "retries": 0, "tool_calls": 0, "tool_errors": 0, "
 
 
 def snapshot(force_sid=""):
-    """单次快照：最新会话 + 最近 8 个会话（状态条按窗口顶栏标题挑当前会话）+ 今日。
-    上下文窗口按该会话最近一次请求的模型查目录，失败落 config fallback。
-    force_sid：overlay 上报的当前会话 id（localStorage 键），强制纳入快照——
-    不在 6+6 池里的会话（新开的、久远的）也能显示自己的数据（v32）。"""
+    """单次快照：最新会话 + 最近 6+6 会话池 + 今日。
+    force_sid：各窗口当前会话 id，逗号分隔（泵按窗口汇总上报：主进程 IPC 映射的焦点会话 +
+    overlay localStorage 键兜底），全部强制纳入快照——不在 6+6 池里的会话（新开的、久远的）
+    也能被各窗口找到自己的会话并显示（v32 起；v34 改为多窗口多 sid）。"""
     cfg = load_config()
     con = connect()
     try:
+        force_sids = []
+        for fs in str(force_sid).split(","):
+            fs = fs.strip()
+            if fs and re.fullmatch(r"[A-Za-z0-9_-]+", fs) and fs not in force_sids:
+                force_sids.append(fs)
         today = range_usage(con, _epoch_ms(_day_start()), _epoch_ms(_day_start() + timedelta(days=1)))
         sess, u = current_session(con)
         latest_sid = sess["id"] if sess is not None else None
@@ -433,8 +439,9 @@ def snapshot(force_sid=""):
         ids = [x for x in ids if not (x in seen or seen.add(x))]
         if latest_sid and latest_sid not in ids:
             ids.insert(0, latest_sid)
-        if force_sid and force_sid not in ids:
-            ids.insert(0, force_sid)
+        for fs in reversed(force_sids):
+            if fs not in ids:
+                ids.insert(0, fs)
         return {
             "session": base,
             "last_turn": base["last_turn"],
@@ -468,7 +475,7 @@ def main(argv):
         print(render_current(con))
     elif cmd == "json":
         # ensure_ascii 默认 True：全部 \u 转义，保证注入 executeJavaScript 时无 U+2028 类语法风险
-        # 可选第二参数：强制纳入快照的会话 id（overlay 经泵上报的当前会话，v32）
+        # 可选第二参数：强制纳入快照的会话 id，逗号分隔（各窗口当前会话，泵汇总上报）
         force_sid = argv[1] if len(argv) > 1 else ""
         print(json.dumps(snapshot(force_sid)))
     elif cmd == "today":
