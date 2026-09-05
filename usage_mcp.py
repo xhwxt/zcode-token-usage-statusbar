@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""ZCode token 用量 MCP server（stdio, 零依赖；注册名 zusage）。
+"""ZCode token 用量 MCP server（stdio, 零依赖；注册名 zcode-token-usage-statusbar）。
 
 提供工具 token_usage(scope)：current(默认)/today/days:N/sessions[:N]/models[:days]/session:<id前缀>。
 协议仅实现 initialize / tools/list / tools/call；调试信息只走 stderr。

@@ -21,8 +21,8 @@ from pathlib import Path
 HERE = Path(__file__).parent.resolve()
 ZCODE_CONFIG = Path.home() / ".zcode" / "cli" / "config.json"
 COMMANDS_DIR = Path.home() / ".zcode" / "commands"
-MCP_NAME = "zusage"                 # MCP server 注册名（老安装叫 token-usage，自动迁移）
-MCP_NAME_OLD = "token-usage"
+MCP_NAME = "zcode-token-usage-statusbar"   # MCP server 注册名（与仓库名一致；老安装叫 token-usage/zusage，自动迁移）
+MCP_NAME_OLD = ("token-usage", "zusage")   # 历史注册名
 
 # ZCode 安装位置候选：resources/app.asar 存在即命中（按序探测）
 ASAR_CANDIDATES = [
@@ -98,13 +98,13 @@ def register_mcp(dry):
             return False
     servers = data.setdefault("mcp", {}).setdefault("servers", {})
     servers[MCP_NAME] = entry
-    removed = False
-    old = servers.get(MCP_NAME_OLD)
-    if isinstance(old, dict) and usage_mcp.name in json.dumps(old):
-        del servers[MCP_NAME_OLD]      # 旧注册指向本仓库 → 迁移到新名字
-        removed = True
-    where = str(ZCODE_CONFIG)
-    print(f"[MCP] 注册 {MCP_NAME} → {usage_mcp}" + ("（同时移除旧注册 token-usage）" if removed else ""))
+    removed = []
+    for old_name in MCP_NAME_OLD:
+        old = servers.get(old_name)
+        if isinstance(old, dict) and usage_mcp.name in json.dumps(old):
+            del servers[old_name]      # 旧注册指向本仓库 → 迁移到新名字
+            removed.append(old_name)
+    print(f"[MCP] 注册 {MCP_NAME} → {usage_mcp}" + (f"（同时移除旧注册 {', '.join(removed)}）" if removed else ""))
     if not dry:
         ZCODE_CONFIG.parent.mkdir(parents=True, exist_ok=True)
         if ZCODE_CONFIG.is_file():
@@ -132,7 +132,7 @@ def remove_mcp(dry):
         return True
     servers = data.get("mcp", {}).get("servers", {})
     gone = []
-    for name in (MCP_NAME, MCP_NAME_OLD):
+    for name in (MCP_NAME, *MCP_NAME_OLD):
         if name in servers:
             del servers[name]
             gone.append(name)

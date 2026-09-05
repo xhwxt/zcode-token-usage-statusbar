@@ -4,7 +4,7 @@
 
 平台：Windows ｜ 许可：[MIT](LICENSE)
 
-> 文档与界面统一使用中文名「ZCode Token 用量状态栏」；代码与 MCP 注册名 `zusage` 即 ZCode + usage（用量）。
+> 文档与界面统一使用中文名「ZCode Token 用量状态栏」；仓库与 MCP 注册名为 `zcode-token-usage-statusbar`（全称的英文写法），代码内部标识符为 `zusage`。
 
 ## 为什么是注入而不是插件？
 
@@ -45,7 +45,7 @@ cd zcode-token-usage-statusbar
 python install.py
 ```
 
-一条命令完成：探测 ZCode 安装位置（找不到时询问，或 `--asar` 指定）→ 生成 config.json → 注入 asar → 注册 MCP（server 名 `zusage`）→ 安装 /usage 命令 → 弹出「安装监控」窗口（每 10 秒检测一次，提醒重启 ZCode；重启后检测到注入加载即显示成功并自动关闭；万一运行中原子替换失败，监控窗口会在你退出 ZCode 后自动完成替换）。
+一条命令完成：探测 ZCode 安装位置（找不到时询问，或 `--asar` 指定）→ 生成 config.json → 注入 asar → 注册 MCP（server 名 `zcode-token-usage-statusbar`）→ 安装 /usage 命令 → 弹出「安装监控」窗口（每 10 秒检测一次，提醒重启 ZCode；重启后检测到注入加载即显示成功并自动关闭；万一运行中原子替换失败，监控窗口会在你退出 ZCode 后自动完成替换）。
 
 **ZCode 升级会覆盖 app.asar，重跑一次 `python install.py` 即可**（监控窗口提示"未检测到注入加载"通常就是这个原因）。
 
@@ -60,7 +60,7 @@ copy config.example.json config.json
 python patch_install.py install
 
 # 2) MCP：在 ~/.zcode/cli/config.json 的 mcp.servers 注册：
-#   "zusage": { "command": "<python 绝对路径>", "args": ["D:\\path\\to\\zusage\\usage_mcp.py"] }
+#   "zcode-token-usage-statusbar": { "command": "<python 绝对路径>", "args": ["D:\path\to\zcode-token-usage-statusbar\usage_mcp.py"] }
 
 # 3) /usage 命令：把 usage.command.md 复制到 ~/.zcode/commands/usage.md
 ```
