@@ -29,7 +29,7 @@
   }, 0);
 
   function main$() {
-    var VERSION = "v40";   // 每轮递增；悬停状态条可见，用于确认热更新到达
+    var VERSION = "v41";   // 每轮递增；悬停状态条可见，用于确认热更新到达
     var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv" };
 
     /* ---------- 状态 ---------- */
@@ -641,11 +641,12 @@
     }
     /* 输入框是否真的露在屏幕上：中心点命中测试。
      * 设置页等覆盖层不卸载聊天 DOM 也不改几何，只能用 elementFromPoint 判断是否被盖住。 */
-    /* 自己的浮层（设置面板/超限气泡）展开在条上方、必然覆盖输入区中心：
-     * 若算进遮挡判定，会进 隐藏→复显→再隐藏 的循环（v40 离线复现的"打开设置闪烁"根因）。
+    /* 自己的浮层（设置面板/超限气泡/悬停 tooltip）展开在条上方、必然覆盖输入区中心：
+     * 若算进遮挡判定，会进 隐藏→复显→再隐藏 的循环（v40 离线复现的"打开设置闪烁"根因；
+     * v41 补 tooltip——会话/工具的长 tooltip 同样盖住输入框中心，悬停 0.4s 后闪一下且 tooltip 消失）。
      * 只豁免 track 的可见性路径；findComposer 找输入框时不用（ownOK 缺省 false）。 */
     function isOwnOverlay(el) {
-      try { return !!(el && el.closest && el.closest(".panel,.zusage-exc")); } catch (e) { return false; }
+      try { return !!(el && el.closest && el.closest("#zusage-tip,.panel,.zusage-exc")); } catch (e) { return false; }
     }
     function reallyVisible(el, ownOK) {
       if (!visible(el)) return false;
