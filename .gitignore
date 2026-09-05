@@ -6,5 +6,6 @@ diag-*.json
 .video_agent/
 .research-tmp/
 .worktrees/
+.zcode/
 config.json
 .update-baseline.json
