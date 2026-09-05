@@ -29,7 +29,7 @@
   }, 0);
 
   function main$() {
-    var VERSION = "v37";   // 每轮递增；悬停状态条可见，用于确认热更新到达
+    var VERSION = "v38";   // 每轮递增；悬停状态条可见，用于确认热更新到达
     var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv" };
 
     /* ---------- 状态 ---------- */
@@ -203,14 +203,19 @@
         /* 超限告警：最近一次"上下文超限被拒"晚于最近成功请求 = 仍处于超限状态（该请求
          * status=error，不进任何 completed 统计，只能这样单独检测）。 */
         var exc = d.ctx_exc > 0 && d.ctx_exc >= (sess.last_at || 0);
-        var cls = exc ? "exc" : pct > 85 ? "hot" : pct > 70 ? "warm" : "ok";
+        /* 水位档位分两套：窗口 ≥100 万时同一百分比的绝对 token 量大，40/60 提前预警；其余维持 70/85。 */
+        var big = cw >= 1000000;
+        var cls = exc ? "exc" : pct >= (big ? 60 : 85) ? "hot" : pct >= (big ? 40 : 70) ? "warm" : "ok";
         var bar = cw ? '<span class="cbar"><i class="' + cls + '" style="width:' +
           Math.min(100, pct).toFixed(1) + '%"></i></span>' : "";
         it(bar + (cw ? '<span class="pct ' + cls + '">' + pct.toFixed(1) + "%</span>"
               : '<span class="v' + (exc ? " exc" : "") + '">' + fmt(sess.ctx) + "</span>"),
           "上下文：当前会话上下文大小（最近一次请求的总输入）÷ 窗口容量\n已用 " +
           fmt(sess.ctx) + " / 窗口 " + fmt(cw) +
-          "\n颜色随水位：<70% 绿 · 70–85% 黄 · >85% 红 · 超限被拒=亮红闪烁" +
+          "\n颜色随水位：" + (big
+            ? "≤40% 绿 · 40–60% 黄 · ≥60% 红（窗口 ≥100 万）"
+            : "<70% 绿 · 70–85% 黄 · ≥85% 红") +
+          " · 超限被拒=亮红闪烁" +
           (exc ? "\n⚠ 上下文超限：最近一次请求超出窗口容量被拒绝（" + fmtTime(d.ctx_exc) +
             "），需要压缩会话或新开会话" : ""));
       }
