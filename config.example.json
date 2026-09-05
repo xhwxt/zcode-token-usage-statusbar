@@ -1,0 +1,7 @@
+{
+  "python_path": "C:\\path\\to\\python.exe",
+  "activity_min_ms": 1500,
+  "heartbeat_ms": 30000,
+  "hot_reload": true,
+  "context_window": 1000000
+}
