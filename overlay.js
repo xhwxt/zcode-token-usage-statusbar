@@ -29,7 +29,7 @@
   }, 0);
 
   function main$() {
-    var VERSION = "v39";   // 每轮递增；悬停状态条可见，用于确认热更新到达
+    var VERSION = "v40";   // 每轮递增；悬停状态条可见，用于确认热更新到达
     var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv" };
 
     /* ---------- 状态 ---------- */
@@ -641,13 +641,20 @@
     }
     /* 输入框是否真的露在屏幕上：中心点命中测试。
      * 设置页等覆盖层不卸载聊天 DOM 也不改几何，只能用 elementFromPoint 判断是否被盖住。 */
-    function reallyVisible(el) {
+    /* 自己的浮层（设置面板/超限气泡）展开在条上方、必然覆盖输入区中心：
+     * 若算进遮挡判定，会进 隐藏→复显→再隐藏 的循环（v40 离线复现的"打开设置闪烁"根因）。
+     * 只豁免 track 的可见性路径；findComposer 找输入框时不用（ownOK 缺省 false）。 */
+    function isOwnOverlay(el) {
+      try { return !!(el && el.closest && el.closest(".panel,.zusage-exc")); } catch (e) { return false; }
+    }
+    function reallyVisible(el, ownOK) {
       if (!visible(el)) return false;
       var r = el.getBoundingClientRect();
       var hit;
       try { hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); } catch (e) { return true; }
       if (!hit) return false;
       if (hit === el || hit.contains(el) || el.contains(hit)) return true;   // 命中自身/祖先/内部装饰层
+      if (ownOK && isOwnOverlay(hit)) return true;
       return false;
     }
     function findComposer() {
@@ -831,6 +838,7 @@
       if (!hit) return false;
       if (hit === el || hit.contains(el) || el.contains(hit)) return true;
       if (cardCache && cardCache.contains(el) && cardCache.contains(hit)) return true;
+      if (isOwnOverlay(hit)) return true;   // 自己的面板/气泡盖住输入框中心不算被盖（v40）
       return false;
     }
     function track() {
@@ -841,7 +849,7 @@
         if (cardCache && cardCache.style.marginBottom !== CARD_MARGIN) ensureCardPad();   // 流式期间 React 重置内联边距时立刻补回
         var r = composer.getBoundingClientRect();
         var on = r.width > 60 && r.height > 14 && r.bottom > 0 && r.top < innerHeight &&
-          (reallyVisible(composer) || coverOK(composer));
+          (reallyVisible(composer, true) || coverOK(composer));
         if (!on) {
           // 迟滞：连续 400ms 判定不可见才隐藏，瞬时失败（流式装饰层等）不闪
           if (!hideSince) hideSince = Date.now();
