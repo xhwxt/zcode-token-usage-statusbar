@@ -29,13 +29,15 @@
   }, 0);
 
   function main$() {
-    var VERSION = "v38";   // 每轮递增；悬停状态条可见，用于确认热更新到达
+    var VERSION = "v39";   // 每轮递增；悬停状态条可见，用于确认热更新到达
     var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv" };
 
     /* ---------- 状态 ---------- */
     var state = {
       show: { win: 1, ctx: 1, today: 1, turn: 0, sub: 1, tools: 1 },
       ctxOv: "", data: null, nativeCtx: 0,
+      excActive: false,   // 当前会话处于"上下文超限被拒"状态（render 时按 picked 会话计算）
+      excGone: false,     // 用户点 ✕ 关闭了本次气泡；超限解除后自动复位
     };
     function ls(k, d) { try { return localStorage.getItem(k) ?? d; } catch (e) { return d; } }
     function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { } }
@@ -116,7 +118,21 @@
       "color:#9aa3b2;white-space:nowrap}" +
       ".ttab:hover{color:#e6ebf3}" +
       ".ttab.on{background:rgba(87,199,255,.18);color:#57c7ff}" +
-      ".tbody{max-height:60vh;overflow:auto}";
+      ".tbody{max-height:60vh;overflow:auto}" +
+      /* 超限告警气泡（v39）：挂 body 的独立浮层（与 .tip 同套路，免受条面重建影响），
+       * 红边警示 + 建议步骤 + 可点击复制的会话 ID；user-select:text 允许手动选中兜底 */
+      ".zusage-exc{position:fixed;max-width:470px;background:rgba(26,15,13,.97);" +
+      "border:1px solid rgba(255,45,85,.55);border-radius:8px;padding:10px 13px;" +
+      "font:13px/1.75 Consolas,'Microsoft YaHei UI',monospace;color:#e8ecf2;" +
+      "box-shadow:0 6px 24px rgba(0,0,0,.55);white-space:normal;z-index:2147483647;" +
+      "user-select:text;display:none}" +
+      ".zusage-exc .xb-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:5px}" +
+      ".zusage-exc .xb-title{font-weight:700;color:#ff2d55}" +
+      ".zusage-exc .xb-close{cursor:pointer;color:#8a93a5;padding:0 3px;font-size:14px;line-height:1}" +
+      ".zusage-exc .xb-close:hover{color:#fff}" +
+      ".zusage-exc .xb-sid{color:#57c7ff;cursor:pointer;text-decoration:underline dotted}" +
+      ".zusage-exc .xb-sid:hover{color:#8adcff}" +
+      ".zusage-exc .xb-copied{color:#35c46f;font-size:12px;margin-left:6px;display:none}";
 
     /* 结构：文字项 + ⚙ 紧跟其后（无弹性空隙，不再推到最右）；面板绝对定位向上展开 */
     var bar = document.createElement("div");
@@ -155,6 +171,46 @@
     bar.style.zIndex = "50";
     document.body.appendChild(bar);
 
+    /* ---------- 超限告警气泡（v39）：当前会话"上下文超限被拒"时自动弹出，随条定位 ---------- */
+    var excBubble = document.createElement("div");
+    excBubble.className = "zusage-exc";
+    /* 热更新防重：上一实例的气泡可能残留（收尾清理只删 bar/tip），先移除旧的再挂新的 */
+    try {
+      document.querySelectorAll(".zusage-exc").forEach(function (el) { if (el !== excBubble) el.remove(); });
+    } catch (e) { }
+    /* 文案只进 textContent/静态 innerHTML；会话 ID 是动态数据，一律走 textContent 防注入 */
+    excBubble.innerHTML =
+      '<div class="xb-head"><span class="xb-title">⚠ 上下文超限</span>' +
+      '<span class="xb-close" aria-label="关闭，本次不再提醒">✕</span></div>' +
+      '<div class="xb-step">最近一次请求因超出上下文窗口容量被拒绝，本轮对话暂时无法继续。建议依次尝试：</div>' +
+      '<div class="xb-step">① 回滚上一轮对话，去掉超限的那次请求后继续；</div>' +
+      '<div class="xb-step">② 换用上下文窗口更大的模型继续，或压缩 / 精简本会话；</div>' +
+      '<div class="xb-step">③ 仍无法解决时，新开一个对话，把下面的会话 ID（必要时连同工作区路径）发给它，' +
+      '让新会话读取本会话的记录文件接手修复。</div>' +
+      '<div>会话 ID：<span class="xb-sid"></span><span class="xb-copied">已复制</span></div>';
+    document.body.appendChild(excBubble);
+    var excSid = excBubble.querySelector(".xb-sid"), excCopied = excBubble.querySelector(".xb-copied");
+    excSid.addEventListener("click", function () {
+      if (stale() || !excSid.textContent) return;
+      try {
+        var ta = document.createElement("textarea");
+        ta.value = excSid.textContent;
+        ta.style.cssText = "position:fixed;left:-9999px;top:0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      } catch (e) { }
+      excCopied.style.display = "inline";
+      clearTimeout(excCopied.timer);
+      excCopied.timer = setTimeout(function () { excCopied.style.display = "none"; }, 1500);
+    });
+    excBubble.querySelector(".xb-close").addEventListener("click", function () {
+      if (stale()) return;
+      state.excGone = true;
+      syncExcBubble();
+    });
+
     var $ = function (id) { return bar.querySelector(id); };
     var main = $("#zu-main"), gear = $("#zu-gear");
 
@@ -166,6 +222,12 @@
       return String(n);
     }
     function sec(ms) { return ms ? (ms / 1000).toFixed(1) + "s" : "–"; }
+
+    /* 超限判定：最近一次"上下文超限被拒"晚于最近成功请求 = 仍处于超限状态（该请求
+     * status=error，不进任何 completed 统计，只能这样单独检测）。html() 与气泡共用。 */
+    function excActive(s) {
+      return !!(s && s.ctx_exc > 0 && s.ctx_exc >= (s.last_at || 0));
+    }
 
     function cachePct(cache, input) {
       // 无原生 title：原生提示向下弹且与自绘 tooltip 双显闪烁（v33 移除），定义见各项 tooltip 明细
@@ -200,9 +262,7 @@
       if (state.show.ctx) {
         var cw = parseInt(state.ctxOv, 10) || state.nativeCtx || d.context_window || 0;
         var pct = cw ? sess.ctx / cw * 100 : 0;
-        /* 超限告警：最近一次"上下文超限被拒"晚于最近成功请求 = 仍处于超限状态（该请求
-         * status=error，不进任何 completed 统计，只能这样单独检测）。 */
-        var exc = d.ctx_exc > 0 && d.ctx_exc >= (sess.last_at || 0);
+        var exc = excActive(sess);
         /* 水位档位分两套：窗口 ≥100 万时同一百分比的绝对 token 量大，40/60 提前预警；其余维持 70/85。 */
         var big = cw >= 1000000;
         var cls = exc ? "exc" : pct >= (big ? 60 : 85) ? "hot" : pct >= (big ? 40 : 70) ? "warm" : "ok";
@@ -375,6 +435,7 @@
         window.__zusageWantSid = (pc && pc.want) || "";   // 泵读取后让 zusage.py 强制纳入该会话
         if (!p) p = stubFor((pc && pc.want) || "");
       }
+      state.excActive = excActive(p);   // 气泡的显示依据（track 每帧消费）
       var view = {
         session: p, last_turn: p.last_turn || {}, last: p.last || {},
         today: d.today, context_window: p.context_window, context_auto: p.context_auto,
@@ -739,6 +800,26 @@
       if (curDisplay !== "none") { bar.style.display = "none"; curDisplay = "none"; }
       hideTip(true, "bar-hidden");   // 条面整体隐藏时 tooltip 必须跟着走（force 绕过总闸）
     }
+    /* 超限气泡同步（track 每帧调）：位置贴条上沿、左缘对齐；条隐藏/超限解除/已关闭则藏。
+     * exc 解除时复位 excGone，下次再超限会重新弹。display 切换与测量在同一同步块内
+     * 完成后才绘制，无首帧闪位。 */
+    function syncExcBubble() {
+      var show = state.excActive && !state.excGone && curDisplay === "flex";
+      if (!show) {
+        if (!state.excActive) state.excGone = false;
+        if (excBubble.style.display !== "none") excBubble.style.display = "none";
+        return;
+      }
+      var sidStr = pickedSid || "（未知）";
+      if (excSid.textContent !== sidStr) excSid.textContent = sidStr;
+      if (excBubble.style.display !== "block") excBubble.style.display = "block";
+      var br = bar.getBoundingClientRect();
+      var r = excBubble.getBoundingClientRect();
+      var left = Math.max(8, Math.round(Math.min(br.left, innerWidth - r.width - 8)));
+      var top = Math.max(8, Math.round(br.top - r.height - 8));
+      if (excBubble.style.left !== left + "px") excBubble.style.left = left + "px";
+      if (excBubble.style.top !== top + "px") excBubble.style.top = top + "px";
+    }
     /* 可见性判定（带卡片豁免）：输入框视觉卡片内部的装饰层（占位符/镜像/焦点层等）
      * 瞬时盖到输入框中心不算"被盖住"——逐帧严格判定会造成显示/隐藏来回横跳（闪烁）；
      * 设置页等真正的覆盖层不在卡片内，仍判为盖住。
@@ -755,6 +836,7 @@
     function track() {
       if (stale()) return;   // 旧实例罢工，把舞台让给新实例
       try {
+        syncExcBubble();   // 超限气泡：显示/隐藏/贴条定位（内部自判状态，隐藏分支零开销）
         if (!composer || !composer.isConnected) { hideSince = 0; hideBar(); return; }
         if (cardCache && cardCache.style.marginBottom !== CARD_MARGIN) ensureCardPad();   // 流式期间 React 重置内联边距时立刻补回
         var r = composer.getBoundingClientRect();
@@ -796,6 +878,7 @@
             bottomGap: Math.round(innerHeight - ar.bottom),
             nativeCtx: state.nativeCtx,
             picked: pickedSid,
+            exc: state.excActive ? (state.excGone ? "on-gone" : "on") : 0,
             href: String(location.href).slice(0, 120),
             lsVals: (function () {
               try {
