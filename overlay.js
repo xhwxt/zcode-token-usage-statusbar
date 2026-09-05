@@ -29,7 +29,7 @@
   }, 0);
 
   function main$() {
-    var VERSION = "v41";   // 每轮递增；悬停状态条可见，用于确认热更新到达
+    var VERSION = "v42";   // 每轮递增；悬停状态条可见，用于确认热更新到达
     var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv" };
 
     /* ---------- 状态 ---------- */
@@ -550,13 +550,20 @@
       var t = e.target;
       if (!t || !t.closest) return;
       if (t.closest("#zusage-tip")) { mouseInBar = true; clearTimeout(tipHideTimer); return; }   // 鼠标移入 tooltip：保持
-      if (t.closest(".panel")) { mouseInBar = true; clearTimeout(tipHideTimer); return; }        // 设置面板上不弹条面 tooltip
+      if (t.closest(".panel")) {
+        /* 面板上不保留条面 tooltip（v42）：开设置的路上触发过条目 tooltip 的话，
+         * 原逻辑在这分支 clearTimeout 反而把它挂住——鼠标在面板里就永不消失。 */
+        mouseInBar = true;
+        if (tipFor) hideTip(true, "panel-hover");
+        return;
+      }
       if (!t.closest("#zusage-bar")) {
         mouseInBar = false;
         if (tipFor) scheduleHide();   // 离开条面：300ms 缓冲后隐藏（计时到点时 mouseInBar 已 false，总闸放行）
         return;
       }
       mouseInBar = true;
+      if (panel.classList.contains("open")) return;   // 面板开着：条面不弹 tooltip（弹出也会被面板盖住，只露边角）
       var el = t.closest(".it");
       if (el) {
         if (el !== tipFor) showTipFor(el);
@@ -586,7 +593,9 @@
     gear.addEventListener("click", function (e) {
       e.stopPropagation();
       syncPanel();
+      var opening = !panel.classList.contains("open");
       panel.classList.toggle("open");
+      if (opening) hideTip(true, "gear-open");   // 移向齿轮的路上可能触发过条目 tooltip，开面板时一并收掉
     });
     panel.addEventListener("change", function (e) {
       var t = e.target;
