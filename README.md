@@ -40,8 +40,8 @@ ZCode 的插件机制（`plugin.json`）只能提供 MCP / skills / commands / h
 前提：Windows；Python 3.8+（零第三方依赖）；fuses `EmbeddedAsarIntegrityValidation=0`（ZCode 当前版本实测为 0）。
 
 ```bash
-git clone https://github.com/<you>/zusage.git   # 仓库名建议用 zusage，也可以用其它名字
-cd zusage
+git clone https://github.com/xhwxt/zcode-token-usage.git
+cd zcode-token-usage
 python install.py
 ```
 
