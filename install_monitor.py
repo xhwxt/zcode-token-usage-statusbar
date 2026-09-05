@@ -8,7 +8,9 @@
    不相交）后，用 diag-<n>.json 的更新时间确认注入链路已加载，显示成功并自动退出。
    diag 是启动后第一次数据拉取就回写的（pushCount==1），空闲也会写，不依赖用户发消息。
 
-手动运行：python install_monitor.py [install_epoch 秒] [app.asar 路径]（缺省用当前时间/默认位置）
+手动运行：python install_monitor.py [install_epoch 秒] [app.asar 路径] [运行时目录]
+（缺省用当前时间/默认 asar 位置；diag 在运行时目录——标准安装是数据目录副本所在，
+ --dev 安装传仓库目录，不传则用本脚本所在目录）
 退出：生效确认后自动退出；或 Ctrl+C / 直接关闭窗口。
 """
 import os
@@ -19,6 +21,7 @@ from pathlib import Path
 
 HERE = Path(__file__).parent.resolve()
 ASAR = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(r"D:\ZCode\resources\app.asar")
+RUNTIME_DIR = Path(sys.argv[3]) if len(sys.argv) > 3 else HERE
 TMP = ASAR.with_name("app.asar.zusage.tmp")
 POLL = 10            # 检测间隔（秒）
 CONFIRM_WAIT = 120   # 重启后等 diag 确认的超时（秒）
@@ -44,7 +47,7 @@ def zcode_pids():
 
 def diag_fresh(since):
     """返回安装时刻之后更新过的 diag 文件名（注入链路已加载的证据），没有则 None。"""
-    for f in sorted(HERE.glob("diag-*.json")):
+    for f in sorted(RUNTIME_DIR.glob("diag-*.json")):
         try:
             if f.stat().st_mtime >= since:
                 return f.name

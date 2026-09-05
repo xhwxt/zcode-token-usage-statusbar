@@ -31,16 +31,18 @@ ASAR = ASAR_DEFAULT          # 可被 set_target() 改指其它安装位置（in
 BAK = ASAR.with_name("app.asar.zusage.bak")
 TMP = ASAR.with_name("app.asar.zusage.tmp")
 HERE = Path(__file__).parent.resolve()
-LOADER = HERE / "inject-main.cjs"
+# 运行时目录：install.py 标准安装时指向数据目录（~/.zcode/zcode-token-usage-statusbar，
+# 经 set_runtime() 切换）；独立运行本脚本或 --dev 安装时保持仓库目录（向后兼容）。
+RUNTIME = HERE
+LOADER = RUNTIME / "inject-main.cjs"
 ENTRY = "out/main/index.js"
 # 入口是 ESM（package.json type:module，实测 2026-09-04）：必须用 dynamic import（CJS/ESM 通用），
 # 指向 .cjs loader（在 type:module 包里仍按 CJS 加载，require 可用）；asar 内相对路径不可用，用绝对 file URL。
-INJECT_LINE = (
-    '\n;import("{url}").then(() => null, (e) => console.error("[zusage] load failed", e));'.format(
-        url=(HERE / "inject-main.cjs").as_uri()
-    )
+INJECT_LINE_TMPL = (
+    '\n;import("{url}").then(() => null, (e) => console.error("[zusage] load failed", e));'
 )
-# 匹配任何 zusage 注入行（不限当前目录）——迁移/重装时剥离旧行用
+INJECT_LINE = INJECT_LINE_TMPL.format(url=(RUNTIME / "inject-main.cjs").as_uri())
+# 匹配任何 zusage 注入行（不限当前目录）——迁移/重装/标准↔dev 互切时剥离旧行用
 ZUSAGE_LINE_RE = re.compile(
     rb'\n;import\("[^"]*inject-main\.cjs"\)\.then\(\(\) => null, '
     rb'\(e\) => console\.error\("\[zusage\] load failed", e\)\);'
@@ -48,6 +50,15 @@ ZUSAGE_LINE_RE = re.compile(
 ZCODE_EXE = Path(r"D:\ZCode\ZCode.exe")
 ALIGN = 4
 BLOCK = 4194304
+
+
+def set_runtime(path):
+    """改运行时目录（LOADER/INJECT_LINE 随动）。ZCode 端泵的全套路径都基于 __dirname，
+    运行时副本目录即自洽运行，无需改运行时代码。"""
+    global RUNTIME, LOADER, INJECT_LINE
+    RUNTIME = Path(path)
+    LOADER = RUNTIME / "inject-main.cjs"
+    INJECT_LINE = INJECT_LINE_TMPL.format(url=LOADER.as_uri())
 
 
 def set_target(asar_path):
@@ -80,7 +91,7 @@ def launch_monitor(epoch):
         return
     try:
         return subprocess.Popen(
-            [sys.executable, str(monitor), "%.3f" % epoch, str(ASAR)],
+            [sys.executable, str(monitor), "%.3f" % epoch, str(ASAR), str(RUNTIME)],
             creationflags=subprocess.CREATE_NEW_CONSOLE, cwd=str(HERE),
         )
     except OSError as e:

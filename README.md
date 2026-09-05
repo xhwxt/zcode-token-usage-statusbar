@@ -24,16 +24,16 @@ ZCode 的插件机制（`plugin.json`）只能提供 MCP / skills / commands / h
 
 | 文件 | 作用 |
 |---|---|
-| `install.py` | **一键安装**：探测 ZCode 安装位置 → 生成 config.json → 注入 asar → 注册 MCP → 装 /usage 命令 → 弹监控窗口。`--remove` 卸载，`--dry-run` 预览，`--no-mcp` 只装状态条。 |
+| `install.py` | **一键安装**：探测 ZCode 安装位置 → 复制运行时到数据目录 → 生成 config → 注入 asar → 注册 MCP → 装 /usage 命令 → 弹监控窗口。`--remove` 卸载，`--dry-run` 预览，`--no-mcp` 只装状态条，`--dev` 开发模式（不复制，注入直指本仓库目录）。 |
 | `overlay.js` | 状态条本体（渲染进程注入，自包含 IIFE）。fixed 悬浮在**输入框视觉卡片正下方**（给卡片加 margin-bottom 上移让位），rAF 每帧跟随。勿把条放进输入框中心点所在矩形——命中检测自遮挡会造成周期性闪烁（v12-v14 实测）。 |
 | `inject-main.cjs` | 主进程 loader：向每个窗口注入 overlay.js + **触发式监听 db 写入**（fs.watch db 目录，有写入→去抖 300ms→查询推送；空闲零进程零轮询，仅 30s 兜底心跳）。 |
 | `patch_install.py` | asar 注入/卸载工具（install.py 的底层，可单独用）：备份 → 在入口 `out/main/index.js` 尾部追加 dynamic import 行 → 重打包 → 自检 → 原子替换。幂等，自动替换旧注入行（迁移友好）。安装成功自动弹出监控窗口。 |
 | `install_monitor.py` | 安装监控窗口（常驻命令行，每 10 秒检测一次）：持续提醒重启 ZCode；重启后通过 diag 更新确认注入加载，显示成功并自动退出。运行中原子替换失败（生成 .tmp）时，它还会在 ZCode 退出后自动完成替换——**收尾不依赖计划任务**。 |
 | `zusage.py` | 查询库 + CLI + 机器可读快照（`json` 子命令，状态条数据源）。 |
 | `usage_mcp.py` | 零依赖 stdio MCP server。 |
-| `config.example.json` | 运行配置模板（复制为 `config.json` 使用；`config.json` 含本机路径，不入库）。 |
+| `config.example.json` | 运行配置模板（安装时生成到数据目录的 `config.json`；含本机路径，不入库）。 |
 
-`diag-<n>.json` 是运行时诊断产物（每窗口一份，主进程定期回写），已 gitignore。
+**数据目录 `~/.zcode/zcode-token-usage-statusbar/`** 是标准安装的运行目录：运行时副本（`inject-main.cjs`/`overlay.js`/`zusage.py`/`usage_mcp.py`）、`config.json`、诊断产物 `diag-<n>.json`（每窗口一份，主进程定期回写）都在这里。本仓库只是源码，**clone 目录可以随意搬走或删除，不影响已安装的实例**。
 
 ## 安装
 
@@ -45,7 +45,7 @@ cd zcode-token-usage-statusbar
 python install.py
 ```
 
-一条命令完成：探测 ZCode 安装位置（找不到时询问，或 `--asar` 指定）→ 生成 config.json → 注入 asar → 注册 MCP（server 名 `zcode-token-usage-statusbar`）→ 安装 /usage 命令 → 弹出「安装监控」窗口（每 10 秒检测一次，提醒重启 ZCode；重启后检测到注入加载即显示成功并自动关闭；万一运行中原子替换失败，监控窗口会在你退出 ZCode 后自动完成替换）。
+一条命令完成：探测 ZCode 安装位置（找不到时询问，或 `--asar` 指定）→ **复制运行时到数据目录 `~/.zcode/zcode-token-usage-statusbar/`** → 迁移/生成 config.json → 注入 asar（注入行指向数据目录副本）→ 注册 MCP（server 名 `zcode-token-usage-statusbar`，指向数据目录副本）→ 安装 /usage 命令 → 弹出「安装监控」窗口（每 10 秒检测一次，提醒重启 ZCode；重启后检测到注入加载即显示成功并自动关闭；万一运行中原子替换失败，监控窗口会在你退出 ZCode 后自动完成替换）。
 
 **ZCode 升级会覆盖 app.asar，重跑一次 `python install.py` 即可**（监控窗口提示"未检测到注入加载"通常就是这个原因）。
 
@@ -53,14 +53,17 @@ python install.py
 <summary>手动分步安装（等价于 install.py 做的事）</summary>
 
 ```bash
-# 0) 配置：从模板复制，改 python_path 为你的 python.exe 绝对路径
-copy config.example.json config.json
+# 0) 数据目录：复制运行时 + 配置（改 python_path 为你的 python.exe 绝对路径）
+mkdir -p ~/.zcode/zcode-token-usage-statusbar
+cp inject-main.cjs overlay.js zusage.py usage_mcp.py ~/.zcode/zcode-token-usage-statusbar/
+cp config.example.json ~/.zcode/zcode-token-usage-statusbar/config.json   # 然后编辑它
 
-# 1) 状态条：注入 asar（ZCode 运行中也可执行；ZCode 不在 D:\ZCode 时先改脚本顶部 ASAR）
+# 1) 状态条：注入 asar（注入行须指向数据目录的 inject-main.cjs；ZCode 运行中也可执行；
+#    ZCode 不在 D:\ZCode 时先改脚本顶部 ASAR，或直接用 install.py）
 python patch_install.py install
 
-# 2) MCP：在 ~/.zcode/cli/config.json 的 mcp.servers 注册：
-#   "zcode-token-usage-statusbar": { "command": "<python 绝对路径>", "args": ["D:\path\to\zcode-token-usage-statusbar\usage_mcp.py"] }
+# 2) MCP：在 ~/.zcode/cli/config.json 的 mcp.servers 注册（指向数据目录副本）：
+#   "zcode-token-usage-statusbar": { "command": "<python 绝对路径>", "args": ["<home>/.zcode/zcode-token-usage-statusbar/usage_mcp.py"] }
 
 # 3) /usage 命令：把 usage.command.md 复制到 ~/.zcode/commands/usage.md
 ```
@@ -69,14 +72,18 @@ python patch_install.py install
 
 ## 更新规则（重要）
 
+改的是**仓库源码**，生效分两步：`git pull` 后重跑 `python install.py` 同步到数据目录副本，再按下表生效（注入行不变时 asar 不重打包，重跑是秒级）：
+
 | 改了什么 | 生效方式 |
 |---|---|
-| `overlay.js` | `hot_reload` 开着时 ~2 秒热更新，免重启（loader 检测 mtime，`new Function` 语法校验通过才注入，防载入写一半的文件）；`hot_reload: false` 关闭后改完需重启 |
-| `zusage.py` | 下次轮询即生效（每次轮询都是新进程） |
-| `config.json` | 下次拉取时生效（拉取由 db 写入触发；完全空闲时最迟一个兜底心跳，默认 30s） |
-| `inject-main.cjs` 本身 / 首次安装 / 目录迁移 | 需重启 ZCode；**目录迁移只需重跑 `python install.py`**（注入行含绝对路径，脚本自动替换旧行） |
+| `overlay.js` | 重跑 install.py 同步副本后，`hot_reload` 开着时 ~2 秒热更新，免重启（loader 检测副本 mtime，`new Function` 语法校验通过才注入，防载入写一半的文件）；`hot_reload: false` 关闭后改完需重启 |
+| `zusage.py` | 重跑 install.py 同步副本后，下次轮询即生效（每次轮询都是新进程） |
+| `config.json`（数据目录） | 下次拉取时生效（拉取由 db 写入触发；完全空闲时最迟一个兜底心跳，默认 30s） |
+| `inject-main.cjs` 本身 / 首次安装 / 标准↔dev 互切 | 重跑 `python install.py` 后**需重启 ZCode**（注入行含绝对路径，脚本自动替换旧行） |
 
 ## 配置（config.json）
+
+位置：标准安装在数据目录 `~/.zcode/zcode-token-usage-statusbar/config.json`（`--dev` 安装在仓库目录）。
 
 ```json
 {
@@ -101,7 +108,7 @@ python patch_install.py install
 
 ## 诊断与排查
 
-状态条异常时先看 `diag-<n>.json`（每窗口一份，只有成功挂载过的窗口才写，防止后台空窗口污染）。注意：拉取由 db 写入触发，**完全空闲时 diag 不更新属正常**（无变化可记录）；但客户端**启动后第一次拉取**必写（监控窗口据此确认注入生效）。
+状态条异常时先看数据目录里的 `diag-<n>.json`（`~/.zcode/zcode-token-usage-statusbar/`；`--dev` 安装在仓库目录。每窗口一份，只有成功挂载过的窗口才写，防止后台空窗口污染）。注意：拉取由 db 写入触发，**完全空闲时 diag 不更新属正常**（无变化可记录）；但客户端**启动后第一次拉取**必写（监控窗口据此确认注入生效）。
 
 - `fatal` / `trackErr`：脚本异常与堆栈。
 - `mount`：挂载诊断——`composerRect`/`anchorRect`/`barRect`（坐标）、`barHit`（**条中心点的命中元素**：条显示不出来但坐标正常时，看这里被谁盖住）、`nativeCtx`（原生窗口读数）。
@@ -145,13 +152,13 @@ python patch_install.py install
 ## 卸载
 
 ```bash
-python install.py --remove    # 恢复原版 asar（需先退出 ZCode）+ 移除 MCP 注册与 /usage 命令
+python install.py --remove    # 恢复原版 asar（需先退出 ZCode）+ 移除 MCP 注册与 /usage 命令 + 删除数据目录
 # 或只卸状态条：python patch_install.py remove
 ```
 
 ## 目录迁移
 
-整个仓库放任意目录都可用：`patch_install.py`、`install.py`、`zusage.py`、`usage_mcp.py`、`install_monitor.py` 按 `__file__` 自身定位，`inject-main.cjs` 用 `__dirname`。**搬目录后重跑 `python install.py`** 即可（会自动把 asar 里的旧注入行替换成新路径，无需先 remove）。
+标准安装下 clone 目录只是源码：**删掉或搬走都不影响已安装的实例**（注入行与 MCP 注册指向数据目录 `~/.zcode/zcode-token-usage-statusbar/`，运行时全套基于 `__dirname`/`__file__` 自定位）。换机器/换目录重新 clone 后重跑 `python install.py` 即可，会自动替换 asar 里的旧注入行（无需先 remove）。开发者改代码想即时生效用 `python install.py --dev`（注入直指仓库目录，改文件热更新即达；切回标准形态重跑不带 `--dev` 的 install 即可）。
 
 ## License
 
