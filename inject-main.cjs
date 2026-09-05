@@ -58,16 +58,16 @@ function isMainWindowState(wc) {
   try { return wc.getType() === "window"; } catch (e) { return false; }
 }
 
-function pushOnce(wc, json) {
-  if (!isMainWindowState(wc) || wc.isDestroyed()) return;
+function pushOnce(wc, payload) {
+  if (!isMainWindowState(wc) || wc.isDestroyed() || !payload || typeof payload !== "object") return;
   /* 按窗口注入 mine（本窗口焦点会话 id，可为空串 = 该窗口当前无会话）：
-   * overlay 收到 mine 字段就优先显示它，不再多窗口共享同一个猜测。 */
-  let js;
-  if (activeSid.has(wc.id) && json.endsWith("}")) {
-    js = `window.__zusageUpdate && window.__zusageUpdate(${json.slice(0, -1)},"mine":${JSON.stringify(activeSid.get(wc.id) || "")})`;
-  } else {
-    js = `window.__zusageUpdate && window.__zusageUpdate(${json})`;
-  }
+   * overlay 收到 mine 字段就优先显示它，不再多窗口共享同一个猜测。
+   * 必须对象合并后序列化，禁止对 JSON 字符串做括号手术——v34 首版 slice 掐尾少补一个
+   * 右括号，生成语法错误代码且失败只进静默 catch，全部窗口停在初始零值（实测翻车）。 */
+  const obj = activeSid.has(wc.id) ? Object.assign({}, payload, { mine: activeSid.get(wc.id) || "" }) : payload;
+  /* U+2028/2029 转义：JSON.stringify 会输出裸字符，放进 executeJavaScript 字符串字面量
+   * 有语法风险（zusage.py 侧 ensure_ascii 的同款考量；会话标题可能含任意文本） */
+  const js = `window.__zusageUpdate && window.__zusageUpdate(${JSON.stringify(obj).replace(/[\u2028\u2029]/g, (c) => c === "\u2028" ? "\\u2028" : "\\u2029")})`;
   wc.executeJavaScript(js, true).catch(() => { });
 }
 
@@ -129,8 +129,7 @@ function spawnQuery(wants) {
       let payload;
       try { payload = JSON.parse(out); } catch (e) { payload = null; }
       if (payload) {
-        const json = JSON.stringify(payload);
-        for (const wc of webContents.getAllWebContents()) pushOnce(wc, json);
+        for (const wc of webContents.getAllWebContents()) pushOnce(wc, payload);
       }
     }
     // 定位诊断：每 ~15 次拉取收集每个窗口各自的 __zusageDiag，附加泵侧证据后写 diag-<n>.json（多窗口互不覆盖）
@@ -146,7 +145,7 @@ function spawnQuery(wants) {
               try {
                 const obj = JSON.parse(s);
                 obj.pump = {
-                  version: 6,
+                  version: 7,
                   activeMap: Array.from(activeSid.entries()).slice(0, 12),
                   wants: lastWants,
                 };
@@ -245,4 +244,4 @@ const hook = (wc) => {
 app.on("web-contents-created", (e, wc) => hook(wc));
 for (const wc of webContents.getAllWebContents()) hook(wc);
 
-LOG("injected v6, trigger mode (per-window active session via IPC, fs.watch db dir, activity_min_ms/heartbeat_ms, query timeout 15s)");
+LOG("injected v7, trigger mode (per-window active session via IPC, fs.watch db dir, activity_min_ms/heartbeat_ms, query timeout 15s)");
