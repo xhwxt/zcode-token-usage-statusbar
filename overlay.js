@@ -29,7 +29,7 @@
   }, 0);
 
   function main$() {
-    var VERSION = "v34";   // 每轮递增；悬停状态条可见，用于确认热更新到达
+    var VERSION = "v37";   // 每轮递增；悬停状态条可见，用于确认热更新到达
     var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv" };
 
     /* ---------- 状态 ---------- */
@@ -69,7 +69,7 @@
        * tips 全部错位一位且末项为 null —— v31"悬停只有空胶囊/内容错位"的根因 */
       ".it{display:flex;align-items:center;gap:5px}" +
       ".sep{color:#39414f;flex:0 0 auto}" +
-      ".k{color:#8a93a5}.v{color:#e6ebf3}.tps{color:#57c7ff}" +
+      ".k{color:#8a93a5}.v{color:#e6ebf3}" +
       ".pct{font-weight:700}.warm{color:#ffc53d}.hot{color:#ff7a59}.ok{color:#35c46f}" +
       ".exc{color:#ff2d55;text-shadow:0 0 6px rgba(255,45,85,.55)}" +
       ".dim{color:#6b7484}.btn{cursor:pointer;padding:0 4px;border-radius:3px;color:#77808f}" +
@@ -193,9 +193,9 @@
       var items = [], tips = [];
       function it(inner, tip) { items.push('<span class="it">' + inner + "</span>"); tips.push(tip || null); }
       if (last.tps) {   // 最近一次请求的生成速度，置顶显示；随数值三档变色
-        var tpsCls = last.tps >= 20 ? "tps" : last.tps >= 8 ? "v" : "dim";
+        var tpsCls = last.tps >= 70 ? "ok" : last.tps >= 40 ? "warm" : "hot";
         it('<span class="' + tpsCls + '">' + last.tps + '</span><span class="dim">t/s</span>',
-          "生成速度：最近完成请求的输出 tokens ÷ 生成耗时（首 token → 完成）\n≥20 t/s 青色 · 8–20 亮白 · <8 灰色");
+          "生成速度：最近完成请求的输出 tokens ÷ 生成耗时（首 token → 完成）\n≥70 t/s 绿色 · 40–70 黄色 · <40 红色");
       }
       if (state.show.ctx) {
         var cw = parseInt(state.ctxOv, 10) || state.nativeCtx || d.context_window || 0;
