@@ -29,7 +29,7 @@
   }, 0);
 
   function main$() {
-    var VERSION = "v52";   // 每轮递增；悬停状态条可见，用于确认热更新到达
+    var VERSION = "v53";   // 每轮递增；悬停状态条可见，用于确认热更新到达
     var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv" };
 
     /* ---------- 状态 ---------- */

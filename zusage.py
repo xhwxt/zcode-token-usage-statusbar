@@ -320,11 +320,13 @@ def _session_snapshot(con, sid, cfg):
         (sid,),
     ).fetchall()
     # 子代理任务名：Agent 工具调用 part 的 input.description（与右侧"子智能体目录"面板同源）。
-    # 历史 part 不带 childSessionId，按 UI 的 title 规则反向关联：子会话 title（去 "..."）是
-    # prompt 前缀，同前缀并行/重试场景用创建时间最近邻（实测差 20~230ms）+ 消去法配对。
+    # 主关联用官方回执：完成后 part.state.output 尾部带 "agentId: agent_xxx" 行，
+    # 子会话 id 即 "sess_subagent_"+agentId（客户端自己的硬关联，无歧义）。
+    # 兜底只给运行中尚未出现回执的条目：prompt 前缀匹配且候选唯一才绑（同前缀多候选宁可
+    # 无名，不做时间猜测——历史 part 不带 childSessionId，时间最近邻存在错位风险）。
     sub_tasks = {}
     if sub_rows:
-        sub_info = [(r[0], r[2], r[11] or 0) for r in sub_rows]
+        sub_info = [(r[0], r[2]) for r in sub_rows]
         agent_parts = []
         for prow in con.execute(
             """select data, time_created from part
@@ -333,21 +335,26 @@ def _session_snapshot(con, sid, cfg):
         ):
             try:
                 o = json.loads(prow[0])
-                inp = (o.get("state") or {}).get("input") or {}
+                st = o.get("state") or {}
+                inp = st.get("input") or {}
                 desc = str(inp.get("description") or "").strip()
                 if desc:
-                    agent_parts.append((desc, str(inp.get("prompt") or "").strip(), prow[1] or 0))
+                    agent_parts.append((desc, str(inp.get("prompt") or "").strip(),
+                                        str(st.get("output") or "")))
             except Exception:
                 continue   # part.data 解析失败跳过该条，不影响其余
-        used = set()
-        for desc, prompt, pt in agent_parts:
-            cands = [x for x in sub_info if x[0] not in used and _prompt_matches(x[1], prompt)]
-            if not cands:
-                cands = [x for x in sub_info if x[0] not in used and abs((x[2] or 0) - pt) < 5000]
-            if cands:
-                best = min(cands, key=lambda x: abs((x[2] or 0) - pt))
-                sub_tasks[best[0]] = desc
-                used.add(best[0])
+        for desc, _prompt, out in agent_parts:
+            m = re.search(r"(?:^|\n)agentId:\s*([^\s(]+)", out)
+            if m:
+                sub_tasks["sess_subagent_" + m.group(1)] = desc
+        used = set(sub_tasks)
+        for desc, prompt, out in agent_parts:
+            if re.search(r"(?:^|\n)agentId:\s*([^\s(]+)", out):
+                continue   # 已走回执关联
+            cands = [x[0] for x in sub_info if x[0] not in used and _prompt_matches(x[1], prompt)]
+            if len(cands) == 1:
+                sub_tasks[cands[0]] = desc
+                used.add(cands[0])
     now_ms = int(time.time() * 1000)
     sub = {
         "requests": sum(r[3] for r in sub_rows),
