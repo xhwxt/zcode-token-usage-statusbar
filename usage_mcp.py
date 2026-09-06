@@ -13,6 +13,8 @@ import zusage  # noqa: E402
 
 PROTOCOL_VERSION = "2024-11-05"
 
+L = zusage.L   # 输出语言与 CLI 同源（config.json 的 "lang"）
+
 
 def tool_token_usage(scope: str = "current") -> str:
     con = zusage.connect()
@@ -43,20 +45,26 @@ def tool_token_usage(scope: str = "current") -> str:
                 ).fetchall()
                 rows = [(r[0],) for r in m]
             if not rows:
-                return f"未找到 id 前缀为 {prefix!r} 的会话"
+                return L(f"未找到 id 前缀为 {prefix!r} 的会话",
+                         f"No session found with id prefix {prefix!r}")
             sid = rows[0][0]
             sess = con.execute("select * from session where id=?", (sid,)).fetchone()
             u = zusage.session_usage(con, sid)
-            head = f"■ 会话 {sid}"
+            head = L(f"■ 会话 {sid}", f"■ Session {sid}")
             if sess is not None:
                 head += f"  {sess['title']}"
-            return (
-                f"{head}\n  {u['turns']} 轮 / {u['requests']} 次请求\n"
+            body = L(
+                f"  {u['turns']} 轮 / {u['requests']} 次请求\n"
                 f"  input {zusage.fmt(u['input'])} (cache read {zusage.fmt(u['cache_read'])})  "
                 f"output {zusage.fmt(u['output'])}  合计 {zusage.fmt(u['total'])}\n"
-                f"  上下文容量 ≈ {zusage.fmt(u['last_request_input'])} tokens"
-            )
-        return f"未知 scope: {scope!r}。可用: current | today | week | days:N | sessions[:N] | models[:days] | session:<id前缀>"
+                f"  上下文容量 ≈ {zusage.fmt(u['last_request_input'])} tokens",
+                f"  {u['turns']} turns / {u['requests']} requests\n"
+                f"  input {zusage.fmt(u['input'])} (cache read {zusage.fmt(u['cache_read'])})  "
+                f"output {zusage.fmt(u['output'])}  total {zusage.fmt(u['total'])}\n"
+                f"  context capacity ≈ {zusage.fmt(u['last_request_input'])} tokens")
+            return f"{head}\n{body}"
+        return L(f"未知 scope: {scope!r}。可用: current | today | week | days:N | sessions[:N] | models[:days] | session:<id前缀>",
+                 f"Unknown scope: {scope!r}. Available: current | today | week | days:N | sessions[:N] | models[:days] | session:<id prefix>")
     finally:
         con.close()
 
@@ -65,16 +73,19 @@ TOOLS = [
     {
         "name": "token_usage",
         "description": (
-            "查询 ZCode 的 token 用量（数据来自本地 db.sqlite，只读）。"
-            "scope 可选: current(当前会话+今日,默认), today, week, days:N(近N天每日), "
-            "sessions:N(最近N个会话), models:days(按模型), session:<id前缀>(指定会话)。"
+            L("查询 ZCode 的 token 用量（数据来自本地 db.sqlite，只读）。"
+              "scope 可选: current(当前会话+今日,默认), today, week, days:N(近N天每日), "
+              "sessions:N(最近N个会话), models:days(按模型), session:<id前缀>(指定会话)。",
+              "Query ZCode token usage (from the local db.sqlite, read-only). "
+              "scope: current(current session+today, default), today, week, days:N(last N days per day), "
+              "sessions:N(last N sessions), models:days(by model), session:<id prefix>(specific session).")
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "scope": {
                     "type": "string",
-                    "description": "查询范围，默认 current",
+                    "description": L("查询范围，默认 current", "Query scope, default current"),
                 }
             },
         },
@@ -120,7 +131,7 @@ def main():
                 reply(
                     req_id,
                     {
-                        "content": [{"type": "text", "text": f"查询失败: {e}"}],
+                        "content": [{"type": "text", "text": L(f"查询失败: {e}", f"Query failed: {e}")}],
                         "isError": True,
                     },
                 )

@@ -54,6 +54,28 @@ def _epoch_ms(dt):
     return int(dt.timestamp() * 1000)
 
 
+def _load_lang():
+    """CLI/MCP 输出语言：config.json 的 "lang"（zh/en，缺省 zh）——与安装器/监控窗口同源。
+    查找顺序：脚本目录（--dev/仓库直跑）→ 标准数据目录（标准安装的 config 不在脚本目录）。"""
+    for base in (CONFIG_PATH,
+                 Path.home() / ".zcode" / "zcode-token-usage-statusbar" / "config.json"):
+        try:
+            lang = json.loads(base.read_text(encoding="utf-8")).get("lang")
+            if lang in ("zh", "en"):
+                return lang
+        except (OSError, ValueError):
+            pass
+    return "zh"
+
+
+_LANG = _load_lang()
+
+
+def L(zh, en):
+    """双语输出（与 install.py / overlay.js 的 L 同款约定）。"""
+    return en if _LANG == "en" else zh
+
+
 def fmt(n):
     n = n or 0
     if n >= 1_000_000:
@@ -180,56 +202,68 @@ def render_current(con):
     sess, u = current_session(con)
     lines = []
     if sess is not None:
-        mark = "🟢 活跃" if u["active"] else "⚪ 闲置"
-        lines.append(f"■ 当前会话 [{mark}]  {sess['title']}")
+        mark = L("🟢 活跃", "🟢 active") if u["active"] else L("⚪ 闲置", "⚪ idle")
+        lines.append(L(f"■ 当前会话 [{mark}]  ", f"■ Current session [{mark}]  ") + sess["title"])
         if sess["directory"]:
-            lines.append(f"  目录: {sess['directory']}")
+            lines.append(L(f"  目录: {sess['directory']}", f"  dir: {sess['directory']}"))
         lines.append(
-            f"  {u['turns']} 轮 / {u['requests']} 次请求 / {u['tool_calls']} 次工具调用"
+            L(f"  {u['turns']} 轮 / {u['requests']} 次请求 / {u['tool_calls']} 次工具调用",
+              f"  {u['turns']} turns / {u['requests']} requests / {u['tool_calls']} tool calls")
         )
         lines.append(
-            f"  input {fmt(u['input'])} (其中 cache read {fmt(u['cache_read'])})  "
-            f"output {fmt(u['output'])}  合计 {fmt(u['total'])}"
+            L(f"  input {fmt(u['input'])} (其中 cache read {fmt(u['cache_read'])})  "
+              f"output {fmt(u['output'])}  合计 {fmt(u['total'])}",
+              f"  input {fmt(u['input'])} (incl. cache read {fmt(u['cache_read'])})  "
+              f"output {fmt(u['output'])}  total {fmt(u['total'])}")
         )
-        lines.append(f"  上下文容量 ≈ {fmt(u['last_request_input'])} tokens (最近一次请求输入)")
+        lines.append(L(f"  上下文容量 ≈ {fmt(u['last_request_input'])} tokens (最近一次请求输入)",
+                       f"  context capacity ≈ {fmt(u['last_request_input'])} tokens (latest request input)"))
         if u["last_activity"]:
-            lines.append(f"  最后活动: {u['last_activity']:%H:%M:%S}")
+            lines.append(L(f"  最后活动: {u['last_activity']:%H:%M:%S}",
+                           f"  last activity: {u['last_activity']:%H:%M:%S}"))
         lines.append("")
     today = range_usage(con, _epoch_ms(_day_start()), _epoch_ms(_day_start() + timedelta(days=1)))
-    lines.append(f"■ 今日 ({datetime.now():%Y-%m-%d %a})")
+    lines.append(L(f"■ 今日 ({datetime.now():%Y-%m-%d %a})", f"■ Today ({datetime.now():%Y-%m-%d %a})"))
     lines.append(
-        f"  {today[0]} 次请求  input {fmt(today[1])} (cache read {fmt(today[3])})  "
-        f"output {fmt(today[2])}  合计 {fmt(today[4])}"
+        L(f"  {today[0]} 次请求  input {fmt(today[1])} (cache read {fmt(today[3])})  "
+          f"output {fmt(today[2])}  合计 {fmt(today[4])}",
+          f"  {today[0]} requests  input {fmt(today[1])} (cache read {fmt(today[3])})  "
+          f"output {fmt(today[2])}  total {fmt(today[4])}")
     )
     return "\n".join(lines)
 
 
 def render_days(con, days):
-    lines = [f"■ 近 {days} 天每日用量 (合计=input+output)"]
+    lines = [L(f"■ 近 {days} 天每日用量 (合计=input+output)", f"■ Last {days} days (total=input+output)")]
     for label, r in daily_usage(con, days):
         bar = "█" * max(0, min(30, int(r[4] / 200_000)))
         lines.append(
-            f"  {label}  {r[0]:>4} 次  in {fmt(r[1]):>8}  out {fmt(r[2]):>7}  合计 {fmt(r[4]):>8}  {bar}"
+            L(f"  {label}  {r[0]:>4} 次  in {fmt(r[1]):>8}  out {fmt(r[2]):>7}  合计 {fmt(r[4]):>8}  {bar}",
+              f"  {label}  {r[0]:>4} req  in {fmt(r[1]):>8}  out {fmt(r[2]):>7}  total {fmt(r[4]):>8}  {bar}")
         )
     return "\n".join(lines)
 
 
 def render_sessions(con, limit=10):
-    lines = [f"■ 最近 {limit} 个会话"]
+    lines = [L(f"■ 最近 {limit} 个会话", f"■ Last {limit} sessions")]
     for sid, title, d, n, inp, outp, total, last in recent_sessions(con, limit):
         t = _ts(last)
+        if _LANG == "en" and title == "(无标题)":
+            title = "(untitled)"
         lines.append(
-            f"  {t:%m-%d %H:%M}  {fmt(total):>8}  ({fmt(inp)} in / {fmt(outp)} out, {n} 请求)  "
-            f"{title[:40]}  [{sid[:13]}]"
+            L(f"  {t:%m-%d %H:%M}  {fmt(total):>8}  ({fmt(inp)} in / {fmt(outp)} out, {n} 请求)  ",
+              f"  {t:%m-%d %H:%M}  {fmt(total):>8}  ({fmt(inp)} in / {fmt(outp)} out, {n} requests)  ")
+            + f"{title[:40]}  [{sid[:13]}]"
         )
     return "\n".join(lines)
 
 
 def render_models(con, days=7):
-    lines = [f"■ 近 {days} 天按模型"]
+    lines = [L(f"■ 近 {days} 天按模型", f"■ Last {days} days by model")]
     for prov, model, n, inp, outp, total in model_usage(con, days):
         lines.append(
-            f"  {model:<22} {n:>5} 次  in {fmt(inp):>8}  out {fmt(outp):>7}  合计 {fmt(total):>8}  ({prov})"
+            L(f"  {model:<22} {n:>5} 次  in {fmt(inp):>8}  out {fmt(outp):>7}  合计 {fmt(total):>8}  ({prov})",
+              f"  {model:<22} {n:>5} req  in {fmt(inp):>8}  out {fmt(outp):>7}  total {fmt(total):>8}  ({prov})")
         )
     return "\n".join(lines)
 
@@ -654,7 +688,7 @@ def main(argv):
         while True:
             print("\x1b[2J\x1b[H", end="")
             print(render_current(con), flush=True)
-            print(f"\n(每 {sec}s 刷新, Ctrl+C 退出)", flush=True)
+            print(L(f"\n(每 {sec}s 刷新, Ctrl+C 退出)", f"\n(refreshes every {sec}s, Ctrl+C to quit)"), flush=True)
             time.sleep(sec)
     else:
         print(__doc__)
@@ -663,11 +697,12 @@ def main(argv):
 
 def render_today(con):
     today = range_usage(con, _epoch_ms(_day_start()), _epoch_ms(_day_start() + timedelta(days=1)))
-    return (
-        f"■ 今日 ({datetime.now():%Y-%m-%d %a})\n"
-        f"  {today[0]} 次请求  input {fmt(today[1])} (cache read {fmt(today[3])})  "
-        f"output {fmt(today[2])}  合计 {fmt(today[4])}"
-    )
+    head = L(f"■ 今日 ({datetime.now():%Y-%m-%d %a})", f"■ Today ({datetime.now():%Y-%m-%d %a})")
+    row = L(f"  {today[0]} 次请求  input {fmt(today[1])} (cache read {fmt(today[3])})  "
+            f"output {fmt(today[2])}  合计 {fmt(today[4])}",
+            f"  {today[0]} requests  input {fmt(today[1])} (cache read {fmt(today[3])})  "
+            f"output {fmt(today[2])}  total {fmt(today[4])}")
+    return head + "\n" + row
 
 
 if __name__ == "__main__":

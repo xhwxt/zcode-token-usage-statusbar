@@ -16,6 +16,7 @@ asar 注入行与 MCP 注册都指向数据目录 —— 之后 clone 目录可�
                                   #   （作者迭代用，改仓库文件即时热更新；与标准形态重跑 install 即互切）
   python install.py --remove      # 卸载：恢复原版 asar + 移除 MCP 注册与命令 + 删除数据目录
   python install.py --dry-run     # 打印将执行的动作，不写任何文件
+  python install.py --lang en     # 安装器与各组件的输出语言（zh/en；写入 config.json 供 CLI/MCP 沿用）
 
 升级：git pull 后重跑 python install.py —— 注入行不变则 asar 不重打包（秒级），
 overlay 副本刷新后由泵 2 秒内热重载；改了 inject-main.cjs（泵）才需要重启 ZCode。
@@ -48,9 +49,26 @@ ASAR_CANDIDATES = [
     r"%ProgramFiles%\ZCode\resources\app.asar",
 ]
 
+LANG = "zh"   # 输出语言（main 里按 --lang / 已有 config.json 确定）
+
+
+def L(zh, en):
+    """双语输出：按 LANG 返回对应文案（与 overlay.js 的 L 同款约定）。"""
+    return en if LANG == "en" else zh
+
 
 def expand(p):
     return Path(os.path.expandvars(os.path.expanduser(p)))
+
+
+def load_lang_from_config(dev):
+    """已有 config.json 里存了 lang 就沿用（--dev 时 config 在仓库目录）。"""
+    cfg = HERE / "config.json" if dev else DATA_DIR / "config.json"
+    try:
+        lang = json.loads(cfg.read_text(encoding="utf-8")).get("lang")
+        return lang if lang in ("zh", "en") else None
+    except (OSError, ValueError):
+        return None
 
 
 def find_asar():
@@ -72,7 +90,8 @@ def ask_asar():
     if not sys.stdin.isatty():
         return None
     try:
-        s = input("未自动找到 ZCode，请输入 app.asar 完整路径（回车取消）: ").strip('" ')
+        s = input(L("未自动找到 ZCode，请输入 app.asar 完整路径（回车取消）: ",
+                    "ZCode was not found automatically. Enter the full path to app.asar (Enter to cancel): ")).strip('" ')
     except (EOFError, KeyboardInterrupt):
         return None
     p = Path(s)
@@ -83,8 +102,9 @@ def copy_runtime(dry):
     """复制运行时四件套到数据目录（无条件覆盖：overlay 的 mtime 变化会让泵 2 秒内热重载）。"""
     for name in RUNTIME_FILES:
         src = HERE / name
-        assert src.is_file(), f"缺少运行时文件：{src}"
-    print(f"[运行时] 复制 {len(RUNTIME_FILES)} 个文件 → {DATA_DIR}")
+        assert src.is_file(), L(f"缺少运行时文件：{src}", f"Missing runtime file: {src}")
+    print(L(f"[运行时] 复制 {len(RUNTIME_FILES)} 个文件 → {DATA_DIR}",
+            f"[runtime] copying {len(RUNTIME_FILES)} files -> {DATA_DIR}"))
     if not dry:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         for name in RUNTIME_FILES:
@@ -94,13 +114,25 @@ def copy_runtime(dry):
 
 def prepare_config(dry, dev):
     """config.json：已存在沿用；缺失时仓库有旧配置则迁移（保留 python_path），否则按模板生成。
-    标准安装落在数据目录，--dev 落在仓库目录（与旧版行为一致）。"""
+    标准安装落在数据目录，--dev 落在仓库目录（与旧版行为一致）。
+    显式给出 --lang 时写回 config（CLI/MCP 等组件沿用同一语言）。"""
     cfg = HERE / "config.json" if dev else DATA_DIR / "config.json"
     if cfg.exists():
-        print(f"[配置] 沿用已有 {cfg}")
+        if args_lang:
+            if not dry:
+                try:
+                    data = json.loads(cfg.read_text(encoding="utf-8"))
+                    data["lang"] = LANG
+                    cfg.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+                except (OSError, ValueError):
+                    pass
+            print(L(f"[配置] 沿用已有 {cfg}（lang = {LANG}）", f"[config] keeping {cfg} (lang = {LANG})"))
+        else:
+            print(L(f"[配置] 沿用已有 {cfg}", f"[config] keeping existing {cfg}"))
         return True
     if not dev and (HERE / "config.json").exists():
-        print(f"[配置] 迁移旧配置 {HERE / 'config.json'} → {cfg}")
+        print(L(f"[配置] 迁移旧配置 {HERE / 'config.json'} → {cfg}",
+                f"[config] migrating old config {HERE / 'config.json'} -> {cfg}"))
         if not dry:
             cfg.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(HERE / "config.json", cfg)
@@ -111,11 +143,13 @@ def prepare_config(dry, dev):
         "heartbeat_ms": 30000,
         "hot_reload": True,
         "context_window": 1000000,
+        "lang": LANG,
     }
-    print(f"[配置] 生成 {cfg}（python_path = {sys.executable}）")
+    print(L(f"[配置] 生成 {cfg}（python_path = {sys.executable}）",
+            f"[config] generating {cfg} (python_path = {sys.executable})"))
     if not dry:
         cfg.parent.mkdir(parents=True, exist_ok=True)
-        cfg.write_text(json.dumps(vals, indent=2), encoding="utf-8")
+        cfg.write_text(json.dumps(vals, indent=2, ensure_ascii=False), encoding="utf-8")
     return True
 
 
@@ -130,7 +164,8 @@ def register_mcp(dry, dev):
         try:
             data = json.loads(ZCODE_CONFIG.read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:
-            print(f"[MCP] 跳过：{ZCODE_CONFIG} 不是有效 JSON（{e}），请手动注册。")
+            print(L(f"[MCP] 跳过：{ZCODE_CONFIG} 不是有效 JSON（{e}），请手动注册。",
+                    f"[mcp] skipped: {ZCODE_CONFIG} is not valid JSON ({e}); register manually."))
             return False
     servers = data.setdefault("mcp", {}).setdefault("servers", {})
     servers[MCP_NAME] = entry
@@ -141,7 +176,8 @@ def register_mcp(dry, dev):
         if isinstance(old, dict) and any(p in json.dumps(old) for p in ours):
             del servers[old_name]      # 旧注册指向本工具 → 迁移到新名字
             removed.append(old_name)
-    print(f"[MCP] 注册 {MCP_NAME} → {usage_mcp}" + (f"（同时移除旧注册 {', '.join(removed)}）" if removed else ""))
+    removed_note = L(f"（同时移除旧注册 {', '.join(removed)}）", f" (also removed old registration {', '.join(removed)})") if removed else ""
+    print(L(f"[MCP] 注册 {MCP_NAME} → {usage_mcp}", f"[mcp] registering {MCP_NAME} -> {usage_mcp}") + removed_note)
     if not dry:
         ZCODE_CONFIG.parent.mkdir(parents=True, exist_ok=True)
         if ZCODE_CONFIG.is_file():
@@ -154,7 +190,7 @@ def install_command(dry):
     """复制 /usage 命令模板到 ~/.zcode/commands/usage.md。"""
     COMMANDS_DIR.mkdir(parents=True, exist_ok=True)
     dst = COMMANDS_DIR / "usage.md"
-    print(f"[命令] {dst}")
+    print(L(f"[命令] {dst}", f"[command] {dst}"))
     if not dry:
         shutil.copy2(HERE / "usage.command.md", dst)
     return True
@@ -175,7 +211,7 @@ def remove_mcp(dry):
             gone.append(name)
     if not gone:
         return True
-    print(f"[MCP] 移除注册：{', '.join(gone)}")
+    print(L(f"[MCP] 移除注册：{', '.join(gone)}", f"[mcp] removing registration: {', '.join(gone)}"))
     if not dry:
         shutil.copy2(ZCODE_CONFIG, ZCODE_CONFIG.with_suffix(".json.zusage.bak"))
         ZCODE_CONFIG.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -185,7 +221,7 @@ def remove_mcp(dry):
 def remove_command(dry):
     dst = COMMANDS_DIR / "usage.md"
     if dst.is_file():
-        print(f"[命令] 删除 {dst}")
+        print(L(f"[命令] 删除 {dst}", f"[command] deleting {dst}"))
         if not dry:
             dst.unlink()
     return True
@@ -195,26 +231,43 @@ def remove_data_dir(dry):
     """删除标准数据目录（运行时副本+配置+诊断）。--dev 安装没有数据目录，此处自然跳过。"""
     if not DATA_DIR.exists():
         return True
-    print(f"[数据] 删除数据目录 {DATA_DIR}")
+    print(L(f"[数据] 删除数据目录 {DATA_DIR}", f"[data] deleting data directory {DATA_DIR}"))
     if not dry:
         shutil.rmtree(DATA_DIR)
     return True
 
 
 def main():
-    ap = argparse.ArgumentParser(description="ZCode Token 用量状态栏 一键安装")
-    ap.add_argument("--asar", help="app.asar 路径（默认自动探测）")
-    ap.add_argument("--no-mcp", action="store_true", help="跳过 MCP 注册与 /usage 命令")
-    ap.add_argument("--dev", action="store_true", help="开发模式：不复制运行时，注入直指本仓库目录（配置/诊断留在仓库）")
-    ap.add_argument("--remove", action="store_true", help="卸载")
-    ap.add_argument("--dry-run", action="store_true", help="只打印动作不落盘")
+    global LANG, args_lang
+    # 轻量预解析：--help 打印时 LANG 必须已定，否则帮助文本恒为中文
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--lang", choices=("zh", "en"))
+    pre.add_argument("--dev", action="store_true")
+    pre_args, _ = pre.parse_known_args()
+    LANG = pre_args.lang or load_lang_from_config(pre_args.dev) or "zh"
+
+    ap = argparse.ArgumentParser(description=L("ZCode Token 用量状态栏 一键安装",
+                                               "ZCode Token Usage Status Bar one-shot installer"))
+    ap.add_argument("--asar", help=L("app.asar 路径（默认自动探测）", "path to app.asar (auto-detected by default)"))
+    ap.add_argument("--no-mcp", action="store_true", help=L("跳过 MCP 注册与 /usage 命令", "skip MCP registration and the /usage command"))
+    ap.add_argument("--dev", action="store_true", help=L("开发模式：不复制运行时，注入直指本仓库目录（配置/诊断留在仓库）",
+                                                         "dev mode: no runtime copy; injection points at this repo (config/diagnostics stay in the repo)"))
+    ap.add_argument("--remove", action="store_true", help=L("卸载", "uninstall"))
+    ap.add_argument("--dry-run", action="store_true", help=L("只打印动作不落盘", "print actions without writing anything"))
+    ap.add_argument("--lang", choices=("zh", "en"), default=None,
+                    help=L("输出语言（默认 zh；写入 config.json 供 CLI/MCP 沿用）",
+                           "output language (default zh; written to config.json for CLI/MCP)"))
     args = ap.parse_args()
+    args_lang = args.lang
+    if args.lang:   # 显式 --lang 优先于 config.json（预解析阶段已按 config 确定过一次默认值）
+        LANG = args.lang
 
     import patch_install as pi   # 同目录，脚本式导入即可
 
     if args.remove:
         if args.dry_run:
-            print("[卸载] （dry-run）python patch_install.py remove + 清理 MCP 注册与 /usage 命令 + 删除数据目录")
+            print(L("[卸载] （dry-run）python patch_install.py remove + 清理 MCP 注册与 /usage 命令 + 删除数据目录",
+                    "[uninstall] (dry-run) python patch_install.py remove + MCP registration & /usage command cleanup + data dir removal"))
             return 0
         ok = pi.remove()
         if args.no_mcp:
@@ -222,14 +275,15 @@ def main():
         remove_mcp(args.dry_run)
         remove_command(args.dry_run)
         remove_data_dir(args.dry_run)
-        print("卸载完成。")
+        print(L("卸载完成。", "Uninstall complete."))
         return 0 if ok else 1
 
     asar = Path(args.asar) if args.asar else (find_asar() or ask_asar())
     if not asar or not asar.is_file():
-        print("找不到 app.asar。用 --asar 指定，例如：python install.py --asar E:\\Apps\\ZCode\\resources\\app.asar")
+        print(L("找不到 app.asar。用 --asar 指定，例如：python install.py --asar E:\\Apps\\ZCode\\resources\\app.asar",
+                "app.asar not found. Specify it with --asar, e.g.: python install.py --asar E:\\Apps\\ZCode\\resources\\app.asar"))
         return 1
-    print(f"[目标] {asar}")
+    print(L(f"[目标] {asar}", f"[target] {asar}"))
     if not args.dry_run:
         pi.set_target(asar)
         if not args.dev:
@@ -239,16 +293,19 @@ def main():
         copy_runtime(args.dry_run)
     prepare_config(args.dry_run, args.dev)
     if args.dry_run:
-        print("[注入] （dry-run）python patch_install.py install")
+        print(L("[注入] （dry-run）python patch_install.py install",
+                "[inject] (dry-run) python patch_install.py install"))
         ok = True
     else:
         ok = pi.install()
     if not ok:
-        print("asar 注入未完成，MCP/命令部分仍会继续（可稍后单独重跑 patch_install.py install）。")
+        print(L("asar 注入未完成，MCP/命令部分仍会继续（可稍后单独重跑 patch_install.py install）。",
+                "asar injection did not finish; MCP/command parts will continue (re-run patch_install.py install later on its own)."))
     if not args.no_mcp:
         register_mcp(args.dry_run, args.dev)
         install_command(args.dry_run)
-    print("\n全部完成。重启 ZCode 后输入框下方出现悬浮条；对话内可用 /usage 查询。")
+    print("\n" + L("全部完成。重启 ZCode 后窗口底部出现悬浮条；对话内可用 /usage 查询。",
+                   "All done. After restarting ZCode the floating bar appears at the bottom of the window; use /usage in chat to query."))
     return 0 if ok else 1
 
 
