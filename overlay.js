@@ -37,7 +37,7 @@
 
     /* ---------- 状态 ---------- */
     var state = {
-      show: { win: 1, ctx: 1, today: 1, turn: 0, sub: 1, tools: 1 },
+      show: { win: 1, ctx: 1, today: 1, turn: 1, sub: 1, tools: 1 },
       ctxOv: "", data: null, nativeCtx: 0,
       excActive: false,   // 当前会话处于"上下文超限被拒"状态（render 时按 picked 会话计算）
       excGone: false,     // 用户点 ✕ 关闭了本次气泡；超限解除后自动复位

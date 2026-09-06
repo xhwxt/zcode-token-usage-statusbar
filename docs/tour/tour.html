@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>状态条功能导览 · 制图页</title>
+<style>
+  /* ============================================================
+     状态条功能导览图制图页（README 配图用，非产品代码）
+     模式（URL 参数）：
+       ?embed=1&hero=1   主视觉迷你窗口：聊天流+输入卡片+完整状态条+编号标注
+       ?embed=1&hl=N     特写迷你窗口：高亮第 N 项（其余压暗），N=0..6；hl=gear 高亮 ⚙
+       ?asm=1            组装排版：把已截好的素材图（shots/*.png）拼进版式
+       &print=2          布局级 2 倍放大输出（zoom 重新布局，非位图拉伸）
+     状态条本体是真实 overlay.js 渲染，本页只喂数据（与泵推送的 payload 同构）。
+     overlay 要求输入框位于视口下半部、状态条贴视口底（v55+），
+     因此每个迷你窗口都按真实产品形态布局：聊天流在上、输入卡片贴底、条悬浮窗口最底。
+     ============================================================ */
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{background:#0e1015;color:#d7dce4;
+    font:14px/1.75 "Segoe UI","Microsoft YaHei UI","Microsoft YaHei",sans-serif}
+
+  /* ---------- embed 迷你窗口模式 ----------
+     高度用定逻辑值不用 100vh：html zoom 2 时 vh 会被放大导致布景跑出视口，
+     overlay 判定输入框不可见就整条隐藏。170/450 的 2 倍正好是截图视口高 340/900。 */
+  body.embed{height:100vh;overflow:hidden;position:relative;background:#17191f}
+  body.embed.hero{height:450px}
+  body.embed.closeup{height:170px}
+  body.embed .chat-sim{position:absolute;top:14px;left:50%;transform:translateX(-50%);
+    width:72%;max-width:760px}
+  .msg{max-width:82%;margin-bottom:10px;padding:7px 12px;border-radius:11px;font-size:12.5px;line-height:1.7}
+  .msg.user{margin-left:auto;background:#2a2d36;color:#e9edf4;border-bottom-right-radius:4px}
+  .msg.bot{background:#20232b;border:1px solid rgba(255,255,255,.06);border-bottom-left-radius:4px;color:#c9cfda}
+  body.embed .composer-card{position:absolute;bottom:0;left:50%;transform:translateX(-50%);
+    background:#20232b;border:1px solid rgba(255,255,255,.1);border-radius:12px;
+    box-shadow:0 8px 28px rgba(0,0,0,.35)}
+  body.embed .composer-card textarea{display:block;width:100%;resize:none;border:0;outline:none;
+    background:transparent;color:#e9edf4;
+    font:13px/1.6 "Segoe UI","Microsoft YaHei UI",sans-serif}
+  body.embed .composer-card textarea::placeholder{color:#5b6474}
+  /* hero 主视觉：卡片仅作 overlay 的挂靠点，视觉隐藏（v57 起条贴窗口底，构图更干净） */
+  body.embed.hero .composer-card{width:900px;height:56px;opacity:0;pointer-events:none}
+  body.embed.hero .composer-card textarea{height:54px;padding:9px 14px 0}
+  /* 特写：小窗（卡片接近满宽，给状态条 maxWidth 留足空间不裁边） */
+  body.embed.closeup .composer-card{width:636px;height:44px}
+  body.embed.closeup .composer-card textarea{height:42px;padding:7px 12px 0;font-size:12px}
+  /* 高亮目标项：青色光圈 + 微放大；其余项压暗弹性收窄只露图标，聚焦目标 */
+  .it.hl{background:rgba(87,199,255,.14)!important;
+    box-shadow:0 0 0 1.5px rgba(87,199,255,.7),0 0 20px rgba(87,199,255,.35);
+    transform:scale(1.12);position:relative;z-index:2}
+  .btn.hl{background:rgba(87,199,255,.14)!important;
+    box-shadow:0 0 0 1.5px rgba(87,199,255,.7),0 0 20px rgba(87,199,255,.35)}
+  .it.dim{opacity:.22;flex:1 1 0;min-width:18px;max-width:38px;overflow:hidden;padding-left:3px;padding-right:3px}
+  .it.dim-soft{opacity:.3}
+  .sep.dim{opacity:.12}
+  /* 编号标注（hero 文档内绘制） */
+  .mark{position:absolute;transform:translateX(-50%);text-align:center;
+    font:600 12px/1 "Segoe UI","Microsoft YaHei UI",sans-serif;color:#57c7ff}
+  .mark i{display:block;width:19px;height:19px;border:1.5px solid rgba(87,199,255,.75);
+    border-radius:50%;font-style:normal;line-height:16px;background:#1b2230;
+    box-shadow:0 1px 6px rgba(0,0,0,.5)}
+
+  /* ---------- 组装排版模式 ---------- */
+  .poster{width:1240px;margin:0 auto;padding:44px 46px 30px;background:#14161c;
+    border-left:1px solid rgba(255,255,255,.06);border-right:1px solid rgba(255,255,255,.06)}
+  h1{margin:0;font-size:27px;font-weight:600;color:#eef1f7;letter-spacing:.01em}
+  h1 .accent{color:#57c7ff}
+  .sub{margin:8px 0 0;font-size:14.5px;color:#8b94a6}
+  .hero-wrap{position:relative;margin-top:30px}
+  img.hero-frame{display:block;width:1148px;height:450px;border:1px solid rgba(255,255,255,.07);
+    border-radius:14px;background:#17191f}
+  h2{margin:38px 0 4px;font-size:19px;font-weight:600;color:#e8ecf3}
+  .h2sub{margin:0 0 18px;font-size:13px;color:#7e8899}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .card{margin:0;background:#1a1d26;border:1px solid rgba(255,255,255,.07);border-radius:13px;overflow:hidden;
+    display:flex;flex-direction:column}
+  .card .shot{background:#17191f;border-bottom:1px solid rgba(255,255,255,.06);overflow:hidden}
+  .card .shot img{width:100%;display:block}
+  .card figcaption{padding:12px 16px 13px;display:flex;gap:10px;align-items:flex-start}
+  .card .no{flex:0 0 auto;width:22px;height:22px;margin-top:2px;border:1.5px solid rgba(87,199,255,.75);
+    border-radius:50%;color:#57c7ff;font:600 12px/19px "Segoe UI","Microsoft YaHei UI",sans-serif;text-align:center}
+  .card .txt b{display:block;font-size:15px;font-weight:600;color:#e8ecf3;margin-bottom:2px}
+  .card .txt span{font-size:12.8px;line-height:1.75;color:#98a1b3;display:block}
+  .foot{margin-top:26px;padding-top:14px;border-top:1px solid rgba(255,255,255,.07);
+    font-size:12px;color:#6b7486;display:flex;justify-content:space-between}
+</style>
+</head>
+<body>
+
+<!-- ============ embed 迷你窗口模式 ============ -->
+<div id="stage-embed">
+  <div class="chat-sim" id="chat-sim"></div>
+  <div class="composer-card"><textarea placeholder="给 ZCode 发消息…"></textarea></div>
+</div>
+
+<!-- ============ 组装排版模式 ============ -->
+<div class="poster" id="poster" hidden>
+  <h1>ZCode Token 用量状态栏 · <span class="accent">功能导览</span></h1>
+  <p class="sub">悬浮在 ZCode 对话窗口底部，实时显示本窗口的 token 用量与运行状态 —— 数据只读本地数据库，全程不联网。</p>
+
+  <div class="hero-wrap"><img class="hero-frame" id="hero-frame" alt="状态条整体效果" src="shots/hero.png"></div>
+
+  <h2>条面显示项</h2>
+  <p class="h2sub">条目默认全部显示，每项都可以在 ⚙ 设置里独立开关。</p>
+  <div class="grid" id="grid"></div>
+
+  <div class="foot">
+    <span>github.com/xhwxt/zcode-token-usage-statusbar</span>
+    <span>数据源：~/.zcode/cli/db/db.sqlite（只读）· Windows</span>
+  </div>
+</div>
+
+<script>
+/* ================= 模式分发 ================= */
+var Q = {};
+location.search.replace(/^\?/, "").split("&").forEach(function (kv) {
+  var p = kv.split("="); Q[p[0]] = decodeURIComponent(p[1] || "");
+});
+var EMBED = Q.embed === "1";
+var ASM = Q.asm === "1";
+/* 高清输出：&print=2 时整体布局级放大 N 倍（zoom 是重新布局而非位图拉伸，
+ * 视口同步变大、内部按新分辨率渲染，文字与玻璃效果都保持锐利） */
+if (Q.print) document.documentElement.style.zoom = Q.print;
+
+/* 分项清单（编号 / 高亮参数 / 素材文件 / 标题 / 说明）——顺序即条面显示顺序。
+ * 开启「本轮」后条面 it 索引：0=tps 1=ctx 2=turn 3=win 4=tools 5=today 6=sub */
+var ITEMS = [
+  { no: "①", hl: "0",    file: "item-1.png", name: "生成速度", desc: "最近一次请求的输出速度（token/s）。随快慢三档变色：≥70 绿、40–70 黄、&lt;40 红，模型快慢一眼可读。" },
+  { no: "②", hl: "1",    file: "item-2.png", name: "上下文容量", desc: "微进度条 + 百分比显示当前会话的上下文占比，颜色随占比从绿转黄再转红；超限被拒时亮红闪烁并弹出告警气泡。窗口大小自动识别、跟随模型。" },
+  { no: "③", hl: "2",    file: "item-3.png", name: "本轮", desc: "最近一轮对话的 token 消耗、缓存命中率、请求次数、单次耗时与首字延迟。悬停可看 输入 / 输出 / 缓存命中 / 缓存写入 / 思考 的拆分。" },
+  { no: "④", hl: "3",    file: "item-4.png", name: "会话累计", desc: "当前会话全部请求的总消耗与轮次统计；每个对话窗口只统计自己的数据，多窗口互不串显。悬停同样有明细拆分。" },
+  { no: "⑤", hl: "4",    file: "item-5.png", name: "工具调用", desc: "会话内工具使用总次数；出现错误时右侧亮红色错误数徽标。悬停可看各工具的调用次数与耗时明细。" },
+  { no: "⑥", hl: "5",    file: "item-6.png", name: "今日合计", desc: "今天所有会话的 token 总消耗，跨会话汇总，日用量一目了然。" },
+  { no: "⑦", hl: "6",    file: "item-7.png", name: "子代理", desc: "当前会话后台子代理的消耗，独立统计不计入会话累计；蓝色 ● 表示有子代理运行中。点击弹出明细面板，按页签查看每个子代理的任务名与消耗。" },
+  { no: "⑧", hl: "gear", file: "item-8.png", name: "⚙ 设置面板", desc: "点击打开设置：各显示项独立开关、上下文窗口大小手动覆盖。悬停条面任意条目还会弹出明细 tooltip。" }
+];
+
+if (EMBED) {
+  /* ---- 迷你窗口：独立文档加载 overlay.js（下方动态注入） ---- */
+  document.body.className = "embed " + (Q.hero === "1" ? "hero" : "closeup");
+  document.getElementById("poster").hidden = true;
+  if (Q.hero === "1") {
+    document.getElementById("chat-sim").innerHTML =
+      '<div class="msg user">帮我把状态条的悬停明细加上缓存命中率。</div>' +
+      '<div class="msg bot">已加上：会话累计的 tooltip 里现在会显示 输入 / 输出 / 缓存命中 / 缓存写入 / 思考 的拆分明细。</div>';
+  } else {
+    document.getElementById("chat-sim").style.display = "none";
+  }
+} else if (ASM) {
+  /* ---- 组装排版：素材图拼版 ---- */
+  document.getElementById("stage-embed").style.display = "none";
+  document.getElementById("poster").hidden = false;
+  var grid = document.getElementById("grid");
+  ITEMS.forEach(function (it) {
+    var fig = document.createElement("figure");
+    fig.className = "card";
+    fig.innerHTML =
+      '<div class="shot"><img src="shots/' + it.file + '" alt="' + it.name + '"></div>' +
+      '<figcaption><span class="no">' + it.no + '</span>' +
+      '<span class="txt"><b>' + it.name + '</b><span>' + it.desc + '</span></span></figcaption>';
+    grid.appendChild(fig);
+  });
+} else {
+  /* ---- 预览模式（调试用）：实时 iframe ---- */
+  document.getElementById("stage-embed").style.display = "none";
+  document.getElementById("poster").hidden = false;
+}
+</script>
+
+<!-- overlay.js 与数据仅在迷你窗口（embed）模式下加载：每个窗口一个独立实例 -->
+<script>
+if (EMBED) {
+  /* 预置显示项配置：保证截图不读本机浏览器 profile 里可能残留的旧配置，
+   * 与产品默认（overlay.js state.show，含开启的「本轮」）保持一致 */
+  try { localStorage.setItem("zusage3.show",
+    JSON.stringify({ win: 1, ctx: 1, today: 1, turn: 1, sub: 1, tools: 1 })); } catch (e) { }
+
+  var s = document.createElement("script");
+  s.src = "../../overlay.js";
+  document.head.appendChild(s);
+}
+</script>
+
+<script>
+/* ================= 嵌入模式：喂数据 + 高亮 + hero 标注 ================= */
+if (EMBED) {
+  var NOW = Date.now();
+  var TODAY = { total: 3421800, input: 2864100, output: 557700, reasoning: 213400,
+    cache_read: 2412300, cache_write: 154900, requests: 1240, retries: 6 };
+  var SESS = {
+    sid: "sess_demo01a2b3c4d5e6", title: "功能演示", active: true,
+    turns: 23, requests: 187,
+    input: 1284300, output: 164200, reasoning: 96400, cache_read: 1102300, cache_write: 42100,
+    total: 1448500, tool_calls: 142, retries: 3,
+    ctx: 63400, ctx_exc: 0, last_at: NOW - 4000, updated: "20:31:22",
+    context_window: 200000, context_auto: false,
+    code: { add: 1840, del: 620, files: 14 },
+    last_turn: { requests: 7, retries: 0, tool_calls: 12, tool_errors: 0,
+      input: 54200, output: 8300, reasoning: 2100, cache_read: 48900, cache_write: 2100,
+      total: 62500, duration_ms: 96000, ttft_ms: 1400 },
+    last: { duration_ms: 18400, ttft_ms: 1400, model: "glm-5.3-flash", tps: 86 },
+    tools: { total: 142, errors: 2, list: [
+      { name: "Bash",      count: 48, duration_ms: 12400, errors: 0 },
+      { name: "Read",      count: 31, duration_ms: 3100,  errors: 0 },
+      { name: "Edit",      count: 22, duration_ms: 2200,  errors: 0 },
+      { name: "Grep",      count: 18, duration_ms: 1800,  errors: 2 },
+      { name: "Agent",     count: 12, duration_ms: 45100, errors: 0 },
+      { name: "TodoWrite", count: 9,  duration_ms: 300,   errors: 0 } ] },
+    sub: { requests: 34, total: 236400, input: 198200, output: 30200, cache_read: 141000,
+      reasoning: 8200, cache_write: 6100, active: true, list: [
+      { task: "重设计状态条视觉样式",     title: "", agent: "agentA",   sid: "sess_sub_a1b2c3d4", active: true,  total: 88400, requests: 12, last: NOW - 6000,     input: 74200, output: 12100, cache_read: 52300, reasoning: 3100, cache_write: 1800 },
+      { task: "核验 tooltip 生命周期回归", title: "", agent: "agentsDS", sid: "sess_sub_e5f6a7b8", active: false, total: 61200, requests: 9,  last: NOW - 5700000,  input: 51200, output: 8400,  cache_read: 39800, reasoning: 2600, cache_write: 1200 },
+      { task: "性能取证与泵日志分析",     title: "", agent: "agentC",   sid: "sess_sub_c9d0e1f2", active: false, total: 86800, requests: 13, last: NOW - 1440000,  input: 72800, output: 9700,  cache_read: 48900, reasoning: 2500, cache_write: 3100 } ] }
+  };
+  var PAYLOAD = { mine: SESS.sid, recent: [SESS], today: TODAY };
+
+  function feed() { if (window.__zusageUpdate) window.__zusageUpdate(PAYLOAD); }
+  setTimeout(feed, 180);
+  setTimeout(feed, 700);   // 双保险（overlay 挂载晚于首帧时补一次）
+
+  /* 等条渲染稳定后执行各自的收尾：特写→聚焦高亮；主视觉→文档内画编号标注 */
+  var tries = 0;
+  var timer = setInterval(function () {
+    tries++;
+    var its = document.querySelectorAll("#zu-main .it");
+    var bar = document.getElementById("zusage-bar");
+    if (its.length >= 7 && bar && bar.style.display === "flex") {
+      clearInterval(timer);
+      feed();
+      setTimeout(function () {
+        if (Q.hero === "1") drawMarks(its, bar); else applyHighlight(its);
+      }, 300);
+    } else if (tries > 30) clearInterval(timer);
+  }, 200);
+
+  function applyHighlight(its) {
+    its.forEach(function (el) { el.classList.add("dim"); });
+    document.querySelectorAll("#zusage-bar .sep").forEach(function (sp) { sp.classList.add("dim"); });
+    if (Q.hl === "gear") {
+      its.forEach(function (el) { el.classList.remove("dim"); el.classList.add("dim-soft"); });
+      var g = document.getElementById("zu-gear");
+      if (g) g.classList.add("hl");
+    } else {
+      var idx = parseInt(Q.hl, 10);
+      if (its[idx]) { its[idx].classList.remove("dim"); its[idx].classList.add("hl"); }
+    }
+  }
+
+  function drawMarks(its, bar) {
+    var host = document.createElement("div");
+    host.style.cssText = "position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none";
+    document.body.appendChild(host);
+    var nodes = Array.prototype.slice.call(its);
+    var gear = document.getElementById("zu-gear");
+    if (gear) nodes.push(gear);
+    var barTop = bar.getBoundingClientRect().top;
+    nodes.forEach(function (el, i) {
+      var r = el.getBoundingClientRect();
+      var m = document.createElement("div");
+      m.className = "mark";
+      m.innerHTML = "<i>" + (ITEMS[i] ? ITEMS[i].no : String(i + 1)) + "</i>";
+      m.style.left = (r.left + r.width / 2) + "px";
+      m.style.top = (barTop - 26) + "px";
+      host.appendChild(m);
+    });
+  }
+}
+</script>
+</body>
+</html>
