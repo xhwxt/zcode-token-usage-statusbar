@@ -29,7 +29,7 @@
   }, 0);
 
   function main$() {
-    var VERSION = "v50";   // 每轮递增；悬停状态条可见，用于确认热更新到达
+    var VERSION = "v51";   // 每轮递增；悬停状态条可见，用于确认热更新到达
     var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv" };
 
     /* ---------- 状态 ---------- */
@@ -107,7 +107,7 @@
        * 面板不随鼠标消失，绕开悬停+tab 的全部几何问题。 */
       ".zu-sub{cursor:pointer}" +
       ".zu-sub:hover .v{color:#fff}" +
-      ".panel.subp{width:520px;max-width:72vw}" +
+      ".panel.subp{width:400px;max-width:60vw}" +
       ".subrow{padding:4px 0;border-bottom:1px dashed rgba(255,255,255,.07)}" +
       ".subrow:last-child{border-bottom:none}" +
       ".subname{font-weight:700;color:#e6ebf3;overflow-wrap:anywhere}" +
