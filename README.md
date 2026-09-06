@@ -26,7 +26,7 @@ ZCode 的插件机制（`plugin.json`）只能提供 MCP / skills / commands / h
 |---|---|
 | `install.py` | **一键安装**：探测 ZCode 安装位置 → 复制运行时到数据目录 → 生成 config → 注入 asar → 注册 MCP → 装 /usage 命令 → 弹监控窗口。`--remove` 卸载，`--dry-run` 预览，`--no-mcp` 只装状态条，`--dev` 开发模式（不复制，注入直指本仓库目录）。 |
 | `overlay.js` | 状态条本体（渲染进程注入，自包含 IIFE）。fixed 悬浮在**输入框视觉卡片正下方**（给卡片加 margin-bottom 上移让位），rAF 每帧跟随。勿把条放进输入框中心点所在矩形——命中检测自遮挡会造成周期性闪烁（v12-v14 实测）。 |
-| `inject-main.cjs` | 主进程 loader：向每个窗口注入 overlay.js + **触发式监听 db 写入**（fs.watch db 目录，有写入→去抖 300ms→查询推送；空闲零进程零轮询，仅 30s 兜底心跳）。 |
+| `inject-main.cjs` | 主进程 loader：向每个窗口注入 overlay.js + **触发式监听 db 写入**（fs.watch db 目录，有写入→去抖 300ms→查询推送；空闲零进程零轮询，仅 30s 兜底心跳——Node 官方文档明确 fs.watch 事件不保证送达，心跳不可去）。v8 起查询走**常驻 python**（`zusage.py serve` 行协议，省每次 ~60-100ms 解释器启动费；意外退出自动重启、30s 内 3 次判不稳定回退一次性 spawn、zusage.py mtime 变化自动重启；stdin EOF 随泵退出自清理）。 |
 | `patch_install.py` | asar 注入/卸载工具（install.py 的底层，可单独用）：备份 → 在入口 `out/main/index.js` 尾部追加 dynamic import 行 → 重打包 → 自检 → 原子替换。幂等，自动替换旧注入行（迁移友好）。安装成功自动弹出监控窗口。 |
 | `install_monitor.py` | 安装监控窗口（常驻命令行，每 10 秒检测一次）：持续提醒重启 ZCode；重启后通过 diag 更新确认注入加载，显示成功并自动退出。运行中原子替换失败（生成 .tmp）时，它还会在 ZCode 退出后自动完成替换——**收尾不依赖计划任务**。 |
 | `zusage.py` | 查询库 + CLI + 机器可读快照（`json` 子命令，状态条数据源）。 |
@@ -90,6 +90,7 @@ python patch_install.py install
   "python_path": "python.exe 绝对路径",
   "activity_min_ms": 1500,  // 有 db 写入时的最小拉取间隔（活动期限频，到点自动补拉最后一笔）
   "heartbeat_ms": 30000,    // 兜底心跳：防 fs.watch 文件事件丢失；空闲时拉取只由此触发
+  "resident": true,         // 常驻查询 python（zusage.py serve，省每次启动费 ~17MB 常驻内存）；false=回退一次性短进程
   "hot_reload": true,       // overlay.js 热更新开关（调试用）；false=改完需重启 ZCode
   "context_window": 1000000 // 上下文兜底值（原生读数/模型目录都失败时用）
 }

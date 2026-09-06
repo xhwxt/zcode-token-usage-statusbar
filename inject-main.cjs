@@ -2,27 +2,46 @@
  * 由 patch_install.py 在 app.asar 入口尾部追加一行 import 引入。
  * 职责：1) 向每个窗口注入 overlay.js（mtime 变化热更新，免重启）；
  *       2) 触发式拉取：fs.watch 监听 db 目录，db.sqlite/-wal 一有写入（去抖 300ms）就
- *          spawn python 查询并推送。限频 config.activity_min_ms（默认 1500ms），限频到点
+ *          查询并推送。限频 config.activity_min_ms（默认 1500ms），限频到点
  *          自动补拉，最后一笔写入不漏；完全空闲时零进程零轮询，仅兜底心跳
- *          （config.heartbeat_ms，默认 30s）防文件事件丢失。任何失败只打日志，不影响客户端。
+ *          （config.heartbeat_ms，默认 30s）防文件事件丢失（Node 官方文档：fs.watch
+ *          事件不保证送达）。任何失败只打日志，不影响客户端。
  *       3) 每窗口当前会话（v6）：渲染端 workspace shell 把焦点会话 id 经 IPC
  *          "zcode:sync-active-task-session" 推给主进程（客户端自带通道，实测见 app bundle），
  *          这里追加监听记录 webContents.id → 会话 id：查询时把全部窗口的会话强制纳入快照，
- *          推送时给每个窗口注入 mine 字段 —— 多窗口各自显示自己的会话，不再猜"全局最近活跃"。 */
+ *          推送时给每个窗口注入 mine 字段 —— 多窗口各自显示自己的会话，不再猜"全局最近活跃"。 *
+ *  v8：查询改常驻 python（zusage.py serve，stdin/stdout 行协议）——省每次 ~60-100ms 的
+ *      解释器启动费；意外退出自动重启（30s 内连续 3 次判不稳定则回退一次性 spawn）；
+ *      zusage.py mtime 变化自动重启（升级生效）；stdin EOF = 泵退出，常驻进程自清理。 */
 "use strict";
 const path = require("path");
 const fs = require("fs");
+const { spawn } = require("child_process");
 const { app, BrowserWindow, webContents } = require("electron");
 
 const HERE = __dirname;   // 本 loader 被 asar 注入行按绝对 file:// URL import，__dirname 即真实目录（克隆到任意路径无需改代码）
 const CONFIG = path.join(HERE, "config.json");
 const OVERLAY = path.join(HERE, "overlay.js");
+const ZUSAGE = path.join(HERE, "zusage.py");
 const LOG = (...a) => console.error("[zusage]", ...a);
 
 function readCfg() {
-  const c = { python_path: "python" };
+  const c = { python_path: "python", resident: true };
   try { Object.assign(c, JSON.parse(fs.readFileSync(CONFIG, "utf8"))); } catch (e) { }
   return c;
+}
+
+/* config.json 内容缓存：热更新定时器每 2s 触发，改为 stat mtime 判变化后才读文件 */
+let cfgMtime = 0;
+let cfgCache = null;
+function readCfgCached() {
+  let m = 0;
+  try { m = fs.statSync(CONFIG).mtimeMs; } catch (e) { }
+  if (!cfgCache || m !== cfgMtime) {
+    cfgMtime = m;
+    cfgCache = readCfg();
+  }
+  return cfgCache;
 }
 
 /* overlay 注入源 + 热更新：mtime 变了就重注入（移除旧条+复位守卫）。
@@ -105,12 +124,125 @@ function dbStamp() {
 
 let busy = false;
 let pushCount = 0;
-let lastSpawn = 0;    // 上次 spawn 时刻（activity_min_ms 限频用）
+let lastSpawn = 0;    // 上次发起查询时刻（activity_min_ms 限频用）
 let lastStamp = 0;    // 上次拉取时的 db mtime（去重：无新写入不拉）
 let lastWants = "";   // 上次查询用的会话 id 集合（变化即拉，防"会话切了但 db 没写入"滞留旧数据）
 
-function spawnQuery(wants) {
+function handlePayload(payload) {
+  if (!payload || typeof payload !== "object") return;
+  for (const wc of webContents.getAllWebContents()) pushOnce(wc, payload);
+  // 定位诊断：每 ~15 次拉取收集每个窗口各自的 __zusageDiag，附加泵侧证据后写 diag-<n>.json（多窗口互不覆盖）
+  if (++pushCount % 15 === 1) {
+    let idx = 0;
+    for (const wc of webContents.getAllWebContents()) {
+      if (!isMainWindowState(wc) || wc.isDestroyed()) continue;
+      const file = path.join(HERE, "diag-" + idx + ".json");
+      idx++;
+      wc.executeJavaScript("JSON.stringify(window.__zusageDiag||null)", true)
+        .then((s) => {
+          if (s && s !== "null") {
+            try {
+              const obj = JSON.parse(s);
+              obj.pump = {
+                version: 8,
+                resident: !!pyRes,
+                activeMap: Array.from(activeSid.entries()).slice(0, 12),
+                wants: lastWants,
+              };
+              fs.writeFileSync(file, JSON.stringify(obj));
+            } catch (e2) {
+              try { fs.writeFileSync(file, s); } catch (e) { }
+            }
+          }
+        })
+        .catch(() => { });
+    }
+  }
+}
+
+/* ---------- 常驻查询进程（v8）：zusage.py serve，stdin 请求行 / stdout 响应行 ---------- */
+let pyRes = null;        // { proc, buf, waiters: [fn], born }
+let pyFail = 0;          // 启动 30s 内退出次数（>=3 判不稳定，回退一次性 spawn）
+let pyBackoff = 1000;
+let pyRestarting = false;   // 主动 kill（升级/超时）标记，close 时不计失败
+
+function startResident() {
+  if (pyRes) return;
+  const proc = spawn(readCfg().python_path, [path.join(HERE, "zusage.py"), "serve"], { windowsHide: true });
+  const state = { proc, buf: "", waiters: [], born: Date.now() };
+  pyRes = state;
+  LOG("resident python starting");
+  proc.stdout.on("data", (d) => {
+    state.buf += d.toString("utf8");
+    let i;
+    while ((i = state.buf.indexOf("\n")) >= 0) {
+      const line = state.buf.slice(0, i);
+      state.buf = state.buf.slice(i + 1);
+      const w = state.waiters.shift();
+      if (!w) continue;
+      let payload = null;
+      try { payload = JSON.parse(line); } catch (e) { }
+      w(payload);
+    }
+  });
+  proc.stderr.on("data", () => { });
+  proc.on("close", () => {
+    if (pyRes === state) pyRes = null;
+    const pending = state.waiters;
+    state.waiters = [];
+    pending.forEach((w) => w(null));   // 挂起请求失败收场，泵侧等下一笔写入/心跳补拉
+    if (pyRestarting) { pyRestarting = false; startResident(); return; }
+    if (Date.now() - state.born < 30000) {   // 早期崩溃：退避重启，3 次判不稳定
+      pyFail++;
+      if (pyFail >= 3) { LOG("resident unstable (3 early exits), fallback to one-shot spawn"); return; }
+      setTimeout(startResident, pyBackoff);
+      pyBackoff = Math.min(pyBackoff * 2, 30000);
+    } else {   // 长跑后退出（升级/外部误杀）：立即重启，不计失败
+      pyFail = 0;
+      pyBackoff = 1000;
+      startResident();
+    }
+  });
+}
+
+function killResidentForUpgrade() {
+  if (!pyRes) return;
+  pyRestarting = true;
+  try { pyRes.proc.kill(); } catch (e) { }
+}
+
+function residentBusy() {
+  return !!(pyRes && pyRes.waiters.length > 0);
+}
+
+/* 统一查询入口：resident 可用走行协议，否则一次性 spawn（config.resident=false 或判不稳定） */
+function runQuery(wants) {
   busy = true;
+  const done = (payload) => {
+    busy = false;
+    if (payload) handlePayload(payload);
+    // 失败不原地重试：下一笔 db 写入/心跳会再拉，最多滞后一个心跳
+  };
+  if (readCfgCached().resident !== false && pyFail < 3) {
+    if (!pyRes) startResident();
+    if (pyRes && pyRes.proc.stdin.writable) {
+      const state = pyRes;
+      const timer = setTimeout(() => {
+        LOG("resident query timeout, restarting it");
+        pyRestarting = true;
+        try { state.proc.kill(); } catch (e) { }
+        done(null);
+      }, 15000);
+      state.waiters.push((payload) => { clearTimeout(timer); done(payload); });
+      try { state.proc.stdin.write((wants || "") + "\n"); } catch (e) { }
+      return;
+    }
+  }
+  legacySpawn(wants);
+}
+
+/* 回退路径（一次性 spawn）：常驻不可用时走 */
+function legacySpawn(wants) {
   const { spawn } = require("child_process");
   /* wants：各窗口当前会话 id（逗号分隔）。全部强制纳入快照，共享池里包含每个窗口
    * 自己的会话；zusage.py 逐个白名单校验。泵侧整体格式白名单防注入。 */
@@ -128,35 +260,7 @@ function spawnQuery(wants) {
     if (out.trim()) {
       let payload;
       try { payload = JSON.parse(out); } catch (e) { payload = null; }
-      if (payload) {
-        for (const wc of webContents.getAllWebContents()) pushOnce(wc, payload);
-      }
-    }
-    // 定位诊断：每 ~15 次拉取收集每个窗口各自的 __zusageDiag，附加泵侧证据后写 diag-<n>.json（多窗口互不覆盖）
-    if (++pushCount % 15 === 1) {
-      let idx = 0;
-      for (const wc of webContents.getAllWebContents()) {
-        if (!isMainWindowState(wc) || wc.isDestroyed()) continue;
-        const file = path.join(HERE, "diag-" + idx + ".json");
-        idx++;
-        wc.executeJavaScript("JSON.stringify(window.__zusageDiag||null)", true)
-          .then((s) => {
-            if (s && s !== "null") {
-              try {
-                const obj = JSON.parse(s);
-                obj.pump = {
-                  version: 7,
-                  activeMap: Array.from(activeSid.entries()).slice(0, 12),
-                  wants: lastWants,
-                };
-                fs.writeFileSync(file, JSON.stringify(obj));
-              } catch (e2) {
-                try { fs.writeFileSync(file, s); } catch (e) { }
-              }
-            }
-          })
-          .catch(() => { });
-      }
+      if (payload) handlePayload(payload);
     }
   });
 }
@@ -171,15 +275,20 @@ function scheduleRetry(ms) {
 function maybeSpawn() {
   if (busy) { scheduleRetry(300); return; }
   const st = dbStamp();
-  const cfg = readCfg();
+  const cfg = readCfgCached();
   const wait = Math.max(300, cfg.activity_min_ms | 0 || 1500);
   /* 先取各窗口的"当前会话 id"：主进程 IPC 映射（应用自己上报的焦点会话，v6）优先，
    * overlay 从 localStorage 键读出的 __zusageWantSid 兜底；无窗口时直接短路（空闲零进程的
-   * 设计意图）；executeJavaScript 挂 1s 超时，防渲染进程卡死导致泵永不 settle */
+   * 设计意图）；executeJavaScript 挂 1s 超时，防渲染进程卡死导致泵永不 settle。
+   * v8：全部窗口都已在 IPC 映射表里（含"已同步但无会话"的空串）时跳过整轮 eval ——
+   * mine 模式下 WantSid 已非主数据源，省掉活跃期每 1.5s × N 窗口的页面求值。 */
   const wcs = webContents.getAllWebContents().filter((wc) => isMainWindowState(wc) && !wc.isDestroyed());
   if (!wcs.length) return;
+  const needsFallback = wcs.some((wc) => !activeSid.has(wc.id));
   const withTimeout = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r(""), ms))]);
-  Promise.all(wcs.map((wc) => withTimeout(wc.executeJavaScript("(window.__zusageWantSid||'')", true).catch(() => ""), 1000)))
+  Promise.all(needsFallback
+    ? wcs.map((wc) => withTimeout(wc.executeJavaScript("(window.__zusageWantSid||'')", true).catch(() => ""), 1000))
+    : wcs.map(() => ""))
     .then((vals) => {
       /* 汇总全部窗口的会话（去重）：每个窗口都要能在共享快照里找到自己的会话 */
       const wants = [];
@@ -194,7 +303,7 @@ function maybeSpawn() {
       lastWants = key;
       if (st) lastStamp = st;
       lastSpawn = now;
-      spawnQuery(key);
+      runQuery(key);
     })
     .catch(() => { });
 }
@@ -223,9 +332,25 @@ function watchDb() {
   }
 }
 
-/* overlay 热更新检查（一次 stat，开销可忽略）；config.hot_reload=false 可关闭
- * （发布/稳定形态：改 overlay.js 需重启 ZCode 才生效），开关改动随下次心跳生效。 */
-setInterval(() => { if (readCfg().hot_reload !== false) hotReloadIfChanged(); }, 2000);
+/* overlay / zusage.py 热更新检查（stat mtime，开销可忽略）；config.hot_reload=false 可关闭
+ * （发布/稳定形态：改文件需重启 ZCode 才生效），开关改动随下次心跳生效。
+ * zusage.py 变化时重启常驻进程（serve 进程驻内存的是旧代码）；顺带 stat config mtime。 */
+let overlayMtimeKnown = false;
+let zusageMtime = 0;
+setInterval(() => {
+  const cfg = readCfgCached();
+  if (cfg.hot_reload === false) return;
+  hotReloadIfChanged();
+  try {
+    const m = fs.statSync(ZUSAGE).mtimeMs;
+    if (overlayMtimeKnown && m !== zusageMtime && pyRes) {
+      LOG("zusage.py changed, restarting resident python");
+      killResidentForUpgrade();
+    }
+    zusageMtime = m;
+    overlayMtimeKnown = true;
+  } catch (e) { }
+}, 2000);
 setInterval(maybeSpawn, Math.max(10000, readCfg().heartbeat_ms | 0 || 30000));   // 兜底心跳：防文件事件丢失
 watchDb();
 maybeSpawn();   // 启动先拉一次
@@ -244,4 +369,4 @@ const hook = (wc) => {
 app.on("web-contents-created", (e, wc) => hook(wc));
 for (const wc of webContents.getAllWebContents()) hook(wc);
 
-LOG("injected v7, trigger mode (per-window active session via IPC, fs.watch db dir, activity_min_ms/heartbeat_ms, query timeout 15s)");
+LOG("injected v8, resident query mode (per-window active session via IPC, fs.watch db dir, zusage serve + one-shot fallback, activity_min_ms/heartbeat_ms, query timeout 15s)");
