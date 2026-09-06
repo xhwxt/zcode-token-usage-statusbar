@@ -32,7 +32,7 @@
   }, 0);
 
   function main$() {
-    var VERSION = "v54";   // 每轮递增；悬停状态条可见，用于确认热更新到达
+    var VERSION = "v55";   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
     var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv" };
 
     /* ---------- 状态 ---------- */
@@ -62,10 +62,10 @@
     var style = document.createElement("style");
     style.textContent =
       /* 胶囊条：半透明深底 + 微边框，与输入框视觉卡片形成层次；中文标签显式落雅黑 */
-      "#zusage-bar{position:fixed;font:12px/1.4 Consolas,'Cascadia Mono',Menlo,'Microsoft YaHei UI','Microsoft YaHei',monospace;" +
+      "#zusage-bar{position:fixed;font:14px/1.3 Consolas,'Cascadia Mono',Menlo,'Microsoft YaHei UI','Microsoft YaHei',monospace;" +
       "font-variant-numeric:tabular-nums;color:#8791a3;" +
       "background:rgba(15,18,25,.84);backdrop-filter:blur(14px) saturate(1.3);-webkit-backdrop-filter:blur(14px) saturate(1.3);" +
-      "border:1px solid rgba(255,255,255,.07);border-radius:9px;padding:2px 5px;user-select:none;" +
+      "border:1px solid rgba(255,255,255,.07);border-radius:9px;padding:2px 6px;user-select:none;" +
       "box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 4px 14px rgba(0,0,0,.38),0 1px 3px rgba(0,0,0,.28);" +
       "display:flex;align-items:center;gap:2px;white-space:nowrap;" +
       /* 条不能 overflow:hidden：设置面板是条的子元素、展开在条外上方，裁剪会吞掉面板（v15"点设置看不到窗口"根因）。
@@ -74,25 +74,26 @@
       "#zu-main{overflow:hidden;min-width:0;flex:0 1 auto;display:flex;align-items:center;gap:1px}" +
       /* zu-main 不得带 .it class：querySelectorAll('.it') 收集 tooltip 时会把它算进第 0 位，
        * tips 全部错位一位且末项为 null —— v31"悬停只有空胶囊/内容错位"的根因 */
-      ".it{display:flex;align-items:center;gap:4px;padding:3px 6px;border-radius:6px;" +
+      ".it{display:flex;align-items:center;gap:4px;padding:2px 6px;border-radius:6px;" +
       "transition:background-color .12s ease-out}" +
       ".it:hover{background:rgba(255,255,255,.06)}" +
-      ".sep{width:1px;height:13px;background:rgba(255,255,255,.09);flex:0 0 auto;margin:0 1px}" +
+      ".sep{width:1px;height:15px;background:rgba(255,255,255,.09);flex:0 0 auto;margin:0 1px}" +
       ".k{color:#7e8899}.v{color:#e9edf4;font-weight:600}" +
       ".pct{font-weight:700}.dim{color:#667082}" +
       ".ok{color:#3ecf8e}.warm{color:#f5b944}.hot{color:#ff6b57}" +
       /* 超限=亮红呼吸闪烁（v38 定性"亮红闪烁优先于一切档位"，v54 落成动画） */
       "@keyframes zuexc{0%,100%{opacity:1}50%{opacity:.4}}" +
       ".exc{color:#ff2d55;text-shadow:0 0 8px rgba(255,45,85,.5);animation:zuexc 1.1s ease-in-out infinite}" +
-      ".btn{cursor:pointer;padding:3px 6px;border-radius:6px;color:#7e8899;" +
+      ".btn{cursor:pointer;padding:2px 6px;border-radius:6px;color:#7e8899;" +
       "transition:background-color .12s ease-out,color .12s ease-out}" +
       ".btn:hover{color:#e9edf4;background:rgba(255,255,255,.07)}" +
       ".btn:active{transform:scale(.96)}" +
-      "#zu-gear{flex:0 0 auto;font-size:13px;border-radius:6px}" +
+      "#zu-gear{flex:0 0 auto;font-size:17px;border-radius:6px}" +
       /* 行内 SVG 线性图标（v54）：currentColor 跟随文字色，一处定义全局换色 */
       ".ico{width:12px;height:12px;flex:0 0 auto;color:#7e8899;opacity:.85}" +
       /* 工具错误数徽标 */
-      ".eb{background:rgba(255,107,87,.14);color:#ff8a73;border-radius:999px;padding:0 6px;font-size:11px;line-height:16px;font-weight:600}" +
+      ".eb{background:rgba(255,107,87,.14);color:#ff8a73;border-radius:999px;padding:0 6px;line-height:16px;font-weight:600;display:inline-flex;align-items:center;gap:2px}" +
+      ".eb .ico{color:inherit}" +
       /* 上下文微进度条：量感一眼可读，填充色随占比三档。
        * 填充块 background:currentColor —— 三档色类只给 color，填充靠 currentColor 着色
        * （v28 只写了 height 没写背景，填充块全透明 = "空条"根因）。 */
@@ -101,13 +102,13 @@
       ".cbar>i{display:block;height:100%;border-radius:999px;background:currentColor}" +
       /* 子代理运行中呼吸灯 */
       "@keyframes zupulse{0%,100%{opacity:1}50%{opacity:.2}}" +
-      ".dot{animation:zupulse 1.6s ease-in-out infinite;font-size:10px;line-height:1}" +
+      ".dot{animation:zupulse 1.6s ease-in-out infinite;font-size:14px;line-height:1}" +
       ".panel{position:absolute;bottom:calc(100% + 10px);left:0;background:rgba(19,22,30,.97);" +
       "backdrop-filter:blur(18px) saturate(1.3);-webkit-backdrop-filter:blur(18px) saturate(1.3);" +
       "border:1px solid rgba(255,255,255,.09);border-radius:12px;padding:12px 14px;display:none;" +
-      "flex-direction:column;gap:4px;font:12.5px/1.65 Consolas,Menlo,'Microsoft YaHei UI',monospace;color:#c6cdd9;" +
+      "flex-direction:column;gap:4px;font:13px/1.6 Consolas,Menlo,'Microsoft YaHei UI',monospace;color:#c6cdd9;" +
       "box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 12px 32px rgba(0,0,0,.5),0 2px 8px rgba(0,0,0,.35);" +
-      "min-width:280px;max-height:72vh;overflow:auto;white-space:normal;z-index:2147483647;" +
+      "min-width:280px;max-width:480px;max-height:72vh;overflow:auto;white-space:normal;z-index:2147483647;" +
       "scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.14) transparent}" +
       ".panel.open{display:flex}" +
       ".panel::-webkit-scrollbar{width:8px}" +
@@ -118,33 +119,33 @@
       "color:#e9edf4;border-radius:6px;padding:2px 7px;font:inherit;outline:none}" +
       ".panel input[type=text]:focus{border-color:rgba(87,199,255,.55);box-shadow:0 0 0 2px rgba(87,199,255,.15)}" +
       ".panel .hr{border-top:1px solid rgba(255,255,255,.08);margin:5px 0}" +
-      ".panel .cap{color:#6b7484;margin:4px 0 2px;font-size:10.5px;letter-spacing:.08em}" +
-      ".panel .phead{font-weight:700;color:#eef2f8;font-size:13px;margin-bottom:5px;display:flex;align-items:center;gap:8px}" +
-      ".panel .pver{color:#57c7ff;font-weight:400;font-size:10.5px;background:rgba(87,199,255,.12);border-radius:999px;padding:1px 8px}" +
-      ".panel label em{font-style:normal;color:#6f7989;font-size:11px;display:block}" +
+      ".panel .cap{color:#6b7484;margin:4px 0 2px;font-size:12px;letter-spacing:.08em}" +
+      ".panel .phead{font-weight:700;color:#eef2f8;font-size:16px;margin-bottom:5px;display:flex;align-items:center;gap:8px}" +
+      ".panel .pver{color:#57c7ff;font-weight:400;font-size:12px;background:rgba(87,199,255,.12);border-radius:999px;padding:1px 8px}" +
+      ".panel label em{font-style:normal;color:#6f7989;display:block}" +
       ".panel input[type=checkbox]{accent-color:#57c7ff;margin-top:3px}" +
-      ".panel .pnote{font-size:11px;line-height:1.6;color:#6f7989;margin-top:3px}" +
+      ".panel .pnote{line-height:1.6;color:#6f7989;margin-top:3px}" +
       /* 子代理明细面板（v49）：点击条目弹出的固定面板（与设置面板同机制，互斥打开）；
        * 面板不随鼠标消失，绕开悬停+tab 的全部几何问题。 */
       ".zu-sub{cursor:pointer}" +
       ".zu-sub:hover .v{color:#fff}" +
       ".panel.subp{width:420px;max-width:60vw;gap:8px}" +
       ".subrow{padding:8px 10px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);border-radius:8px}" +
-      ".subname{font-weight:600;color:#e9edf4;font-size:12.5px;overflow-wrap:anywhere}" +
-      ".substat{font-size:11px;color:#8791a3;margin-top:2px}" +
-      ".sublive{color:#3ecf8e;font-size:10.5px;font-weight:400;background:rgba(62,207,142,.12);border-radius:999px;padding:0 7px;margin-left:7px}" +
+      ".subname{font-weight:600;color:#e9edf4;font-size:14px;overflow-wrap:anywhere}" +
+      ".substat{color:#8791a3;margin-top:2px}" +
+      ".sublive{color:#3ecf8e;font-size:12px;font-weight:400;background:rgba(62,207,142,.12);border-radius:999px;padding:0 7px;margin-left:7px}" +
       /* 自绘 tooltip（v31）：向上弹出（原生 title 方向不可控且会被窗口下缘遮挡），
        * 支持多 tab；white-space:pre-line 保留数据里的 \n 换行。
        * v32：fixed 挂 body —— 原 absolute 挂 bar，被页面消息流的层叠上下文盖住
        * （diag 实证 disp=block 但不可见），挂 body 用视口坐标独立定位。 */
       ".tip{position:fixed;background:rgba(19,22,30,.98);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);" +
       "border:1px solid rgba(255,255,255,.1);border-radius:10px;padding:8px 12px;" +
-      "font:12px/1.7 Consolas,'Microsoft YaHei UI',monospace;color:#c6cdd9;" +
+      "font:13px/1.6 Consolas,'Microsoft YaHei UI',monospace;color:#c6cdd9;" +
       "box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 10px 28px rgba(0,0,0,.5),0 2px 6px rgba(0,0,0,.3);" +
       "white-space:pre-line;z-index:2147483646;max-width:560px;display:none;scrollbar-width:thin}" +
       ".ttabs{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:7px}" +
       ".ttab{cursor:pointer;padding:2px 10px;border-radius:999px;background:rgba(255,255,255,.06);" +
-      "color:#8791a3;white-space:nowrap;font-size:11.5px;" +
+      "color:#8791a3;white-space:nowrap;font-size:13px;" +
       "transition:background-color .12s ease-out,color .12s ease-out}" +
       ".ttab:hover{color:#e9edf4;background:rgba(255,255,255,.1)}" +
       ".ttab.on{background:rgba(87,199,255,.16);color:#5ac8ff}" +
@@ -156,17 +157,17 @@
       ".zusage-exc{position:fixed;max-width:470px;" +
       "background:linear-gradient(180deg,rgba(41,18,22,.98),rgba(27,14,16,.98));" +
       "border:1px solid rgba(255,45,85,.4);border-radius:12px;padding:12px 15px;" +
-      "font:12.5px/1.8 Consolas,'Microsoft YaHei UI',monospace;color:#e9edf4;" +
+      "font:13px/1.7 Consolas,'Microsoft YaHei UI',monospace;color:#e9edf4;" +
       "box-shadow:0 12px 32px rgba(0,0,0,.5),0 4px 18px rgba(255,45,85,.12);white-space:normal;z-index:2147483647;" +
       "user-select:text;display:none}" +
       ".zusage-exc .xb-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}" +
       ".zusage-exc .xb-title{font-weight:700;color:#ff5c77}" +
       ".zusage-exc .xb-step{color:#c6cdd9}" +
-      ".zusage-exc .xb-close{cursor:pointer;color:#8791a5;padding:2px 5px;border-radius:6px;font-size:13px;line-height:1}" +
+      ".zusage-exc .xb-close{cursor:pointer;color:#8791a5;padding:2px 5px;border-radius:6px;font-size:16px;line-height:1}" +
       ".zusage-exc .xb-close:hover{color:#fff;background:rgba(255,255,255,.08)}" +
       ".zusage-exc .xb-sid{color:#57c7ff;cursor:pointer;text-decoration:underline dotted}" +
       ".zusage-exc .xb-sid:hover{color:#8adcff}" +
-      ".zusage-exc .xb-copied{color:#3ecf8e;font-size:11px;margin-left:6px;display:none}" +
+      ".zusage-exc .xb-copied{color:#3ecf8e;margin-left:6px;display:none}" +
       /* 减少动态偏好：关闭呼吸/闪烁与悬浮过渡 */
       "@media (prefers-reduced-motion:reduce){.exc,.dot{animation:none}" +
       ".it,.btn,.ttab,.panel label{transition:none}}";
@@ -328,10 +329,13 @@
       }
       if (state.show.turn) {
         it(ico('<path d="M23 4v6h-6"/><path d="M20.49 15A9 9 0 1 1 18.36 5.64L23 10"/>') +
-          '<span class="k">本轮</span><span class="v">' + fmt(lt.total) + "</span>" +
+          '<span class="v">' + fmt(lt.total) + "</span>" +
           cachePct(lt.cache_read, lt.input) +
-          '<span class="dim">' + (lt.requests || 0) + "次·耗时" + sec(last.duration_ms) +
-          "·首字" + sec(last.ttft_ms) + "</span>",
+          '<span class="dim">' + (lt.requests || 0) + "次</span>" +
+          ico('<path d="M6 3h12M6 21h12M8 3v3.5L12 11l4-4.5V3M8 21v-3.5L12 13l4 4.5V21"/>') +
+          '<span class="dim">' + sec(last.duration_ms) + "</span>" +
+          ico('<path d="M5 20v-5M12 20v-9M19 20V5"/>') +
+          '<span class="dim">' + sec(last.ttft_ms) + "</span>",
           "本轮：最近一轮的 token 消耗（该轮共 " + (lt.requests || 0) + " 次模型请求）\n" +
           ioc(lt.input, lt.output, lt.cache_read, lt.reasoning, lt.cache_write) +
           "\n单次耗时 " + sec(last.duration_ms) + " · 首字 " + sec(last.ttft_ms) +
@@ -341,7 +345,7 @@
       }
       if (state.show.win) {
         it(ico('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>') +
-          '<span class="k">会话</span><span class="v">' + fmt(sess.total) + "</span>" +
+          '<span class="v">' + fmt(sess.total) + "</span>" +
           cachePct(sess.cache_read, sess.input) +
           '<span class="dim">' + (sess.turns || 0) + "轮 " + (sess.requests || 0) + "次</span>",
           "会话累计：当前会话全部请求的 token 消耗\n" + ioc(sess.input, sess.output, sess.cache_read, sess.reasoning, sess.cache_write) +
@@ -359,14 +363,16 @@
             (t1.errors ? " · 错 " + t1.errors : ""));
         });
         it(ico('<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>') +
-          '<span class="k">工具</span><span class="v">' + (tls.total || 0) + "</span>" +
-          (tls.errors ? '<span class="eb">' + tls.errors + "误</span>" : ""),
+          '<span class="v">' + (tls.total || 0) + "</span>" +
+          (tls.errors ? '<span class="eb">' +
+            ico('<circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>') +
+            tls.errors + "</span>" : ""),
           "工具调用：当前会话的工具使用统计（按调用次数排序）\n" +
           (toolLines.length ? toolLines.join("\n") : "无工具调用记录"));
       }
       if (state.show.today) {
         it(ico('<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>') +
-          '<span class="k">今日</span><span class="v">' + fmt(today.total) + "</span>",
+          '<span class="v">' + fmt(today.total) + "</span>",
           "今日合计：今天所有会话的 token 消耗\n" + ioc(today.input, today.output, today.cache_read, today.reasoning, today.cache_write) +
           "\n" + (today.requests || 0) + " 次请求" + (today.retries ? " · 重试 " + today.retries : ""));
       }
@@ -374,7 +380,7 @@
         /* v50：悬停 tooltip 只放汇总 + 打开面板的提示；各子代理明细在点击弹出的
          * 固定面板里用页签切换（面板固定不随鼠标，页签点击没有几何问题） */
         it(ico('<path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>') +
-          '<span class="k">子代理</span><span class="v">' + fmt(d.sub.total) + "</span>" +
+          '<span class="v">' + fmt(d.sub.total) + "</span>" +
           (d.sub.active ? '<span class="ok dot">●</span>' : ""),
           "子代理：当前会话的后台子代理消耗（独立统计，不计入会话累计）\n" +
           ioc(d.sub.input, d.sub.output, d.sub.cache_read, d.sub.reasoning, d.sub.cache_write) +
@@ -976,7 +982,7 @@
 
     /* 卡片下移让位：给视觉卡片加 margin-bottom 空出悬浮带（条在卡片正下方）。
      * React 重渲染会重置内联样式，track() 逐帧对比补回（v14 同款机制）。 */
-    var CARD_MARGIN = "34px";   // v54 条高 25→30px，让位带同步 +4 保持 4px 悬浮缝
+    var CARD_MARGIN = "24px";   // 条贴窗口底后只需把卡片推高到条顶上方 ~5px（v58；原生底距 ~15px + 24 ≈ 条高+顶缝）
     function ensureCardPad() {
       if (!cardCache) return;
       try {
@@ -1118,12 +1124,12 @@
         }
         hideSince = 0;
         if (curDisplay !== "flex") { bar.style.display = "flex"; curDisplay = "flex"; }
-        /* 悬浮在输入框视觉卡片正下方（卡片被 margin 上移让位），胶囊左缘与卡片左缘对齐 */
+        /* 悬浮贴窗口底（条下只留 3px）：v57 前贴卡片底，让位带与条高之差+ZCode 原生
+         * 底部留白全漏在条下方（用户实测 ~15px 空白）；水平仍与卡片左缘对齐 */
         var anchor = cardCache || composer;
         var ar = anchor.getBoundingClientRect();
         var left = Math.round(ar.left);
-        var top = Math.round(ar.bottom + 4);
-        top = Math.max(8, Math.min(top, innerHeight - bar.offsetHeight - 2));
+        var top = Math.max(8, Math.round(innerHeight - bar.offsetHeight - 3));
         if (left !== lastPos[0] || top !== lastPos[1]) {
           bar.style.left = left + "px"; bar.style.top = top + "px";
           lastPos = [left, top];
