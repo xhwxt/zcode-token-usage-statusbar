@@ -54,7 +54,7 @@ def tool_token_usage(scope: str = "current") -> str:
                 f"{head}\n  {u['turns']} 轮 / {u['requests']} 次请求\n"
                 f"  input {zusage.fmt(u['input'])} (cache read {zusage.fmt(u['cache_read'])})  "
                 f"output {zusage.fmt(u['output'])}  合计 {zusage.fmt(u['total'])}\n"
-                f"  上下文水位 ≈ {zusage.fmt(u['last_request_input'])} tokens"
+                f"  上下文容量 ≈ {zusage.fmt(u['last_request_input'])} tokens"
             )
         return f"未知 scope: {scope!r}。可用: current | today | week | days:N | sessions[:N] | models[:days] | session:<id前缀>"
     finally:

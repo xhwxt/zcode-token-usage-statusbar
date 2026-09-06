@@ -108,7 +108,7 @@ def current_session(con):
 
 
 def session_usage(con, sid):
-    # last_request_input 取最近一次 completed 请求的 input_tokens（= 当前上下文水位）。
+    # last_request_input 取最近一次 completed 请求的 input_tokens（= 当前上下文容量）。
     # 不能用 max(input_tokens)：会话压缩后 input 骤降，峰值永远不回落（v28 修复）。
     r = con.execute(
         """select count(*), coalesce(sum(input_tokens),0), coalesce(sum(output_tokens),0),
@@ -191,7 +191,7 @@ def render_current(con):
             f"  input {fmt(u['input'])} (其中 cache read {fmt(u['cache_read'])})  "
             f"output {fmt(u['output'])}  合计 {fmt(u['total'])}"
         )
-        lines.append(f"  上下文水位 ≈ {fmt(u['last_request_input'])} tokens (最近一次请求输入)")
+        lines.append(f"  上下文容量 ≈ {fmt(u['last_request_input'])} tokens (最近一次请求输入)")
         if u["last_activity"]:
             lines.append(f"  最后活动: {u['last_activity']:%H:%M:%S}")
         lines.append("")

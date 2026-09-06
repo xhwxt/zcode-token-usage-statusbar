@@ -77,7 +77,7 @@
       ".dim{color:#6b7484}.btn{cursor:pointer;padding:0 4px;border-radius:3px;color:#77808f}" +
       ".btn:hover{color:#fff}" +
       "#zu-gear{flex:0 0 auto;padding:2px 6px;font-size:15px;border-radius:4px}" +
-      /* 上下文微进度条：量感一眼可读，填充色随水位三档。
+      /* 上下文微进度条：量感一眼可读，填充色随占比三档。
        * 填充块 background:currentColor —— 三档色类只给 color，填充靠 currentColor 着色
        * （v28 只写了 height 没写背景，填充块全透明 = "空条"根因）。 */
       ".cbar{display:inline-block;width:44px;height:6px;border-radius:3px;" +
@@ -154,7 +154,7 @@
     panel.innerHTML =
       '<div class="phead">⚙ 状态条设置<span class="pver">' + VERSION + '</span></div>' +
       '<div class="cap">显示项（条面）</div>' +
-      '<label><input type="checkbox" data-k="ctx"><span>上下文<em>进度条 + 百分比，颜色随水位变化</em></span></label>' +
+      '<label><input type="checkbox" data-k="ctx"><span>上下文<em>进度条 + 百分比，颜色随占比变化</em></span></label>' +
       '<label><input type="checkbox" data-k="turn"><span>本轮<em>tokens / 次数 / 单次耗时 / 首字</em></span></label>' +
       '<label><input type="checkbox" data-k="win"><span>会话累计<em>当前会话 tokens / 轮数 / 次数</em></span></label>' +
       '<label><input type="checkbox" data-k="tools"><span>工具调用<em>当前会话，悬停看各工具明细与错误</em></span></label>' +
@@ -277,7 +277,7 @@
         var cw = parseInt(state.ctxOv, 10) || state.nativeCtx || d.context_window || 0;
         var pct = cw ? sess.ctx / cw * 100 : 0;
         var exc = excActive(sess);
-        /* 水位档位分两套：窗口 ≥100 万时同一百分比的绝对 token 量大，40/60 提前预警；其余维持 70/85。 */
+        /* 占比档位分两套：窗口 ≥100 万时同一百分比的绝对 token 量大，40/60 提前预警；其余维持 70/85。 */
         var big = cw >= 1000000;
         var cls = exc ? "exc" : pct >= (big ? 60 : 85) ? "hot" : pct >= (big ? 40 : 70) ? "warm" : "ok";
         var bar = cw ? '<span class="cbar"><i class="' + cls + '" style="width:' +
@@ -286,7 +286,7 @@
               : '<span class="v' + (exc ? " exc" : "") + '">' + fmt(sess.ctx) + "</span>"),
           "上下文：当前会话上下文大小（最近一次请求的总输入）÷ 窗口容量\n已用 " +
           fmt(sess.ctx) + " / 窗口 " + fmt(cw) +
-          "\n颜色随水位：" + (big
+          "\n颜色随占比：" + (big
             ? "≤40% 绿 · 40–60% 黄 · ≥60% 红（窗口 ≥100 万）"
             : "<70% 绿 · 70–85% 黄 · ≥85% 红") +
           " · 超限被拒=亮红闪烁" +
