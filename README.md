@@ -13,7 +13,7 @@ ZCode 的插件机制（`plugin.json`）只能提供 MCP / skills / commands / h
 ## 功能
 
 - **输入框下方状态条**（实时）：token/s（最近一次请求的生成速度）、上下文（微进度条+百分比，随水位变色、超限亮红）、本轮（token / 缓存命中率 / 次数 / 轮耗时 / 首字）、会话累计、工具调用（含错误数）、今日合计、代码变更统计、子代理消耗（当前会话，运行中带 ● 指示），⚙ 面板可开关各显示项与上下文窗口 override。
-- **悬停明细**（自绘 tooltip，向上弹出）：token 项显示 输入/输出/缓存命中/缓存写入/思考；工具项显示调用明细；子代理按 tab 分显每个子代理会话的消耗与会话名。
+- **悬停明细**（自绘 tooltip，向上弹出）：token 项显示 输入/输出/缓存命中/缓存写入/思考；工具项显示调用明细；子代理项悬停只显示汇总并提示可点击（v50）——点击弹出固定明细面板（不随鼠标，与设置面板同机制），面板内页签切换 汇总+各子代理（v49/v50），每个子代理显示派发任务名+消耗明细（v52/v53）。
 - **上下文窗口自动识别**：优先读 ZCode 原生 UI（输入框工具行按钮文本"…总量 N"，服务端下发、自动跟随模型）→ 模型目录查表 → `config.json` 兜底。
 - **会话跟随**：读 localStorage 的会话键，每个对话窗口只显示它自己的数据；快照池外的会话也能显示。
 - **MCP 对话内查询**：`token_usage(scope)` 工具，scope 支持 current / today / week / days:N / sessions:N / models:days / session:<id前缀>。
@@ -104,6 +104,7 @@ python patch_install.py install
 - "当前会话"识别：读 localStorage 的 `zcode-v4-last-session:v1:<工作区路径>` 键（ZCode 切换会话即更新，实测跟踪可靠），值 = 会话 id，与快照 `recent`（最近 12 个活跃会话）求交集；多工作区候选时优先取刚切换的、否则取最近活跃的；无交集回退"最近活跃会话"。**顶栏的会话标题不在可扫描的 DOM 文本节点里，标题扫描方案实测永远失败，勿回退。**
 - "当前会话" = 最近 30 分钟内有请求的 session。
 - 子代理消耗 = 当前会话通过 `session.parent_id` 关联的全部子代理（`query_source='subagent'`）累计 token；● 表示 30 秒内有子代理请求（运行中）。
+- 子代理任务名（v52/v53）= 派发时 Agent 工具调用的 `description` 参数（与 ZCode 右侧"子智能体目录"面板同源，存 db `part` 表 Agent part 的 `state.input.description`）。与消耗记录的关联：主用**官方回执**——part 完成后 `state.output` 尾部 `agentId: agent_xxx` 行 → 子会话 id `sess_subagent_<agentId>`（客户端硬关联，零歧义）；兜底仅给运行中未出回执的条目：prompt 前缀匹配（子会话 title=prompt 前 57 字+"..."）且候选唯一才绑；配不上的显示线路名，宁无名不错名。
 - 与 ZCode 自带"设置→用量"互补：自带走供应商云端接口（套餐额度/剩余），本工具走本地 db（会话排行/上下文容量/对话内查询）。
 
 ## 诊断与排查
@@ -140,6 +141,7 @@ python patch_install.py install
 - **Git Bash (MSYS) 会把 `/FI` 等开关转成 Windows 路径**：tasklist/schtasks 一律用 Python subprocess + list 参数 + `decode('gbk','replace')` 调用。
 - **多窗口**：ZCode 有多个窗口（含后台小窗），loader 对所有窗口注入；诊断只允许成功挂载的窗口写（everMounted 门）。
 - **WAL 模式**：db 写入主要落在 `db.sqlite-wal`，判断"有新数据"要同时 stat 三件套的 mtime。
+- **子代理任务名勿用时间配对（v52 错配实锤）**：`session.title` 只是首条输入前 57 字截断、不是派发名；part 与子会话的创建时间差虽实测仅 20~230ms，但 error（取消/限额）派发的子会话可能已建+有消耗却永无回执，且多个任务书前 57 字常是公共开头——时间最近邻会把失败派发的名安给来源不明的子会话。必须用回执 `agentId:` 行硬关联，多候选宁无名。
 
 ## 已知限制
 
