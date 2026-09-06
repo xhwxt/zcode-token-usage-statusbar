@@ -32,7 +32,7 @@
   }, 0);
 
   function main$() {
-    var VERSION = "v55";   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
+    var VERSION = "v56";   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
     var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv" };
 
     /* ---------- 状态 ---------- */
