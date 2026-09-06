@@ -29,7 +29,7 @@
   }, 0);
 
   function main$() {
-    var VERSION = "v44";   // 每轮递增；悬停状态条可见，用于确认热更新到达
+    var VERSION = "v45";   // 每轮递增；悬停状态条可见，用于确认热更新到达
     var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv" };
 
     /* ---------- 状态 ---------- */
@@ -104,7 +104,7 @@
       ".panel label:hover{color:#e8ecf2}" +
       ".panel .pnote{font-size:11px;line-height:1.5;color:#77808f;margin-top:2px}" +
       /* 自绘 tooltip（v31）：向上弹出（原生 title 方向不可控且会被窗口下缘遮挡），
-       * 纯查看（v44 前的多 tab 已废）；white-space:pre-line 保留数据里的 \n 换行。
+       * 支持多 tab；white-space:pre-line 保留数据里的 \n 换行。
        * v32：fixed 挂 body —— 原 absolute 挂 bar，被页面消息流的层叠上下文盖住
        * （diag 实证 disp=block 但不可见），挂 body 用视口坐标独立定位。 */
       ".tip{position:fixed;background:rgba(18,20,27,.98);" +
@@ -112,6 +112,12 @@
       "font:12.5px/1.6 Consolas,'Microsoft YaHei UI',monospace;color:#cfd6e0;" +
       "box-shadow:0 6px 20px rgba(0,0,0,.5);white-space:pre-line;z-index:2147483646;" +
       "max-width:560px;display:none}" +
+      ".ttabs{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px;" +
+      "border-bottom:1px solid rgba(255,255,255,.1);padding-bottom:6px}" +
+      ".ttab{cursor:pointer;padding:1px 8px;border-radius:4px;background:rgba(255,255,255,.06);" +
+      "color:#9aa3b2;white-space:nowrap}" +
+      ".ttab:hover{color:#e6ebf3}" +
+      ".ttab.on{background:rgba(87,199,255,.18);color:#57c7ff}" +
       ".tbody{max-height:60vh;overflow:auto}" +
       /* 超限告警气泡（v39）：挂 body 的独立浮层（与 .tip 同套路，免受条面重建影响），
        * 红边警示 + 建议步骤 + 可点击复制的会话 ID；user-select:text 允许手动选中兜底 */
@@ -151,7 +157,7 @@
       '<div class="hr"></div>' +
       '<div class="pnote">悬停条面各项看明细；子代理项有标签页。数据源 ~/.zcode/cli/db/db.sqlite（只读），请求完成后才落库，数值随上次完成请求变化。</div>';
     bar.appendChild(panel);
-    /* 自绘 tooltip：向上弹出、纯查看（v44 起无 tab，鼠标不需要进入 tooltip）；取代原生 title（方向不可控，在窗口底边会朝下被遮挡） */
+    /* 自绘 tooltip：向上弹出、支持 tab（v45 起配空中走廊，移入点击不再被移开即隐掐断）；取代原生 title（方向不可控，在窗口底边会朝下被遮挡） */
     /* 自绘 tooltip 挂 body（fixed 视口坐标）：挂 bar 内会被消息流的层叠上下文盖住（v31 实证） */
     var tip = document.createElement("div");
     tip.className = "tip";
@@ -229,8 +235,8 @@
     }
 
     /* 显示顺序：本轮 → 上下文 → 会话 → 工具 → 今日 → 子代理；token 后带缓存命中率。
-     * v31：条面只放主数值；悬停改自绘 tooltip（向上弹、纯查看），随渲染以 tips[]
-     * 按 .it 顺序挂到元素 __tip——全部为字符串单页（v44 前 {tabs:[...]} 多 tab 已废）。
+     * v31：条面只放主数值；悬停改自绘 tooltip（向上弹、支持 tab），随渲染以 tips[]
+     * 按 .it 顺序挂到元素 __tip——字符串=单页，{tabs:[{name,text}]}=多 tab（子代理项）。
      * 缓存写入/思考/重试/错误均 >0 才显示，0 时不产生噪音。 */
     function fmtTime(ms) {
       var d = ms ? new Date(ms) : null;
@@ -314,22 +320,29 @@
           "\n" + (today.requests || 0) + " 次请求" + (today.retries ? " · 重试 " + today.retries : ""));
       }
       if (state.show.sub && d.sub && (d.sub.total || d.sub.active)) {
-        /* v44：改单页字符串类型（与工具等条目同型）——tooltip 移开即隐后鼠标进不去，
-         * tab 点不了（用户实测），明细全部并入单页文案 */
-        var subText = "子代理：当前会话的后台子代理消耗（独立统计，不计入会话累计）\n" +
-          ioc(d.sub.input, d.sub.output, d.sub.cache_read, d.sub.reasoning, d.sub.cache_write) +
-          "，共 " + (d.sub.requests || 0) + " 次" + (d.sub.active ? " · 运行中" : "");
+        /* v45：恢复多 tab 类型（v44 曾误删）——移入 tooltip 由空中走廊护航（见 mousemove），
+         * tab 可正常点击；汇总页 + 每个子代理一页，tab 用子代理会话名（截断） */
+        var tabs = [{
+          name: "汇总",
+          text: "子代理：当前会话的后台子代理消耗（独立统计，不计入会话累计）\n" +
+            ioc(d.sub.input, d.sub.output, d.sub.cache_read, d.sub.reasoning, d.sub.cache_write) +
+            "，共 " + (d.sub.requests || 0) + " 次" + (d.sub.active ? " · 运行中" : "") +
+            "\n点上方标签查看每个子代理的具体消耗"
+        }];
         (d.sub.list || []).forEach(function (s1) {
           var name = String(s1.title || "").trim() ||
             String(s1.agent || "sub").replace(/^zcode-/, "") + "…" + String(s1.sid).slice(-4);
-          subText += "\n\n" + name + "（" + String(s1.agent || "subagent").replace(/^zcode-/, "") +
-            " …" + String(s1.sid).slice(-4) + "）" + (s1.active ? " · 运行中" : "") +
-            "\n总消耗 " + fmt(s1.total) + " · " + s1.requests + " 次请求\n" +
-            ioc(s1.input, s1.output, s1.cache_read, s1.reasoning, s1.cache_write) +
-            (s1.last ? "\n最后活动 " + fmtTime(s1.last) : "");
+          tabs.push({
+            name: name.length > 12 ? name.slice(0, 11) + "…" : name,
+            text: name + "（" + String(s1.agent || "subagent").replace(/^zcode-/, "") +
+              " …" + String(s1.sid).slice(-4) + "）" + (s1.active ? " · 运行中" : "") +
+              "\n总消耗 " + fmt(s1.total) + " · " + s1.requests + " 次请求\n" +
+              ioc(s1.input, s1.output, s1.cache_read, s1.reasoning, s1.cache_write) +
+              (s1.last ? "\n最后活动 " + fmtTime(s1.last) : "")
+          });
         });
         it('<span class="k">子代理</span><span class="v">' + fmt(d.sub.total) + "</span>" +
-          (d.sub.active ? '<span class="ok dot">●</span>' : ""), subText);
+          (d.sub.active ? '<span class="ok dot">●</span>' : ""), { tabs: tabs });
       }
       return { s: items.join('<span class="sep">│</span>') || '<span class="dim">全部显示项已关闭</span>', tips: tips };
     }
@@ -453,8 +466,8 @@
     }
     window.__zusageUpdate = function (d) { if (stale()) return; try { render(d); } catch (e) { FATAL.updateErr = String((e && e.stack) || e); } };
 
-    /* ---------- 自绘 tooltip：向上弹出、纯查看（原生 title 方向不可控） ---------- */
-    var tipFor = null, lastMoveAt = 0, tipSig = "";
+    /* ---------- 自绘 tooltip：向上弹出（原生 title 方向不可控），支持 tab ---------- */
+    var tipFor = null, tipTab = 0, lastMoveAt = 0, tipSig = "";
     var mouseInBar = false;   // 鼠标是否悬停在条面/tooltip/面板上（最近一次 mousemove 判定）
     var tipStats = { mv: 0, shows: 0, hides: 0, last: "", lastHide: "" };   // 诊断：随 mount diag 回写
     /* 隐藏总闸（v33.3）：鼠标还在条面上时，任何路径（数据刷新接管失败/输入框重建/
@@ -472,8 +485,7 @@
       var tr = tip.getBoundingClientRect(), ar = el.getBoundingClientRect();
       var left = ar.left + ar.width / 2 - tr.width / 2;
       left = Math.max(8, Math.min(left, Math.max(8, innerWidth - tr.width - 8)));
-      /* v44：恢复悬空 8px（v43 的 2px 搭接作废）——子代理 tooltip 已改纯查看单页，
-       * 没有任何交互需要鼠标进入 tooltip；移开即隐下悬空视觉更对（用户指定） */
+      /* v45：悬空 8px（视觉原样）——悬空缝的移入问题由 inTipCorridor 空中走廊解决 */
       var top = Math.max(8, ar.top - tr.height - 8);
       tip.style.left = Math.round(left) + "px";
       tip.style.top = Math.round(top) + "px";
@@ -481,19 +493,42 @@
     function drawTip(el) {
       var t = el && el.__tip;
       if (!t) { tip.style.display = "none"; tipFor = null; return; }
-      /* 幂等：内容没变就只调位置，不重建 innerHTML（重建=悬停中每 1.5s 闪烁） */
-      if (t === tipSig && tip.style.display === "block") {
+      var body;
+      var tabIdx = 0;
+      var sig;
+      if (typeof t === "string") {
+        sig = "s:" + t;
+      } else {   // {tabs:[{name,text}]}
+        tabIdx = Math.max(0, Math.min(tipTab, t.tabs.length - 1));
+        sig = "t" + tabIdx + ":" + t.tabs[tabIdx].text;
+      }
+      /* 幂等：内容与页签都没变就只调位置，不重建 innerHTML（重建=悬停中每 1.5s 闪烁） */
+      if (sig === tipSig && tip.style.display === "block") {
         positionTip(el);
         return;
       }
-      tipSig = t;
-      tip.innerHTML = '<div class="tbody"></div>';
-      tip.firstChild.textContent = t;
+      tipSig = sig;
+      if (typeof t !== "string") {
+        var h = '<div class="ttabs">';
+        for (var i = 0; i < t.tabs.length; i++)
+          h += '<span class="ttab' + (i === tabIdx ? " on" : "") + '" data-i="' + i + '"></span>';
+        h += '</div><div class="tbody"></div>';
+        tip.innerHTML = h;
+        var tabs = tip.querySelectorAll(".ttab");
+        for (var j = 0; j < t.tabs.length; j++) tabs[j].textContent = t.tabs[j].name;
+        body = tip.querySelector(".tbody");
+        body.textContent = t.tabs[tabIdx].text;
+      } else {
+        tip.innerHTML = '<div class="tbody"></div>';
+        body = tip.firstChild;
+        body.textContent = t;
+      }
       tip.style.display = "block";
       positionTip(el);
     }
     function showTipFor(el) {
       tipFor = el;
+      tipTab = 0;
       var its = main.querySelectorAll(".it");
       el.__idx = el === main ? -1 : Array.prototype.indexOf.call(its, el);
       el.__n = its.length;   // render 接管时校验条目数未变，数量变了 __idx 就不可信
@@ -520,6 +555,10 @@
         return;
       }
       if (!t.closest("#zusage-bar")) {
+        /* 空中走廊（v45）：悬空缝是"条外且 tip 外"的真空带，采样事件落在这里会被误判
+         * 成"移开"立即熄灭——鼠标在 tooltip 横向范围、底边下方 ~12px 内时视同仍在条上，
+         * 穿行去 tooltip 点 tab 的路上不熄灭；横向/向下移出走廊立即隐藏（v43 语义不变） */
+        if (tipFor && inTipCorridor(e.clientX, e.clientY)) { mouseInBar = true; return; }
         mouseInBar = false;
         if (tipFor) hideTip(true, "left-bar");   // v43：移开条面立即消失，不再留 300ms 缓冲
         return;
@@ -544,6 +583,19 @@
     }
     document.documentElement.addEventListener("mouseleave", tipWinLeave, true);
     window.addEventListener("blur", tipWinLeave, true);
+    /* 空中走廊判定（v45）：tooltip 矩形横向 ±4px、纵向 tip 顶边到底边下方 12px
+     * （覆盖条面顶边到 tooltip 底边的 8px 悬空缝）。只在 tipFor 存在时被调用。 */
+    function inTipCorridor(x, y) {
+      var r = tip.getBoundingClientRect();
+      return x >= r.left - 4 && x <= r.right + 4 && y >= r.top && y <= r.bottom + 12;
+    }
+    tip.addEventListener("click", function (e) {
+      if (stale()) return;
+      var b = e.target && e.target.closest ? e.target.closest(".ttab") : null;
+      if (!b || !tipFor) return;
+      tipTab = +b.getAttribute("data-i") || 0;
+      drawTip(tipFor);
+    });
 
     /* ---------- 设置面板 ---------- */
     function syncPanel() {
