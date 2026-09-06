@@ -29,7 +29,7 @@
   }, 0);
 
   function main$() {
-    var VERSION = "v51";   // 每轮递增；悬停状态条可见，用于确认热更新到达
+    var VERSION = "v52";   // 每轮递增；悬停状态条可见，用于确认热更新到达
     var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv" };
 
     /* ---------- 状态 ---------- */
@@ -741,7 +741,8 @@
       tabsRow.className = "ttabs";
       var labels = ["汇总"];
       list.forEach(function (s1) {
-        var nm = String(s1.title || "").trim() ||
+        /* task=派发时的 description（右侧"子智能体目录"同源）；无则退回 title/线路名 */
+        var nm = String(s1.task || "").trim() || String(s1.title || "").trim() ||
           String(s1.agent || "sub").replace(/^zcode-/, "") + "…" + String(s1.sid).slice(-4);
         labels.push(nm.length > 12 ? nm.slice(0, 11) + "…" : nm);
       });
@@ -757,7 +758,7 @@
       body.className = "tbody";   // 复用 tooltip 内容容器的限高滚动
       subPanel.appendChild(body);
       function fillRow(row, s1) {
-        var nm = String(s1.title || "").trim() ||
+        var nm = String(s1.task || "").trim() || String(s1.title || "").trim() ||
           String(s1.agent || "sub").replace(/^zcode-/, "") + "…" + String(s1.sid).slice(-4);
         var n = document.createElement("div");
         n.className = "subname";

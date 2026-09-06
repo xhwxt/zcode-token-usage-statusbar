@@ -240,6 +240,17 @@ def lookup_context_window(model_id):
     return result
 
 
+def _prompt_matches(title, prompt):
+    """子会话 title 是否为 Agent part prompt 的截断头（ZCode 规则：prompt 前 57 字符 + "..."）。"""
+    t = (title or "").strip()
+    if not t or not prompt:
+        return False
+    if t.endswith("..."):
+        base = t[:-3]
+        return len(base) >= 15 and prompt.startswith(base)
+    return prompt.startswith(t)
+
+
 def _session_snapshot(con, sid, cfg):
     """单个会话的完整快照（最新会话与 recent 列表共用一份结构）。"""
     srow = con.execute("select * from session where id=?", (sid,)).fetchone()
@@ -302,12 +313,41 @@ def _session_snapshot(con, sid, cfg):
                   coalesce(sum(m.computed_total_tokens),0),
                   coalesce(sum(m.input_tokens),0), coalesce(sum(m.output_tokens),0),
                   coalesce(sum(m.cache_read_input_tokens),0), coalesce(sum(m.reasoning_tokens),0),
-                  coalesce(sum(m.cache_creation_input_tokens),0), max(m.completed_at)
+                  coalesce(sum(m.cache_creation_input_tokens),0), max(m.completed_at), s2.time_created
            from model_usage m join session s2 on m.session_id = s2.id
            where m.query_source='subagent' and s2.parent_id=? and m.status='completed'
            group by m.session_id order by max(m.completed_at) desc""",
         (sid,),
     ).fetchall()
+    # 子代理任务名：Agent 工具调用 part 的 input.description（与右侧"子智能体目录"面板同源）。
+    # 历史 part 不带 childSessionId，按 UI 的 title 规则反向关联：子会话 title（去 "..."）是
+    # prompt 前缀，同前缀并行/重试场景用创建时间最近邻（实测差 20~230ms）+ 消去法配对。
+    sub_tasks = {}
+    if sub_rows:
+        sub_info = [(r[0], r[2], r[11] or 0) for r in sub_rows]
+        agent_parts = []
+        for prow in con.execute(
+            """select data, time_created from part
+               where session_id=? and data like '%"tool":"Agent"%' order by time_created""",
+            (sid,),
+        ):
+            try:
+                o = json.loads(prow[0])
+                inp = (o.get("state") or {}).get("input") or {}
+                desc = str(inp.get("description") or "").strip()
+                if desc:
+                    agent_parts.append((desc, str(inp.get("prompt") or "").strip(), prow[1] or 0))
+            except Exception:
+                continue   # part.data 解析失败跳过该条，不影响其余
+        used = set()
+        for desc, prompt, pt in agent_parts:
+            cands = [x for x in sub_info if x[0] not in used and _prompt_matches(x[1], prompt)]
+            if not cands:
+                cands = [x for x in sub_info if x[0] not in used and abs((x[2] or 0) - pt) < 5000]
+            if cands:
+                best = min(cands, key=lambda x: abs((x[2] or 0) - pt))
+                sub_tasks[best[0]] = desc
+                used.add(best[0])
     now_ms = int(time.time() * 1000)
     sub = {
         "requests": sum(r[3] for r in sub_rows),
@@ -319,7 +359,8 @@ def _session_snapshot(con, sid, cfg):
         "cache_write": sum(r[9] for r in sub_rows),
         "active": any(r[10] and now_ms - r[10] < 30000 for r in sub_rows),
         "list": [
-            {"sid": r[0], "agent": r[1], "title": r[2], "requests": r[3], "total": r[4],
+            {"sid": r[0], "agent": r[1], "title": r[2], "task": sub_tasks.get(r[0], ""),
+             "requests": r[3], "total": r[4],
              "input": r[5], "output": r[6], "cache_read": r[7], "reasoning": r[8],
              "cache_write": r[9], "last": (r[10] or 0),
              "active": bool(r[10] and now_ms - r[10] < 30000)}
