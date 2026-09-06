@@ -15,7 +15,7 @@ ZCode 的插件机制（`plugin.json`）只能提供 MCP / skills / commands / h
 - **输入框下方状态条**（实时）：token/s（最近一次请求的生成速度）、上下文（微进度条+百分比，随水位变色、超限亮红）、本轮（token / 缓存命中率 / 次数 / 轮耗时 / 首字）、会话累计、工具调用（含错误数）、今日合计、代码变更统计、子代理消耗（当前会话，运行中带 ● 指示），⚙ 面板可开关各显示项与上下文窗口 override。
 - **悬停明细**（自绘 tooltip，向上弹出）：token 项显示 输入/输出/缓存命中/缓存写入/思考；工具项显示调用明细；子代理项悬停只显示汇总并提示可点击（v50）——点击弹出固定明细面板（不随鼠标，与设置面板同机制），面板内页签切换 汇总+各子代理（v49/v50），每个子代理显示派发任务名+消耗明细（v52/v53）。
 - **上下文窗口自动识别**：优先读 ZCode 原生 UI（输入框工具行按钮文本"…总量 N"，服务端下发、自动跟随模型）→ 模型目录查表 → `config.json` 兜底。
-- **会话跟随**：读 localStorage 的会话键，每个对话窗口只显示它自己的数据；快照池外的会话也能显示。
+- **会话跟随**（v34）：泵按窗口注入本窗口焦点会话 id（渲染端经客户端 IPC 通道上报），每个对话窗口只显示它自己的数据，池里没有就显示零值、绝不串显别的会话；localStorage 会话键仅作兜底。快照池外的会话也能显示。
 - **MCP 对话内查询**：`token_usage(scope)` 工具，scope 支持 current / today / week / days:N / sessions:N / models:days / session:<id前缀>。
 - **CLI**：`python zusage.py [now|today|json|days N|sessions [N]|models [days]|watch [秒]]`。
 - **/usage 命令**：对话输入框触发 MCP 查询。
@@ -77,7 +77,7 @@ python patch_install.py install
 | 改了什么 | 生效方式 |
 |---|---|
 | `overlay.js` | 重跑 install.py 同步副本后，`hot_reload` 开着时 ~2 秒热更新，免重启（loader 检测副本 mtime，`new Function` 语法校验通过才注入，防载入写一半的文件）；`hot_reload: false` 关闭后改完需重启 |
-| `zusage.py` | 重跑 install.py 同步副本后，下次轮询即生效（每次轮询都是新进程） |
+| `zusage.py` | 重跑 install.py 同步副本后，泵检测到副本 mtime 变化即自动重启常驻 python（~2 秒生效）；一次性回退模式下仍是每次轮询新进程、下次轮询生效 |
 | `config.json`（数据目录） | 下次拉取时生效（拉取由 db 写入触发；完全空闲时最迟一个兜底心跳，默认 30s） |
 | `inject-main.cjs` 本身 / 首次安装 / 标准↔dev 互切 | 重跑 `python install.py` 后**需重启 ZCode**（注入行含绝对路径，脚本自动替换旧行） |
 
@@ -102,8 +102,8 @@ python patch_install.py install
 - 缓存命中率 = cache_read ÷ input_tokens（input 已含 cache_read）。缓存写入是本次请求新写进供应商缓存的量（计费高于普通输入），缓存命中是直接复用已有缓存前缀的量。
 - token/s = 最近一次请求的 output_tokens ÷ 生成耗时（completed_at − first_token_at）。db 只在请求完成时落库，故该值每完成一次请求更新一次，不是流式过程中的实时速率。
 - 上下文水位 = 最近一次 completed 请求的 input_tokens ÷ 上下文窗口（会话压缩后自然回落，不显示峰值）。
-- "当前会话"识别：读 localStorage 的 `zcode-v4-last-session:v1:<工作区路径>` 键（ZCode 切换会话即更新，实测跟踪可靠），值 = 会话 id，与快照 `recent`（最近 12 个活跃会话）求交集；多工作区候选时优先取刚切换的、否则取最近活跃的；无交集回退"最近活跃会话"。**顶栏的会话标题不在可扫描的 DOM 文本节点里，标题扫描方案实测永远失败，勿回退。**
-- "当前会话" = 最近 30 分钟内有请求的 session。
+- "当前会话"识别（状态条，v34 起）：主链路是**泵按窗口注入 mine**——渲染端经客户端自带 IPC 通道 `zcode:sync-active-task-session` 上报本窗口焦点会话 id，主进程推送时按窗口带上；overlay 只显示 mine 对应的池条目，池里没有（新会话无数据）就显示零值，**绝不回退到别的会话**（多窗口共享 localStorage 时旧启发式必错，实测）。兜底（辅助窗口/泵无该窗口信息）：读 localStorage 的 `zcode-v4-last-session:v1:<工作区路径>` 键（ZCode 切换会话即更新），值 = 会话 id，与快照 `recent`（12 条）求交集；多工作区候选时优先取刚切换的、否则取最近活跃的。**顶栏的会话标题不在可扫描的 DOM 文本节点里，标题扫描方案实测永远失败，勿回退。**
+- "当前会话"（CLI / MCP `scope=current`）= 最近 30 分钟内有请求的 session（`current_session`，状态条不用此口径）。
 - 子代理消耗 = 当前会话通过 `session.parent_id` 关联的全部子代理（`query_source='subagent'`）累计 token；● 表示 30 秒内有子代理请求（运行中）。
 - 子代理任务名（v52/v53）= 派发时 Agent 工具调用的 `description` 参数（与 ZCode 右侧"子智能体目录"面板同源，存 db `part` 表 Agent part 的 `state.input.description`）。与消耗记录的关联：主用**官方回执**——part 完成后 `state.output` 尾部 `agentId: agent_xxx` 行 → 子会话 id `sess_subagent_<agentId>`（客户端硬关联，零歧义）；兜底仅给运行中未出回执的条目：prompt 前缀匹配（子会话 title=prompt 前 57 字+"..."）且候选唯一才绑；配不上的显示线路名，宁无名不错名。
 - 与 ZCode 自带"设置→用量"互补：自带走供应商云端接口（套餐额度/剩余），本工具走本地 db（会话排行/上下文容量/对话内查询）。
