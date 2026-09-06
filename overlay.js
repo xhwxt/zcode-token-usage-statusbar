@@ -29,7 +29,7 @@
   }, 0);
 
   function main$() {
-    var VERSION = "v42";   // 每轮递增；悬停状态条可见，用于确认热更新到达
+    var VERSION = "v43";   // 每轮递增；悬停状态条可见，用于确认热更新到达
     var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv" };
 
     /* ---------- 状态 ---------- */
@@ -465,30 +465,28 @@
     window.__zusageUpdate = function (d) { if (stale()) return; try { render(d); } catch (e) { FATAL.updateErr = String((e && e.stack) || e); } };
 
     /* ---------- 自绘 tooltip：向上弹出（原生 title 方向不可控），支持 tab ---------- */
-    var tipFor = null, tipTab = 0, tipHideTimer = 0, lastMoveAt = 0, tipSig = "";
+    var tipFor = null, tipTab = 0, lastMoveAt = 0, tipSig = "";
     var mouseInBar = false;   // 鼠标是否悬停在条面/tooltip/面板上（最近一次 mousemove 判定）
     var tipStats = { mv: 0, shows: 0, hides: 0, last: "", lastHide: "" };   // 诊断：随 mount diag 回写
     /* 隐藏总闸（v33.3）：鼠标还在条面上时，任何路径（数据刷新接管失败/输入框重建/
-     * 瞬时不可见判定）都不得隐藏 tooltip——只有鼠标真正离开（scheduleHide 计时到点，
-     * 且此时 mouseInBar 已是 false）或条面整体隐藏（force）才允许。 */
+     * 瞬时不可见判定）都不得隐藏 tooltip——只有鼠标真正离开条面（left-bar，force）
+     * 或条面整体隐藏（force）才允许。 */
     function hideTip(force, cause) {
       if (!force && mouseInBar) { tipStats.lastHide = "blocked:" + (cause || "?"); return; }
-      clearTimeout(tipHideTimer);
       if (tip.style.display !== "none") tip.style.display = "none";
       tipFor = null;
       tipSig = "";
       tipStats.hides++;
       tipStats.lastHide = cause || "?";
     }
-    function scheduleHide() {
-      clearTimeout(tipHideTimer);
-      tipHideTimer = setTimeout(function () { hideTip(false, "left-bar"); }, 300);   // 缓冲：鼠标穿缝隙去 tooltip 的路上不熄灭
-    }
     function positionTip(el) {
       var tr = tip.getBoundingClientRect(), ar = el.getBoundingClientRect();
       var left = ar.left + ar.width / 2 - tr.width / 2;
       left = Math.max(8, Math.min(left, Math.max(8, innerWidth - tr.width - 8)));
-      var top = Math.max(8, ar.top - tr.height - 8);
+      /* v43：tooltip 底边与锚元素顶边搭接 2px（原悬空 8px）——移开条面改为立即隐藏后，
+       * 鼠标从条目移进 tooltip 的路上不能经过"既不在条内也不在 tip 上"的真空缝隙，
+       * 否则半路就被掐死、tab 点不了；搭接后 transit 全程命中归属明确。 */
+      var top = Math.max(8, ar.top - tr.height + 2);
       tip.style.left = Math.round(left) + "px";
       tip.style.top = Math.round(top) + "px";
     }
@@ -529,7 +527,6 @@
       positionTip(el);
     }
     function showTipFor(el) {
-      clearTimeout(tipHideTimer);
       tipFor = el;
       tipTab = 0;
       var its = main.querySelectorAll(".it");
@@ -549,17 +546,17 @@
       lastMoveAt = Date.now();
       var t = e.target;
       if (!t || !t.closest) return;
-      if (t.closest("#zusage-tip")) { mouseInBar = true; clearTimeout(tipHideTimer); return; }   // 鼠标移入 tooltip：保持
+      if (t.closest("#zusage-tip")) { mouseInBar = true; return; }   // 鼠标移入 tooltip：保持
       if (t.closest(".panel")) {
         /* 面板上不保留条面 tooltip（v42）：开设置的路上触发过条目 tooltip 的话，
-         * 原逻辑在这分支 clearTimeout 反而把它挂住——鼠标在面板里就永不消失。 */
+         * 这分支若不清掉它，鼠标在面板里它就永不消失。 */
         mouseInBar = true;
         if (tipFor) hideTip(true, "panel-hover");
         return;
       }
       if (!t.closest("#zusage-bar")) {
         mouseInBar = false;
-        if (tipFor) scheduleHide();   // 离开条面：300ms 缓冲后隐藏（计时到点时 mouseInBar 已 false，总闸放行）
+        if (tipFor) hideTip(true, "left-bar");   // v43：移开条面立即消失，不再留 300ms 缓冲
         return;
       }
       mouseInBar = true;
@@ -567,14 +564,21 @@
       var el = t.closest(".it");
       if (el) {
         if (el !== tipFor) showTipFor(el);
-        else clearTimeout(tipHideTimer);
       } else if (tipFor) {
-        /* 条面内非条目区（项间隔/分隔符/⚙）：保持当前 tooltip 不动。
+        /* 条面内非条目区（项间隔/分隔符/⚙）：保持当前 tooltip 不动（此处刻意无操作）。
          * 慢速移动时命中目标在条目↔空隙间反复跳，若此处切换内容/隐藏
          * 就是"出现一下立刻消失"的闪烁（v33.2，概览 tooltip 因此废除） */
-        clearTimeout(tipHideTimer);
       }
     }, true);
+    /* 鼠标甩出窗口外/窗口失焦：tooltip 立即收起（v43）——离开窗口不再产生 mousemove，
+     * 最后一条还落在条面上时 tooltip 会一直挂着，违背"移开立即不显示" */
+    function tipWinLeave() {
+      if (stale()) return;
+      mouseInBar = false;
+      if (tipFor) hideTip(true, "win-leave");
+    }
+    document.documentElement.addEventListener("mouseleave", tipWinLeave, true);
+    window.addEventListener("blur", tipWinLeave, true);
     tip.addEventListener("click", function (e) {
       if (stale()) return;
       var b = e.target && e.target.closest ? e.target.closest(".ttab") : null;
