@@ -1,9 +1,12 @@
-/* ZCode token 用量状态条 v28（渲染进程注入，自包含 IIFE）。
+/* ZCode token 用量状态条 v54（渲染进程注入，自包含 IIFE）。
  * 形态：输入框视觉卡片正下方的悬浮胶囊条 —— 给卡片加 margin-bottom 上移让位，
  *       条 fixed 悬浮在卡片边框外、窗口底边上的空带里，rAF 每帧跟随，左缘与卡片对齐。
  *       （条不能放在输入框中心点所在矩形内：命中检测自遮挡 = 周期性闪烁，v12-v14 实测。）
  * 视觉（v28）：半透明胶囊底 + 组间 │ 分隔 + 上下文微进度条（三档色）+ 子代理呼吸灯；
  *       条面只放主数值，明细进 hover title。
+ * 视觉（v54 重写）：玻璃拟态胶囊（blur+内高光+分层投影）、发丝分隔线替代 │ 字符、
+ *       条目悬浮底色提示可交互、行内 SVG 线性图标、tabular 数字、exc 呼吸闪烁、
+ *       面板/tooltip/气泡统一圆角玻璃系；行为机制（tooltip 生命周期/遮挡豁免/面板互斥）零改动。
  * 数据：主进程泵推 window.__zusageUpdate；显示项可在 ⚙ 面板配置（localStorage 持久化）。
  * 当前会话（v34）：泵按窗口注入 payload.mine（客户端渲染端经 IPC 向主进程上报的焦点会话 id，
  *       可为空串）；overlay 优先显示 mine 对应的池条目，池里还没有（新会话没数据）就显示
@@ -29,7 +32,7 @@
   }, 0);
 
   function main$() {
-    var VERSION = "v53";   // 每轮递增；悬停状态条可见，用于确认热更新到达
+    var VERSION = "v54";   // 每轮递增；悬停状态条可见，用于确认热更新到达
     var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv" };
 
     /* ---------- 状态 ---------- */
@@ -59,89 +62,114 @@
     var style = document.createElement("style");
     style.textContent =
       /* 胶囊条：半透明深底 + 微边框，与输入框视觉卡片形成层次；中文标签显式落雅黑 */
-      "#zusage-bar{position:fixed;font:14px/1.3 Consolas,'Cascadia Mono',Menlo,'Microsoft YaHei UI',monospace;" +
-      "color:#aab3c0;background:rgba(15,17,23,.78);border:1px solid rgba(255,255,255,.08);border-radius:7px;" +
-      "box-shadow:0 2px 10px rgba(0,0,0,.35);padding:2px 10px;user-select:none;" +
-      "display:flex;align-items:center;gap:9px;white-space:nowrap;" +
+      "#zusage-bar{position:fixed;font:12px/1.4 Consolas,'Cascadia Mono',Menlo,'Microsoft YaHei UI','Microsoft YaHei',monospace;" +
+      "font-variant-numeric:tabular-nums;color:#8791a3;" +
+      "background:rgba(15,18,25,.84);backdrop-filter:blur(14px) saturate(1.3);-webkit-backdrop-filter:blur(14px) saturate(1.3);" +
+      "border:1px solid rgba(255,255,255,.07);border-radius:9px;padding:2px 5px;user-select:none;" +
+      "box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 4px 14px rgba(0,0,0,.38),0 1px 3px rgba(0,0,0,.28);" +
+      "display:flex;align-items:center;gap:2px;white-space:nowrap;" +
       /* 条不能 overflow:hidden：设置面板是条的子元素、展开在条外上方，裁剪会吞掉面板（v15"点设置看不到窗口"根因）。
        * 超宽截断由 #zu-main 自己负责。 */
       "z-index:50}" +
-      "#zu-main{overflow:hidden;min-width:0;flex:0 1 auto;display:flex;align-items:center;gap:5px}" +
+      "#zu-main{overflow:hidden;min-width:0;flex:0 1 auto;display:flex;align-items:center;gap:1px}" +
       /* zu-main 不得带 .it class：querySelectorAll('.it') 收集 tooltip 时会把它算进第 0 位，
        * tips 全部错位一位且末项为 null —— v31"悬停只有空胶囊/内容错位"的根因 */
-      ".it{display:flex;align-items:center;gap:5px}" +
-      ".sep{color:#39414f;flex:0 0 auto}" +
-      ".k{color:#8a93a5}.v{color:#e6ebf3}" +
-      ".pct{font-weight:700}.warm{color:#ffc53d}.hot{color:#ff7a59}.ok{color:#35c46f}" +
-      ".exc{color:#ff2d55;text-shadow:0 0 6px rgba(255,45,85,.55)}" +
-      ".dim{color:#6b7484}.btn{cursor:pointer;padding:0 4px;border-radius:3px;color:#77808f}" +
-      ".btn:hover{color:#fff}" +
-      "#zu-gear{flex:0 0 auto;padding:2px 6px;font-size:15px;border-radius:4px}" +
+      ".it{display:flex;align-items:center;gap:4px;padding:3px 6px;border-radius:6px;" +
+      "transition:background-color .12s ease-out}" +
+      ".it:hover{background:rgba(255,255,255,.06)}" +
+      ".sep{width:1px;height:13px;background:rgba(255,255,255,.09);flex:0 0 auto;margin:0 1px}" +
+      ".k{color:#7e8899}.v{color:#e9edf4;font-weight:600}" +
+      ".pct{font-weight:700}.dim{color:#667082}" +
+      ".ok{color:#3ecf8e}.warm{color:#f5b944}.hot{color:#ff6b57}" +
+      /* 超限=亮红呼吸闪烁（v38 定性"亮红闪烁优先于一切档位"，v54 落成动画） */
+      "@keyframes zuexc{0%,100%{opacity:1}50%{opacity:.4}}" +
+      ".exc{color:#ff2d55;text-shadow:0 0 8px rgba(255,45,85,.5);animation:zuexc 1.1s ease-in-out infinite}" +
+      ".btn{cursor:pointer;padding:3px 6px;border-radius:6px;color:#7e8899;" +
+      "transition:background-color .12s ease-out,color .12s ease-out}" +
+      ".btn:hover{color:#e9edf4;background:rgba(255,255,255,.07)}" +
+      ".btn:active{transform:scale(.96)}" +
+      "#zu-gear{flex:0 0 auto;font-size:13px;border-radius:6px}" +
+      /* 行内 SVG 线性图标（v54）：currentColor 跟随文字色，一处定义全局换色 */
+      ".ico{width:12px;height:12px;flex:0 0 auto;color:#7e8899;opacity:.85}" +
+      /* 工具错误数徽标 */
+      ".eb{background:rgba(255,107,87,.14);color:#ff8a73;border-radius:999px;padding:0 6px;font-size:11px;line-height:16px;font-weight:600}" +
       /* 上下文微进度条：量感一眼可读，填充色随占比三档。
        * 填充块 background:currentColor —— 三档色类只给 color，填充靠 currentColor 着色
        * （v28 只写了 height 没写背景，填充块全透明 = "空条"根因）。 */
-      ".cbar{display:inline-block;width:44px;height:6px;border-radius:3px;" +
-      "background:rgba(255,255,255,.12);overflow:hidden;flex:0 0 auto}" +
-      ".cbar>i{display:block;height:100%;border-radius:3px;background:currentColor}" +
+      ".cbar{display:inline-block;width:46px;height:5px;border-radius:999px;" +
+      "background:rgba(255,255,255,.1);box-shadow:inset 0 0 0 1px rgba(255,255,255,.03);overflow:hidden;flex:0 0 auto}" +
+      ".cbar>i{display:block;height:100%;border-radius:999px;background:currentColor}" +
       /* 子代理运行中呼吸灯 */
       "@keyframes zupulse{0%,100%{opacity:1}50%{opacity:.2}}" +
-      ".dot{animation:zupulse 1.6s ease-in-out infinite}" +
-      ".panel{position:absolute;bottom:calc(100% + 8px);left:0;background:rgba(18,20,27,.97);" +
-      "border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:10px 12px;display:none;" +
-      "flex-direction:column;gap:6px;font:13px/1.6 Consolas,Menlo,monospace;color:#cfd6e0;" +
-      "box-shadow:0 6px 20px rgba(0,0,0,.5);min-width:270px;max-height:72vh;overflow:auto;" +
-      "white-space:normal;z-index:2147483647}" +
-      ".panel.open{display:flex}.panel label{display:flex;align-items:center;gap:7px;cursor:pointer}" +
-      ".panel input[type=text]{width:90px;background:#0c0e13;border:1px solid rgba(255,255,255,.16);" +
-      "color:#e8ecf2;border-radius:4px;padding:1px 5px;font:inherit}" +
-      ".panel .hr{border-top:1px solid rgba(255,255,255,.1);margin:3px 0}" +
-      ".panel .cap{color:#818b9c;margin-bottom:2px;font-size:11px;letter-spacing:.05em}" +
-      ".panel .phead{font-weight:700;color:#e6ebf3;font-size:13px;margin-bottom:4px}" +
-      ".panel .pver{color:#57c7ff;font-weight:400;font-size:11px;margin-left:6px}" +
-      ".panel label em{font-style:normal;color:#77808f;font-size:11px;display:block;margin-left:21px}" +
-      ".panel label{align-items:flex-start}" +
+      ".dot{animation:zupulse 1.6s ease-in-out infinite;font-size:10px;line-height:1}" +
+      ".panel{position:absolute;bottom:calc(100% + 10px);left:0;background:rgba(19,22,30,.97);" +
+      "backdrop-filter:blur(18px) saturate(1.3);-webkit-backdrop-filter:blur(18px) saturate(1.3);" +
+      "border:1px solid rgba(255,255,255,.09);border-radius:12px;padding:12px 14px;display:none;" +
+      "flex-direction:column;gap:4px;font:12.5px/1.65 Consolas,Menlo,'Microsoft YaHei UI',monospace;color:#c6cdd9;" +
+      "box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 12px 32px rgba(0,0,0,.5),0 2px 8px rgba(0,0,0,.35);" +
+      "min-width:280px;max-height:72vh;overflow:auto;white-space:normal;z-index:2147483647;" +
+      "scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.14) transparent}" +
+      ".panel.open{display:flex}" +
+      ".panel::-webkit-scrollbar{width:8px}" +
+      ".panel::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:999px}" +
+      ".panel label{display:flex;align-items:flex-start;gap:8px;cursor:pointer;padding:5px 8px;margin:0 -8px;" +
+      "border-radius:8px;transition:background-color .12s ease-out}" +
+      ".panel input[type=text]{width:110px;background:rgba(0,0,0,.3);border:1px solid rgba(255,255,255,.14);" +
+      "color:#e9edf4;border-radius:6px;padding:2px 7px;font:inherit;outline:none}" +
+      ".panel input[type=text]:focus{border-color:rgba(87,199,255,.55);box-shadow:0 0 0 2px rgba(87,199,255,.15)}" +
+      ".panel .hr{border-top:1px solid rgba(255,255,255,.08);margin:5px 0}" +
+      ".panel .cap{color:#6b7484;margin:4px 0 2px;font-size:10.5px;letter-spacing:.08em}" +
+      ".panel .phead{font-weight:700;color:#eef2f8;font-size:13px;margin-bottom:5px;display:flex;align-items:center;gap:8px}" +
+      ".panel .pver{color:#57c7ff;font-weight:400;font-size:10.5px;background:rgba(87,199,255,.12);border-radius:999px;padding:1px 8px}" +
+      ".panel label em{font-style:normal;color:#6f7989;font-size:11px;display:block}" +
       ".panel input[type=checkbox]{accent-color:#57c7ff;margin-top:3px}" +
-      ".panel label:hover{color:#e8ecf2}" +
-      ".panel .pnote{font-size:11px;line-height:1.5;color:#77808f;margin-top:2px}" +
+      ".panel .pnote{font-size:11px;line-height:1.6;color:#6f7989;margin-top:3px}" +
       /* 子代理明细面板（v49）：点击条目弹出的固定面板（与设置面板同机制，互斥打开）；
        * 面板不随鼠标消失，绕开悬停+tab 的全部几何问题。 */
       ".zu-sub{cursor:pointer}" +
       ".zu-sub:hover .v{color:#fff}" +
-      ".panel.subp{width:400px;max-width:60vw}" +
-      ".subrow{padding:4px 0;border-bottom:1px dashed rgba(255,255,255,.07)}" +
-      ".subrow:last-child{border-bottom:none}" +
-      ".subname{font-weight:700;color:#e6ebf3;overflow-wrap:anywhere}" +
-      ".substat{font-size:11.5px;color:#9aa3b2}" +
+      ".panel.subp{width:420px;max-width:60vw;gap:8px}" +
+      ".subrow{padding:8px 10px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);border-radius:8px}" +
+      ".subname{font-weight:600;color:#e9edf4;font-size:12.5px;overflow-wrap:anywhere}" +
+      ".substat{font-size:11px;color:#8791a3;margin-top:2px}" +
+      ".sublive{color:#3ecf8e;font-size:10.5px;font-weight:400;background:rgba(62,207,142,.12);border-radius:999px;padding:0 7px;margin-left:7px}" +
       /* 自绘 tooltip（v31）：向上弹出（原生 title 方向不可控且会被窗口下缘遮挡），
        * 支持多 tab；white-space:pre-line 保留数据里的 \n 换行。
        * v32：fixed 挂 body —— 原 absolute 挂 bar，被页面消息流的层叠上下文盖住
        * （diag 实证 disp=block 但不可见），挂 body 用视口坐标独立定位。 */
-      ".tip{position:fixed;background:rgba(18,20,27,.98);" +
-      "border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:8px 11px;" +
-      "font:12.5px/1.6 Consolas,'Microsoft YaHei UI',monospace;color:#cfd6e0;" +
-      "box-shadow:0 6px 20px rgba(0,0,0,.5);white-space:pre-line;z-index:2147483646;" +
-      "max-width:560px;display:none}" +
-      ".ttabs{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px;" +
-      "border-bottom:1px solid rgba(255,255,255,.1);padding-bottom:6px}" +
-      ".ttab{cursor:pointer;padding:1px 8px;border-radius:4px;background:rgba(255,255,255,.06);" +
-      "color:#9aa3b2;white-space:nowrap}" +
-      ".ttab:hover{color:#e6ebf3}" +
-      ".ttab.on{background:rgba(87,199,255,.18);color:#57c7ff}" +
-      ".tbody{max-height:60vh;overflow:auto}" +
+      ".tip{position:fixed;background:rgba(19,22,30,.98);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);" +
+      "border:1px solid rgba(255,255,255,.1);border-radius:10px;padding:8px 12px;" +
+      "font:12px/1.7 Consolas,'Microsoft YaHei UI',monospace;color:#c6cdd9;" +
+      "box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 10px 28px rgba(0,0,0,.5),0 2px 6px rgba(0,0,0,.3);" +
+      "white-space:pre-line;z-index:2147483646;max-width:560px;display:none;scrollbar-width:thin}" +
+      ".ttabs{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:7px}" +
+      ".ttab{cursor:pointer;padding:2px 10px;border-radius:999px;background:rgba(255,255,255,.06);" +
+      "color:#8791a3;white-space:nowrap;font-size:11.5px;" +
+      "transition:background-color .12s ease-out,color .12s ease-out}" +
+      ".ttab:hover{color:#e9edf4;background:rgba(255,255,255,.1)}" +
+      ".ttab.on{background:rgba(87,199,255,.16);color:#5ac8ff}" +
+      ".tbody{max-height:60vh;overflow:auto;scrollbar-width:thin}" +
+      ".tbody::-webkit-scrollbar{width:8px}" +
+      ".tbody::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:999px}" +
       /* 超限告警气泡（v39）：挂 body 的独立浮层（与 .tip 同套路，免受条面重建影响），
        * 红边警示 + 建议步骤 + 可点击复制的会话 ID；user-select:text 允许手动选中兜底 */
-      ".zusage-exc{position:fixed;max-width:470px;background:rgba(26,15,13,.97);" +
-      "border:1px solid rgba(255,45,85,.55);border-radius:8px;padding:10px 13px;" +
-      "font:13px/1.75 Consolas,'Microsoft YaHei UI',monospace;color:#e8ecf2;" +
-      "box-shadow:0 6px 24px rgba(0,0,0,.55);white-space:normal;z-index:2147483647;" +
+      ".zusage-exc{position:fixed;max-width:470px;" +
+      "background:linear-gradient(180deg,rgba(41,18,22,.98),rgba(27,14,16,.98));" +
+      "border:1px solid rgba(255,45,85,.4);border-radius:12px;padding:12px 15px;" +
+      "font:12.5px/1.8 Consolas,'Microsoft YaHei UI',monospace;color:#e9edf4;" +
+      "box-shadow:0 12px 32px rgba(0,0,0,.5),0 4px 18px rgba(255,45,85,.12);white-space:normal;z-index:2147483647;" +
       "user-select:text;display:none}" +
-      ".zusage-exc .xb-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:5px}" +
-      ".zusage-exc .xb-title{font-weight:700;color:#ff2d55}" +
-      ".zusage-exc .xb-close{cursor:pointer;color:#8a93a5;padding:0 3px;font-size:14px;line-height:1}" +
-      ".zusage-exc .xb-close:hover{color:#fff}" +
+      ".zusage-exc .xb-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}" +
+      ".zusage-exc .xb-title{font-weight:700;color:#ff5c77}" +
+      ".zusage-exc .xb-step{color:#c6cdd9}" +
+      ".zusage-exc .xb-close{cursor:pointer;color:#8791a5;padding:2px 5px;border-radius:6px;font-size:13px;line-height:1}" +
+      ".zusage-exc .xb-close:hover{color:#fff;background:rgba(255,255,255,.08)}" +
       ".zusage-exc .xb-sid{color:#57c7ff;cursor:pointer;text-decoration:underline dotted}" +
       ".zusage-exc .xb-sid:hover{color:#8adcff}" +
-      ".zusage-exc .xb-copied{color:#35c46f;font-size:12px;margin-left:6px;display:none}";
+      ".zusage-exc .xb-copied{color:#3ecf8e;font-size:11px;margin-left:6px;display:none}" +
+      /* 减少动态偏好：关闭呼吸/闪烁与悬浮过渡 */
+      "@media (prefers-reduced-motion:reduce){.exc,.dot{animation:none}" +
+      ".it,.btn,.ttab,.panel label{transition:none}}";
 
     /* 结构：文字项 + ⚙ 紧跟其后（无弹性空隙，不再推到最右）；面板绝对定位向上展开 */
     var bar = document.createElement("div");
@@ -263,6 +291,10 @@
         (cw > 0 ? " / 缓存写入 " + fmt(cw) : "") +
         (rea > 0 ? " / 思考 " + fmt(rea) : "");
     }
+    /* 行内 SVG 线性图标（v54）：stroke 走 currentColor，颜色由 .ico 控制统一换色 */
+    function ico(paths) {
+      return '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + paths + "</svg>";
+    }
     function html(d) {
       var sess = d.session || {}, lt = d.last_turn || {}, today = d.today || {}, last = d.last || {};
       var tls = d.tools || { total: 0, errors: 0, list: [] };
@@ -270,7 +302,8 @@
       function it(inner, tip, cls) { items.push('<span class="it' + (cls ? " " + cls : "") + '">' + inner + "</span>"); tips.push(tip || null); }
       if (last.tps) {   // 最近一次请求的生成速度，置顶显示；随数值三档变色
         var tpsCls = last.tps >= 70 ? "ok" : last.tps >= 40 ? "warm" : "hot";
-        it('<span class="' + tpsCls + '">' + last.tps + '</span><span class="dim">t/s</span>',
+        it(ico('<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>') +
+          '<span class="' + tpsCls + '">' + last.tps + '</span><span class="dim">t/s</span>',
           "生成速度：最近完成请求的输出 tokens ÷ 生成耗时（首 token → 完成）\n≥70 t/s 绿色 · 40–70 黄色 · <40 红色");
       }
       if (state.show.ctx) {
@@ -294,7 +327,8 @@
             "），需要压缩会话或新开会话" : ""));
       }
       if (state.show.turn) {
-        it('<span class="k">本轮</span><span class="v">' + fmt(lt.total) + "</span>" +
+        it(ico('<path d="M23 4v6h-6"/><path d="M20.49 15A9 9 0 1 1 18.36 5.64L23 10"/>') +
+          '<span class="k">本轮</span><span class="v">' + fmt(lt.total) + "</span>" +
           cachePct(lt.cache_read, lt.input) +
           '<span class="dim">' + (lt.requests || 0) + "次·耗时" + sec(last.duration_ms) +
           "·首字" + sec(last.ttft_ms) + "</span>",
@@ -306,7 +340,8 @@
           ((lt.retries || lt.tool_errors) ? " · 重试 " + (lt.retries || 0) + " · 工具错误 " + (lt.tool_errors || 0) : ""));
       }
       if (state.show.win) {
-        it('<span class="k">会话</span><span class="v">' + fmt(sess.total) + "</span>" +
+        it(ico('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>') +
+          '<span class="k">会话</span><span class="v">' + fmt(sess.total) + "</span>" +
           cachePct(sess.cache_read, sess.input) +
           '<span class="dim">' + (sess.turns || 0) + "轮 " + (sess.requests || 0) + "次</span>",
           "会话累计：当前会话全部请求的 token 消耗\n" + ioc(sess.input, sess.output, sess.cache_read, sess.reasoning, sess.cache_write) +
@@ -323,27 +358,30 @@
           toolLines.push(t1.name + " " + t1.count + "次 · " + sec(t1.duration_ms) +
             (t1.errors ? " · 错 " + t1.errors : ""));
         });
-        it('<span class="k">工具</span><span class="v">' + (tls.total || 0) + "</span>" +
-          (tls.errors ? '<span class="hot">' + tls.errors + "误</span>" : ""),
+        it(ico('<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>') +
+          '<span class="k">工具</span><span class="v">' + (tls.total || 0) + "</span>" +
+          (tls.errors ? '<span class="eb">' + tls.errors + "误</span>" : ""),
           "工具调用：当前会话的工具使用统计（按调用次数排序）\n" +
           (toolLines.length ? toolLines.join("\n") : "无工具调用记录"));
       }
       if (state.show.today) {
-        it('<span class="k">今日</span><span class="v">' + fmt(today.total) + "</span>",
+        it(ico('<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>') +
+          '<span class="k">今日</span><span class="v">' + fmt(today.total) + "</span>",
           "今日合计：今天所有会话的 token 消耗\n" + ioc(today.input, today.output, today.cache_read, today.reasoning, today.cache_write) +
           "\n" + (today.requests || 0) + " 次请求" + (today.retries ? " · 重试 " + today.retries : ""));
       }
       if (state.show.sub && d.sub && (d.sub.total || d.sub.active)) {
         /* v50：悬停 tooltip 只放汇总 + 打开面板的提示；各子代理明细在点击弹出的
          * 固定面板里用页签切换（面板固定不随鼠标，页签点击没有几何问题） */
-        it('<span class="k">子代理</span><span class="v">' + fmt(d.sub.total) + "</span>" +
+        it(ico('<path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>') +
+          '<span class="k">子代理</span><span class="v">' + fmt(d.sub.total) + "</span>" +
           (d.sub.active ? '<span class="ok dot">●</span>' : ""),
           "子代理：当前会话的后台子代理消耗（独立统计，不计入会话累计）\n" +
           ioc(d.sub.input, d.sub.output, d.sub.cache_read, d.sub.reasoning, d.sub.cache_write) +
           "，共 " + (d.sub.requests || 0) + " 次" + (d.sub.active ? " · 运行中" : "") +
           "\n点击条目打开面板，查看每个子代理的具体消耗", "zu-sub");
       }
-      return { s: items.join('<span class="sep">│</span>') || '<span class="dim">全部显示项已关闭</span>', tips: tips };
+      return { s: items.join('<span class="sep"></span>') || '<span class="dim">全部显示项已关闭</span>', tips: tips };
     }
 
     /* 当前会话识别（v34 起 mine 优先，此处为兜底启发式）：ZCode 在 localStorage 的
@@ -763,7 +801,13 @@
         var n = document.createElement("div");
         n.className = "subname";
         n.textContent = nm + "（" + String(s1.agent || "subagent").replace(/^zcode-/, "") +
-          " …" + String(s1.sid).slice(-4) + "）" + (s1.active ? " · 运行中" : "");
+          " …" + String(s1.sid).slice(-4) + "）";
+        if (s1.active) {   // 运行中徽章：动态名仍走 textContent，徽章是独立 span
+          var live = document.createElement("span");
+          live.className = "sublive";
+          live.textContent = "运行中";
+          n.appendChild(live);
+        }
         var st = document.createElement("div");
         st.className = "substat";
         st.textContent = "总消耗 " + fmt(s1.total) + " · " + (s1.requests || 0) + " 次请求" +
@@ -932,7 +976,7 @@
 
     /* 卡片下移让位：给视觉卡片加 margin-bottom 空出悬浮带（条在卡片正下方）。
      * React 重渲染会重置内联样式，track() 逐帧对比补回（v14 同款机制）。 */
-    var CARD_MARGIN = "30px";
+    var CARD_MARGIN = "34px";   // v54 条高 25→30px，让位带同步 +4 保持 4px 悬浮缝
     function ensureCardPad() {
       if (!cardCache) return;
       try {

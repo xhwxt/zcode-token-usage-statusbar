@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>状态条 v54 视觉重写 · 演示</title>
+<style>
+  /* 演示页自身是"ZCode 深色环境"的仿真布景：聊天流 + 底部输入卡片。
+     overlay.js 会自己找到 textarea 并把状态条挂在卡片正下方。 */
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:#17191f;color:#d7dce4;overflow:hidden;
+    font:14px/1.75 "Segoe UI","Microsoft YaHei UI","Microsoft YaHei",sans-serif;
+    display:flex;flex-direction:column}
+  .chat{flex:1;min-height:0;overflow:auto;padding:56px 24px 12px;max-width:860px;width:100%;margin:0 auto}
+  .msg{max-width:72%;margin-bottom:18px;padding:10px 14px;border-radius:12px;font-size:13.5px;line-height:1.8}
+  .msg.user{margin-left:auto;background:#2a2d36;color:#e9edf4;border-bottom-right-radius:4px}
+  .msg.bot{background:#20232b;border:1px solid rgba(255,255,255,.06);border-bottom-left-radius:4px}
+  .msg .who{font-size:11px;color:#7e8899;margin-bottom:2px;letter-spacing:.06em}
+  /* 输入卡片：overlay 会给它加 margin-bottom:30px 让出悬浮带，条挂在卡片正下方 */
+  .composer-card{width:min(760px,calc(100% - 48px));margin:0 auto 50px;flex:0 0 auto;
+    background:#20232b;border:1px solid rgba(255,255,255,.1);border-radius:12px;
+    box-shadow:0 8px 28px rgba(0,0,0,.35)}
+  .composer-card textarea{display:block;width:100%;height:64px;resize:none;border:0;outline:none;
+    background:transparent;color:#e9edf4;padding:12px 14px 4px;
+    font:13.5px/1.6 "Segoe UI","Microsoft YaHei UI",sans-serif}
+  .composer-card textarea::placeholder{color:#5b6474}
+  .composer-bar{display:flex;align-items:center;justify-content:space-between;padding:4px 10px 8px}
+  .chip{font-size:11.5px;color:#9aa3b2;background:rgba(255,255,255,.06);border-radius:999px;padding:2px 10px}
+  .send{width:26px;height:26px;border-radius:7px;background:#2f6df6;color:#fff;display:flex;
+    align-items:center;justify-content:center;font-size:13px}
+  /* 演示控制台（非状态条 UI 的一部分） */
+  .demo-ctl{position:fixed;top:14px;right:16px;z-index:900;width:250px;
+    background:rgba(25,28,36,.92);border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:12px 14px;
+    box-shadow:0 10px 30px rgba(0,0,0,.4)}
+  .demo-ctl h3{margin:0 0 2px;font-size:12.5px;color:#e9edf4;font-weight:600}
+  .demo-ctl .sub{font-size:11px;color:#7e8899;margin:0 0 9px}
+  .demo-ctl button{display:block;width:100%;text-align:left;margin-bottom:5px;padding:5px 10px;
+    font:12px/1.5 "Segoe UI","Microsoft YaHei UI",sans-serif;color:#c6cdd9;cursor:pointer;
+    background:rgba(255,255,255,.05);border:1px solid transparent;border-radius:8px}
+  .demo-ctl button:hover{background:rgba(255,255,255,.1)}
+  .demo-ctl button.on{background:rgba(87,199,255,.14);border-color:rgba(87,199,255,.35);color:#5ac8ff}
+  .demo-ctl .hint{font-size:11px;line-height:1.7;color:#7e8899;border-top:1px solid rgba(255,255,255,.08);
+    padding-top:8px;margin-top:4px}
+  .demo-ctl .hint b{color:#aeb6c4;font-weight:600}
+</style>
+</head>
+<body>
+  <main class="chat">
+    <div class="msg user">
+      <div class="who">我</div>
+      用安装的 UI 技能把状态条 / 面板 / tooltip 的显示效果重写一下，做完用模拟页面给我看。
+    </div>
+    <div class="msg bot">
+      <div class="who">ZCode</div>
+      v54 视觉重写完成：玻璃拟态胶囊、发丝分隔线、条目悬浮反馈、行内图标、tabular 数字，
+      面板与 tooltip 统一了圆角玻璃系。下方输入卡片正下方的悬浮条就是新形态（当前为模拟数据）。
+    </div>
+  </main>
+  <div class="composer-card">
+    <textarea placeholder="给 ZCode 发消息…（演示页输入框仅用于定位状态条）"></textarea>
+    <div class="composer-bar">
+      <span class="chip">Omen Alpha</span>
+      <span class="send">↑</span>
+    </div>
+  </div>
+
+  <aside class="demo-ctl">
+    <h3>演示控制</h3>
+    <p class="sub">切换状态条的数据场景</p>
+    <button data-sc="normal" class="on">① 正常运行（绿档）</button>
+    <button data-sc="warn">② 上下文偏高（黄档）</button>
+    <button data-sc="hot">③ 上下文危险（红档）</button>
+    <button data-sc="exc">④ 超限被拒（告警气泡）</button>
+    <button data-sc="empty">⑤ 新空会话（零值）</button>
+    <div class="hint">
+      <b>悬停</b>条面各项 → 明细 tooltip<br>
+      <b>点击「子代理」</b>条目 → 明细面板（页签）<br>
+      <b>点击 ⚙</b> → 设置面板（显示项开关）<br>
+      场景④ 会出现红色告警气泡，点 ✕ 可关闭
+    </div>
+  </aside>
+
+  <script src="overlay.js"></script>
+  <script>
+    /* ---- 模拟数据：结构与泵真实推送的 payload 完全一致（mine 注入 + recent 池 + today） ---- */
+    var SID = "sess_demo01a2b3c4d5e6";
+    var NOW = Date.now();
+    var TODAY = { total: 3421800, input: 2864100, output: 557700, reasoning: 213400,
+      cache_read: 2412300, cache_write: 154900, requests: 1240, retries: 6 };
+    var BASE = {
+      sid: SID, title: "状态条视觉重写", active: true,
+      turns: 23, requests: 187,
+      input: 1284300, output: 164200, reasoning: 96400, cache_read: 1102300, cache_write: 42100,
+      total: 1448500, tool_calls: 142, retries: 3,
+      ctx: 63400, ctx_exc: 0, last_at: NOW - 4000, updated: "20:31:22",
+      context_window: 200000, context_auto: false,
+      code: { add: 1840, del: 620, files: 14 },
+      last_turn: { requests: 7, retries: 0, tool_calls: 12, tool_errors: 0,
+        input: 54200, output: 8300, reasoning: 2100, cache_read: 48900, cache_write: 2100,
+        total: 62500, duration_ms: 96000, ttft_ms: 1400 },
+      last: { duration_ms: 18400, ttft_ms: 1400, model: "glm-5.3-flash", tps: 86 },
+      tools: { total: 142, errors: 2, list: [
+        { name: "Bash",      count: 48, duration_ms: 12400, errors: 0 },
+        { name: "Read",      count: 31, duration_ms: 3100,  errors: 0 },
+        { name: "Edit",      count: 22, duration_ms: 2200,  errors: 0 },
+        { name: "Grep",      count: 18, duration_ms: 1800,  errors: 2 },
+        { name: "Agent",     count: 12, duration_ms: 45100, errors: 0 },
+        { name: "TodoWrite", count: 9,  duration_ms: 300,   errors: 0 } ] },
+      sub: { requests: 34, total: 236400, input: 198200, output: 30200, cache_read: 141000,
+        reasoning: 8200, cache_write: 6100, active: true, list: [
+        { task: "重设计状态条视觉样式",     title: "", agent: "agentA",   sid: "sess_sub_a1b2c3d4", active: true,  total: 88400, requests: 12, last: NOW - 6000,     input: 74200, output: 12100, cache_read: 52300, reasoning: 3100, cache_write: 1800 },
+        { task: "核验 tooltip 生命周期回归", title: "", agent: "agentsDS", sid: "sess_sub_e5f6a7b8", active: false, total: 61200, requests: 9,  last: NOW - 5700000,  input: 51200, output: 8400,  cache_read: 39800, reasoning: 2600, cache_write: 1200 },
+        { task: "性能取证与泵日志分析",     title: "", agent: "agentC",   sid: "sess_sub_c9d0e1f2", active: false, total: 86800, requests: 13, last: NOW - 1440000,  input: 72800, output: 9700,  cache_read: 48900, reasoning: 2500, cache_write: 3100 } ] }
+    };
+    function sess(over) {
+      var s = JSON.parse(JSON.stringify(BASE));
+      if (over) {
+        if (over.ctx !== undefined) s.ctx = over.ctx;
+        if (over.tps !== undefined) s.last.tps = over.tps;
+        if (over.toolErrors !== undefined) s.tools.errors = over.toolErrors;
+        if (over.ctxExc !== undefined) s.ctx_exc = over.ctxExc;
+        if (over.lastAt !== undefined) s.last_at = over.lastAt;
+        if (over.subActive !== undefined) {
+          s.sub.active = over.subActive;
+          s.sub.list.forEach(function (a) { a.active = over.subActive && a.task.indexOf("重设计") === 0; });
+        }
+      }
+      return s;
+    }
+    var SCENARIOS = {
+      normal: function () { return { mine: SID, recent: [sess({ ctx: 63400, tps: 86, toolErrors: 2 })], today: TODAY }; },
+      warn:   function () { return { mine: SID, recent: [sess({ ctx: 148600, tps: 52, toolErrors: 0 })], today: TODAY }; },
+      hot:    function () { return { mine: SID, recent: [sess({ ctx: 183400, tps: 33, toolErrors: 5, subActive: false })], today: TODAY }; },
+      exc:    function () { return { mine: SID, recent: [sess({ ctx: 205400, tps: 28, toolErrors: 5, subActive: false, ctxExc: Date.now() - 2000, lastAt: Date.now() - 40000 })], today: TODAY }; },
+      empty:  function () { return { mine: "sess_empty0000000000", recent: [], today: TODAY }; }
+    };
+    var btns = document.querySelectorAll(".demo-ctl button[data-sc]");
+    function apply(name) {
+      btns.forEach(function (b) { b.classList.toggle("on", b.getAttribute("data-sc") === name); });
+      if (window.__zusageUpdate) window.__zusageUpdate(SCENARIOS[name]());
+    }
+    btns.forEach(function (b) {
+      b.addEventListener("click", function () { apply(b.getAttribute("data-sc")); });
+    });
+    /* overlay.js 是自包含 IIFE，内部 setTimeout(0) 后挂载；稍等一拍再喂数据 */
+    setTimeout(function () { apply("normal"); }, 120);
+    setTimeout(function () { apply("normal"); }, 600);   // 双保险：确保首屏有数据
+  </script>
+</body>
+</html>
