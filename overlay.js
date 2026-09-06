@@ -29,7 +29,7 @@
   }, 0);
 
   function main$() {
-    var VERSION = "v46";   // 每轮递增；悬停状态条可见，用于确认热更新到达
+    var VERSION = "v47";   // 每轮递增；悬停状态条可见，用于确认热更新到达
     var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv" };
 
     /* ---------- 状态 ---------- */
@@ -595,15 +595,53 @@
          * 就是"出现一下立刻消失"的闪烁（v33.2，概览 tooltip 因此废除） */
       }
     }, true);
-    /* 鼠标甩出窗口外/窗口失焦：tooltip 立即收起（v43）——离开窗口不再产生 mousemove，
-     * 最后一条还落在条面上时 tooltip 会一直挂着，违背"移开立即不显示" */
-    function tipWinLeave() {
+    /* 鼠标甩出窗口外/窗口失焦：tooltip 立即收起（v43）。
+     * v47 根因修正：ZCode 条面上方的聊天区是独立浏览上下文（iframe/webview，findComposer
+     * 穿透同源 iframe 即佐证），光标从条面跨入其上时宿主文档会发 documentElement
+     * mouseleave、且后续 mousemove 全部进子文档——diag 实证（mv 上万但 corridor/grace
+     * 计数全 0、lastHide=win-leave）这就是"一向上移 tooltip 就消失"的根因：v43 把这种
+     * 内部 leave 当成了甩出窗口。故 mouseleave 按退出点分流：
+     *   · 退出点贴窗口边缘 = 真离开窗口 → 立即收；
+     *   · 内部 leave 且退出点在 tip 横向列内（±30px）= 去 tooltip/回条面的穿行 → 400ms
+     *     宽限（子上下文区域事件停摆，靠定时器兜底收回；tip/条面/走廊事件会取消它）；
+     *   · 内部 leave 列外 = 横向走掉 → 立即收。 */
+    function tipBoundaryHide() {
       if (stale()) return;
       mouseInBar = false;
       if (tipFor) hideTip(true, "win-leave");
     }
-    document.documentElement.addEventListener("mouseleave", tipWinLeave, true);
-    window.addEventListener("blur", tipWinLeave, true);
+    window.addEventListener("blur", tipBoundaryHide, true);
+    function tipLeaveAt(x, y) {
+      if (stale() || !tipFor) return;
+      if (x <= 1 || x >= innerWidth - 2 || y <= 1 || y >= innerHeight - 2) {
+        tipBoundaryHide();
+        return;
+      }
+      var r = tip.getBoundingClientRect();
+      if (x >= r.left - 30 && x <= r.right + 30) {
+        tipStats.grace++;
+        mouseInBar = true;   // 在途：总闸拦住 render-orphan 等路径趁机熄灯
+        cancelTipGrace();
+        tipGraceTimer = setTimeout(function () {
+          tipGraceTimer = 0;
+          hideTip(true, "grace-expire");
+        }, 400);
+      } else {
+        mouseInBar = false;
+        hideTip(true, "left-bar");
+      }
+    }
+    document.documentElement.addEventListener("mouseleave", function (e) {
+      tipLeaveAt(e.clientX, e.clientY);
+    }, true);
+    /* 光标离开 tooltip 本体：上行越顶/下行回条面 → 列内宽限；横向 → 立即收（分流同上） */
+    tip.addEventListener("mouseleave", function (e) {
+      tipLeaveAt(e.clientX, e.clientY);
+    }, true);
+    tip.addEventListener("mouseenter", function () {
+      if (stale()) return;
+      cancelTipGrace();
+    }, true);
     /* 空中走廊判定（v45）：tooltip 矩形横向 ±4px、纵向 tip 顶边到底边下方 12px
      * （覆盖条面顶边到 tooltip 底边的 8px 悬空缝）。只在 tipFor 存在时被调用。 */
     function inTipCorridor(x, y) {
