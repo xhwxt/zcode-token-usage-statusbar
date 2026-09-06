@@ -29,7 +29,7 @@
   }, 0);
 
   function main$() {
-    var VERSION = "v45";   // 每轮递增；悬停状态条可见，用于确认热更新到达
+    var VERSION = "v46";   // 每轮递增；悬停状态条可见，用于确认热更新到达
     var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv" };
 
     /* ---------- 状态 ---------- */
@@ -469,12 +469,14 @@
     /* ---------- 自绘 tooltip：向上弹出（原生 title 方向不可控），支持 tab ---------- */
     var tipFor = null, tipTab = 0, lastMoveAt = 0, tipSig = "";
     var mouseInBar = false;   // 鼠标是否悬停在条面/tooltip/面板上（最近一次 mousemove 判定）
-    var tipStats = { mv: 0, shows: 0, hides: 0, last: "", lastHide: "" };   // 诊断：随 mount diag 回写
+    var tipGraceTimer = 0;    // 越顶宽限定时器（v46）
+    var tipStats = { mv: 0, shows: 0, hides: 0, last: "", lastHide: "", corridor: 0, grace: 0 };   // 诊断：随 mount diag 回写
     /* 隐藏总闸（v33.3）：鼠标还在条面上时，任何路径（数据刷新接管失败/输入框重建/
      * 瞬时不可见判定）都不得隐藏 tooltip——只有鼠标真正离开条面（left-bar，force）
      * 或条面整体隐藏（force）才允许。 */
     function hideTip(force, cause) {
       if (!force && mouseInBar) { tipStats.lastHide = "blocked:" + (cause || "?"); return; }
+      if (tipGraceTimer) { clearTimeout(tipGraceTimer); tipGraceTimer = 0; }
       if (tip.style.display !== "none") tip.style.display = "none";
       tipFor = null;
       tipSig = "";
@@ -546,7 +548,7 @@
       lastMoveAt = Date.now();
       var t = e.target;
       if (!t || !t.closest) return;
-      if (t.closest("#zusage-tip")) { mouseInBar = true; return; }   // 鼠标移入 tooltip：保持
+      if (t.closest("#zusage-tip")) { mouseInBar = true; cancelTipGrace(); return; }   // 鼠标移入 tooltip：保持
       if (t.closest(".panel")) {
         /* 面板上不保留条面 tooltip（v42）：开设置的路上触发过条目 tooltip 的话，
          * 这分支若不清掉它，鼠标在面板里它就永不消失。 */
@@ -557,13 +559,32 @@
       if (!t.closest("#zusage-bar")) {
         /* 空中走廊（v45）：悬空缝是"条外且 tip 外"的真空带，采样事件落在这里会被误判
          * 成"移开"立即熄灭——鼠标在 tooltip 横向范围、底边下方 ~12px 内时视同仍在条上，
-         * 穿行去 tooltip 点 tab 的路上不熄灭；横向/向下移出走廊立即隐藏（v43 语义不变） */
-        if (tipFor && inTipCorridor(e.clientX, e.clientY)) { mouseInBar = true; return; }
+         * 穿行去 tooltip 点 tab 的路上不熄灭。 */
+        if (tipFor && inTipCorridor(e.clientX, e.clientY)) {
+          tipStats.corridor++;
+          mouseInBar = true;
+          cancelTipGrace();
+          return;
+        }
+        /* 越顶宽限（v46）：mousemove 有 150ms 节流采样，快速上移时两个采样点之间能跨过
+         * 整个 tooltip，采样点落在 tip 上方的死区——此前立即隐藏就把"正要进 tip"错杀成
+         * "离开"。改挂 300ms 宽限：下一个采样落回 tip/走廊就取消（tip 仍可点 tab），
+         * 确实继续远离才真正收起。横向/向下移出不享受宽限，依旧立即消失。 */
+        if (tipFor && inTipColumn(e.clientX, e.clientY)) {
+          tipStats.grace++;
+          mouseInBar = true;   // 视同在途：总闸拦住 render-orphan 等路径趁机熄灯
+          if (!tipGraceTimer) tipGraceTimer = setTimeout(function () {
+            tipGraceTimer = 0;
+            hideTip(true, "grace-expire");
+          }, 300);
+          return;
+        }
         mouseInBar = false;
         if (tipFor) hideTip(true, "left-bar");   // v43：移开条面立即消失，不再留 300ms 缓冲
         return;
       }
       mouseInBar = true;
+      cancelTipGrace();
       if (panel.classList.contains("open")) return;   // 面板开着：条面不弹 tooltip（弹出也会被面板盖住，只露边角）
       var el = t.closest(".it");
       if (el) {
@@ -588,6 +609,15 @@
     function inTipCorridor(x, y) {
       var r = tip.getBoundingClientRect();
       return x >= r.left - 4 && x <= r.right + 4 && y >= r.top && y <= r.bottom + 12;
+    }
+    /* 越顶宽限判定（v46）：tip 正上方 ±30px、高 80px 的柱形区——快速上移的采样点
+     * 落进这里说明鼠标刚越过 tip 顶边，大概率下一拍就停在 tip 里。 */
+    function inTipColumn(x, y) {
+      var r = tip.getBoundingClientRect();
+      return x >= r.left - 30 && x <= r.right + 30 && y >= r.top - 80 && y < r.top;
+    }
+    function cancelTipGrace() {
+      if (tipGraceTimer) { clearTimeout(tipGraceTimer); tipGraceTimer = 0; }
     }
     tip.addEventListener("click", function (e) {
       if (stale()) return;
