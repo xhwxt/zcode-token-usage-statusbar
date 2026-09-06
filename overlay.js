@@ -29,7 +29,7 @@
   }, 0);
 
   function main$() {
-    var VERSION = "v47";   // 每轮递增；悬停状态条可见，用于确认热更新到达
+    var VERSION = "v48";   // 每轮递增；悬停状态条可见，用于确认热更新到达
     var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv" };
 
     /* ---------- 状态 ---------- */
@@ -459,7 +459,7 @@
         var nu = null;
         if (tipFor === main) nu = main;
         else if (tipFor.__n === els.length) nu = els[tipFor.__idx];
-        if (nu && nu.__tip) { tipFor = nu; positionTip(nu); } else hideTip(false, "render-orphan");
+        if (nu && nu.__tip) { tipFor = nu; positionTip(nu, true); } else hideTip(false, "render-orphan");
         /* 接管失败（条目结构变化）也受总闸保护：鼠标仍在条上时保持旧 tooltip，
          * 下一次 mousemove 会重新判定该显示哪一项 */
       }
@@ -483,16 +483,19 @@
       tipStats.hides++;
       tipStats.lastHide = cause || "?";
     }
-    function positionTip(el) {
+    function positionTip(el, keepTop) {
       var tr = tip.getBoundingClientRect(), ar = el.getBoundingClientRect();
       var left = ar.left + ar.width / 2 - tr.width / 2;
       left = Math.max(8, Math.min(left, Math.max(8, innerWidth - tr.width - 8)));
-      /* v45：悬空 8px（视觉原样）——悬空缝的移入问题由 inTipCorridor 空中走廊解决 */
-      var top = Math.max(8, ar.top - tr.height - 8);
+      /* v48：keepTop=切页签/数据刷新时保持顶边——页签行在盒顶，顶边不动则页签行不动，
+       * 鼠标停在页签上不会因盒形变化被甩出去（外面是 iframe 静默区，甩出去就回不来了）。
+       * 只有首次弹出才按条目重新锚定（悬空 8px）。 */
+      var top = (keepTop && tip.style.top) ? parseFloat(tip.style.top) : 0;
+      if (!isFinite(top) || top < 8) top = Math.max(8, ar.top - tr.height - 8);
       tip.style.left = Math.round(left) + "px";
       tip.style.top = Math.round(top) + "px";
     }
-    function drawTip(el) {
+    function drawTip(el, keepTop) {
       var t = el && el.__tip;
       if (!t) { tip.style.display = "none"; tipFor = null; return; }
       var body;
@@ -506,7 +509,7 @@
       }
       /* 幂等：内容与页签都没变就只调位置，不重建 innerHTML（重建=悬停中每 1.5s 闪烁） */
       if (sig === tipSig && tip.style.display === "block") {
-        positionTip(el);
+        positionTip(el, true);
         return;
       }
       tipSig = sig;
@@ -520,13 +523,26 @@
         for (var j = 0; j < t.tabs.length; j++) tabs[j].textContent = t.tabs[j].name;
         body = tip.querySelector(".tbody");
         body.textContent = t.tabs[tabIdx].text;
+        tip.style.display = "block";
+        /* v48：多页签固定盒宽=各页签最大自然宽度（帽 560）——切换时盒宽不变、配合
+         * keepTop 页签行一个像素不动，鼠标不会因盒缩被甩进 iframe 静默区（甩出去
+         * 任何事件都收不到，宽限到点只能收场）。 */
+        var maxW = 0;
+        for (var m = 0; m < t.tabs.length; m++) {
+          body.textContent = t.tabs[m].text;
+          tip.style.width = "auto";
+          maxW = Math.max(maxW, tip.getBoundingClientRect().width);
+        }
+        body.textContent = t.tabs[tabIdx].text;
+        tip.style.width = Math.min(Math.ceil(maxW), 560) + "px";
       } else {
+        tip.style.width = "";   // 单页恢复自适应宽（清掉页签盒的固定宽残留）
         tip.innerHTML = '<div class="tbody"></div>';
         body = tip.firstChild;
         body.textContent = t;
+        tip.style.display = "block";
       }
-      tip.style.display = "block";
-      positionTip(el);
+      positionTip(el, keepTop);
     }
     function showTipFor(el) {
       tipFor = el;
@@ -536,7 +552,7 @@
       el.__n = its.length;   // render 接管时校验条目数未变，数量变了 __idx 就不可信
       tipStats.shows++;
       tipStats.last = el === main ? "main" : String(el.textContent || "").slice(0, 12);
-      drawTip(el);
+      drawTip(el, false);
     }
     /* 事件挂 document 捕获阶段（v32）：React/应用层可能在冒泡路上 stopPropagation，
      * 挂 main 的 mousemove 收不到（v31 实证：原生 title 有 hover、自绘 tip 无事件）。
@@ -662,7 +678,7 @@
       var b = e.target && e.target.closest ? e.target.closest(".ttab") : null;
       if (!b || !tipFor) return;
       tipTab = +b.getAttribute("data-i") || 0;
-      drawTip(tipFor);
+      drawTip(tipFor, true);   // 切页签：顶边锚定，页签行不动（v48）
     });
 
     /* ---------- 设置面板 ---------- */
