@@ -29,7 +29,7 @@
   }, 0);
 
   function main$() {
-    var VERSION = "v48";   // 每轮递增；悬停状态条可见，用于确认热更新到达
+    var VERSION = "v49";   // 每轮递增；悬停状态条可见，用于确认热更新到达
     var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv" };
 
     /* ---------- 状态 ---------- */
@@ -103,6 +103,15 @@
       ".panel input[type=checkbox]{accent-color:#57c7ff;margin-top:3px}" +
       ".panel label:hover{color:#e8ecf2}" +
       ".panel .pnote{font-size:11px;line-height:1.5;color:#77808f;margin-top:2px}" +
+      /* 子代理明细面板（v49）：点击条目弹出的固定面板（与设置面板同机制，互斥打开）；
+       * 面板不随鼠标消失，绕开悬停+tab 的全部几何问题。 */
+      ".zu-sub{cursor:pointer}" +
+      ".zu-sub:hover .v{color:#fff}" +
+      ".panel.subp{width:520px;max-width:72vw}" +
+      ".subrow{padding:4px 0;border-bottom:1px dashed rgba(255,255,255,.07)}" +
+      ".subrow:last-child{border-bottom:none}" +
+      ".subname{font-weight:700;color:#e6ebf3;overflow-wrap:anywhere}" +
+      ".substat{font-size:11.5px;color:#9aa3b2}" +
       /* 自绘 tooltip（v31）：向上弹出（原生 title 方向不可控且会被窗口下缘遮挡），
        * 支持多 tab；white-space:pre-line 保留数据里的 \n 换行。
        * v32：fixed 挂 body —— 原 absolute 挂 bar，被页面消息流的层叠上下文盖住
@@ -150,13 +159,17 @@
       '<label><input type="checkbox" data-k="win"><span>会话累计<em>当前会话 tokens / 轮数 / 次数</em></span></label>' +
       '<label><input type="checkbox" data-k="tools"><span>工具调用<em>当前会话，悬停看各工具明细与错误</em></span></label>' +
       '<label><input type="checkbox" data-k="today"><span>今日合计<em>今天所有会话的消耗</em></span></label>' +
-      '<label><input type="checkbox" data-k="sub"><span>子代理<em>后台子代理消耗，悬停可逐个查看</em></span></label>' +
+      '<label><input type="checkbox" data-k="sub"><span>子代理<em>后台子代理消耗，点击条目看明细面板</em></span></label>' +
       '<div class="hr"></div>' +
       '<div class="cap">上下文窗口</div>' +
       '<label><input type="text" id="zu-ctxov" placeholder="自动(按模型)"><span class="dim">留空 = 自动（原生UI > 模型目录）</span></label>' +
       '<div class="hr"></div>' +
-      '<div class="pnote">悬停条面各项看明细；子代理项有标签页。数据源 ~/.zcode/cli/db/db.sqlite（只读），请求完成后才落库，数值随上次完成请求变化。</div>';
+      '<div class="pnote">悬停条面各项看明细；点击子代理项看全部明细面板。数据源 ~/.zcode/cli/db/db.sqlite（只读），请求完成后才落库，数值随上次完成请求变化。</div>';
     bar.appendChild(panel);
+    /* 子代理明细面板（v49）：与设置面板同款 .panel 机制，点击条目开关，互斥打开 */
+    var subPanel = document.createElement("div");
+    subPanel.className = "panel subp";
+    bar.appendChild(subPanel);
     /* 自绘 tooltip：向上弹出、支持 tab（v45 起配空中走廊，移入点击不再被移开即隐掐断）；取代原生 title（方向不可控，在窗口底边会朝下被遮挡） */
     /* 自绘 tooltip 挂 body（fixed 视口坐标）：挂 bar 内会被消息流的层叠上下文盖住（v31 实证） */
     var tip = document.createElement("div");
@@ -236,7 +249,8 @@
 
     /* 显示顺序：本轮 → 上下文 → 会话 → 工具 → 今日 → 子代理；token 后带缓存命中率。
      * v31：条面只放主数值；悬停改自绘 tooltip（向上弹、支持 tab），随渲染以 tips[]
-     * 按 .it 顺序挂到元素 __tip——字符串=单页，{tabs:[{name,text}]}=多 tab（子代理项）。
+     * 按 .it 顺序挂到元素 __tip——全部为字符串单页（{tabs:[...]} 多 tab 机制保留但
+     * v49 起无条目使用：子代理已改点击面板，tooltip 不再承载 tab 切换）。
      * 缓存写入/思考/重试/错误均 >0 才显示，0 时不产生噪音。 */
     function fmtTime(ms) {
       var d = ms ? new Date(ms) : null;
@@ -253,7 +267,7 @@
       var sess = d.session || {}, lt = d.last_turn || {}, today = d.today || {}, last = d.last || {};
       var tls = d.tools || { total: 0, errors: 0, list: [] };
       var items = [], tips = [];
-      function it(inner, tip) { items.push('<span class="it">' + inner + "</span>"); tips.push(tip || null); }
+      function it(inner, tip, cls) { items.push('<span class="it' + (cls ? " " + cls : "") + '">' + inner + "</span>"); tips.push(tip || null); }
       if (last.tps) {   // 最近一次请求的生成速度，置顶显示；随数值三档变色
         var tpsCls = last.tps >= 70 ? "ok" : last.tps >= 40 ? "warm" : "hot";
         it('<span class="' + tpsCls + '">' + last.tps + '</span><span class="dim">t/s</span>',
@@ -320,29 +334,10 @@
           "\n" + (today.requests || 0) + " 次请求" + (today.retries ? " · 重试 " + today.retries : ""));
       }
       if (state.show.sub && d.sub && (d.sub.total || d.sub.active)) {
-        /* v45：恢复多 tab 类型（v44 曾误删）——移入 tooltip 由空中走廊护航（见 mousemove），
-         * tab 可正常点击；汇总页 + 每个子代理一页，tab 用子代理会话名（截断） */
-        var tabs = [{
-          name: "汇总",
-          text: "子代理：当前会话的后台子代理消耗（独立统计，不计入会话累计）\n" +
-            ioc(d.sub.input, d.sub.output, d.sub.cache_read, d.sub.reasoning, d.sub.cache_write) +
-            "，共 " + (d.sub.requests || 0) + " 次" + (d.sub.active ? " · 运行中" : "") +
-            "\n点上方标签查看每个子代理的具体消耗"
-        }];
-        (d.sub.list || []).forEach(function (s1) {
-          var name = String(s1.title || "").trim() ||
-            String(s1.agent || "sub").replace(/^zcode-/, "") + "…" + String(s1.sid).slice(-4);
-          tabs.push({
-            name: name.length > 12 ? name.slice(0, 11) + "…" : name,
-            text: name + "（" + String(s1.agent || "subagent").replace(/^zcode-/, "") +
-              " …" + String(s1.sid).slice(-4) + "）" + (s1.active ? " · 运行中" : "") +
-              "\n总消耗 " + fmt(s1.total) + " · " + s1.requests + " 次请求\n" +
-              ioc(s1.input, s1.output, s1.cache_read, s1.reasoning, s1.cache_write) +
-              (s1.last ? "\n最后活动 " + fmtTime(s1.last) : "")
-          });
-        });
+        /* v49：子代理不再用悬停 tooltip（悬停+tab 的几何问题根除）——点击条目弹出
+         * 固定明细面板（toggleSubPanel），面板不随鼠标消失、全部子代理一列排开 */
         it('<span class="k">子代理</span><span class="v">' + fmt(d.sub.total) + "</span>" +
-          (d.sub.active ? '<span class="ok dot">●</span>' : ""), { tabs: tabs });
+          (d.sub.active ? '<span class="ok dot">●</span>' : ""), null, "zu-sub");
       }
       return { s: items.join('<span class="sep">│</span>') || '<span class="dim">全部显示项已关闭</span>', tips: tips };
     }
@@ -444,6 +439,7 @@
         code: p.code, ctx_exc: p.ctx_exc, tools: p.tools,
         sub: p.sub || {requests: 0, total: 0, input: 0, output: 0, cache_read: 0, active: false, list: []},
       };
+      state.lastSub = view.sub;   // 子代理明细面板的数据源（开关面板/数据推送刷新用）
       var h = html(view);
       /* 内容没变就不重建 DOM：泵每 1.5s 推送一次，无条件 innerHTML 会重建条面+重启呼吸灯
        * 动画+触发 tooltip 重画 = 悬停时周期性闪烁（v33 修复）。变化时才重建。 */
@@ -463,6 +459,7 @@
         /* 接管失败（条目结构变化）也受总闸保护：鼠标仍在条上时保持旧 tooltip，
          * 下一次 mousemove 会重新判定该显示哪一项 */
       }
+      if (subPanel.classList.contains("open")) buildSubPanel(view.sub);   // 面板开着：随推送实时刷新
     }
     window.__zusageUpdate = function (d) { if (stale()) return; try { render(d); } catch (e) { FATAL.updateErr = String((e && e.stack) || e); } };
 
@@ -693,7 +690,10 @@
       syncPanel();
       var opening = !panel.classList.contains("open");
       panel.classList.toggle("open");
-      if (opening) hideTip(true, "gear-open");   // 移向齿轮的路上可能触发过条目 tooltip，开面板时一并收掉
+      if (opening) {
+        subPanel.classList.remove("open");   // 两面板同位重叠，互斥打开（v49）
+        hideTip(true, "gear-open");   // 移向齿轮的路上可能触发过条目 tooltip，开面板时一并收掉
+      }
     });
     panel.addEventListener("change", function (e) {
       var t = e.target;
@@ -708,6 +708,64 @@
     });
     document.addEventListener("mousedown", function (e) {
       if (panel.classList.contains("open") && !bar.contains(e.target)) panel.classList.remove("open");
+      if (subPanel.classList.contains("open") && !bar.contains(e.target)) subPanel.classList.remove("open");
+    });
+
+    /* ---------- 子代理明细面板（v49）：点击条目弹出的固定面板，替代悬停 tooltip ---------- */
+    function buildSubPanel(sub) {
+      subPanel.innerHTML = '<div class="phead">子代理明细<span class="pver">独立统计 · 不计入会话累计</span></div>';
+      if (!sub || (!sub.total && !sub.active)) {
+        var empty = document.createElement("div");
+        empty.className = "pnote";
+        empty.textContent = "当前会话没有子代理记录";
+        subPanel.appendChild(empty);
+        return;
+      }
+      var head = document.createElement("div");
+      head.className = "pnote";
+      head.textContent = ioc(sub.input, sub.output, sub.cache_read, sub.reasoning, sub.cache_write) +
+        "，共 " + (sub.requests || 0) + " 次" + (sub.active ? " · 有子代理运行中" : "");
+      subPanel.appendChild(head);
+      var hr = document.createElement("div");
+      hr.className = "hr";
+      subPanel.appendChild(hr);
+      (sub.list || []).forEach(function (s1) {
+        var name = String(s1.title || "").trim() ||
+          String(s1.agent || "sub").replace(/^zcode-/, "") + "…" + String(s1.sid).slice(-4);
+        var row = document.createElement("div");
+        row.className = "subrow";
+        var n = document.createElement("div");
+        n.className = "subname";
+        n.textContent = name + "（" + String(s1.agent || "subagent").replace(/^zcode-/, "") +
+          " …" + String(s1.sid).slice(-4) + "）" + (s1.active ? " · 运行中" : "");
+        var st = document.createElement("div");
+        st.className = "substat";
+        st.textContent = "总消耗 " + fmt(s1.total) + " · " + (s1.requests || 0) + " 次请求" +
+          (s1.last ? " · 最后活动 " + fmtTime(s1.last) : "");
+        var br = document.createElement("div");
+        br.className = "substat dim";
+        br.textContent = ioc(s1.input, s1.output, s1.cache_read, s1.reasoning, s1.cache_write);
+        row.appendChild(n);
+        row.appendChild(st);
+        row.appendChild(br);
+        subPanel.appendChild(row);
+      });
+    }
+    function toggleSubPanel() {
+      var opening = !subPanel.classList.contains("open");
+      subPanel.classList.toggle("open", opening);
+      if (opening) {
+        panel.classList.remove("open");   // 与设置面板互斥
+        buildSubPanel(state.lastSub);
+        hideTip(true, "sub-open");
+      }
+    }
+    bar.addEventListener("click", function (e) {
+      if (stale()) return;
+      if (e.target && e.target.closest && e.target.closest(".zu-sub")) {
+        e.stopPropagation();
+        toggleSubPanel();
+      }
     });
 
     /* ---------- 输入框查找（穿透 open shadow / 同源 iframe） ---------- */
