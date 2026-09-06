@@ -32,16 +32,19 @@
   }, 0);
 
   function main$() {
-    var VERSION = "v56";   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
-    var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv" };
+    var VERSION = "v57";   // v57：⚙ 面板新增语言开关（中/EN），界面文案双语化   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
+    var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv", lang: "zusage3.lang" };
 
     /* ---------- 状态 ---------- */
     var state = {
       show: { win: 1, ctx: 1, today: 1, turn: 1, sub: 1, tools: 1 },
       ctxOv: "", data: null, nativeCtx: 0,
+      lang: "zh",
       excActive: false,   // 当前会话处于"上下文超限被拒"状态（render 时按 picked 会话计算）
       excGone: false,     // 用户点 ✕ 关闭了本次气泡；超限解除后自动复位
     };
+    /* ---------- i18n（v57）：L(中文, English) 内联双语文案，语言存 localStorage ---------- */
+    function L(zh, en) { return state.lang === "en" ? en : zh; }
     function ls(k, d) { try { return localStorage.getItem(k) ?? d; } catch (e) { return d; } }
     function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { } }
     try {
@@ -50,10 +53,12 @@
         for (var k in state.show) if (k in s) state.show[k] = s[k] ? 1 : 0;
       }
       state.ctxOv = ls(LS.ctxOv, "");
+      if (ls(LS.lang, "") === "en") state.lang = "en";
     } catch (e) { }
     function persist() {
       lsSet(LS.show, JSON.stringify(state.show));
       lsSet(LS.ctxOv, state.ctxOv);
+      lsSet(LS.lang, state.lang);
     }
 
     /* ---------- DOM ---------- */
@@ -180,20 +185,39 @@
       '<span class="btn" id="zu-gear">⚙</span>';
     var panel = document.createElement("div");
     panel.className = "panel";
-    panel.innerHTML =
-      '<div class="phead">⚙ 状态条设置<span class="pver">' + VERSION + '</span></div>' +
-      '<div class="cap">显示项（条面）</div>' +
-      '<label><input type="checkbox" data-k="ctx"><span>上下文<em>进度条 + 百分比，颜色随占比变化</em></span></label>' +
-      '<label><input type="checkbox" data-k="turn"><span>本轮<em>tokens / 次数 / 单次耗时 / 首字</em></span></label>' +
-      '<label><input type="checkbox" data-k="win"><span>会话累计<em>当前会话 tokens / 轮数 / 次数</em></span></label>' +
-      '<label><input type="checkbox" data-k="tools"><span>工具调用<em>当前会话，悬停看各工具明细与错误</em></span></label>' +
-      '<label><input type="checkbox" data-k="today"><span>今日合计<em>今天所有会话的消耗</em></span></label>' +
-      '<label><input type="checkbox" data-k="sub"><span>子代理<em>后台子代理消耗，点击条目看明细面板</em></span></label>' +
+    /* 面板文案可随语言重建（事件走 panel 级委托，重建不丢监听） */
+    function buildPanel() {
+      panel.innerHTML =
+      '<div class="phead">⚙ ' + L("状态条设置", "Status bar settings") + '<span class="pver">' + VERSION + '</span></div>' +
+      '<div class="cap">' + L("显示项（条面）", "Display items (bar)") + '</div>' +
+      '<label><input type="checkbox" data-k="ctx"><span>' + L("上下文", "Context") + '<em>' + L("进度条 + 百分比，颜色随占比变化", "Progress bar + percentage, color by usage") + '</em></span></label>' +
+      '<label><input type="checkbox" data-k="turn"><span>' + L("本轮", "Current turn") + '<em>' + L("tokens / 次数 / 单次耗时 / 首字", "tokens / requests / duration / first token") + '</em></span></label>' +
+      '<label><input type="checkbox" data-k="win"><span>' + L("会话累计", "Session total") + '<em>' + L("当前会话 tokens / 轮数 / 次数", "session tokens / turns / requests") + '</em></span></label>' +
+      '<label><input type="checkbox" data-k="tools"><span>' + L("工具调用", "Tool calls") + '<em>' + L("当前会话，悬停看各工具明细与错误", "per-session, hover for per-tool details and errors") + '</em></span></label>' +
+      '<label><input type="checkbox" data-k="today"><span>' + L("今日合计", "Today's total") + '<em>' + L("今天所有会话的消耗", "consumption of all sessions today") + '</em></span></label>' +
+      '<label><input type="checkbox" data-k="sub"><span>' + L("子代理", "Sub-agents") + '<em>' + L("后台子代理消耗，点击条目看明细面板", "background sub-agent usage, click the item for the detail panel") + '</em></span></label>' +
       '<div class="hr"></div>' +
-      '<div class="cap">上下文窗口</div>' +
-      '<label><input type="text" id="zu-ctxov" placeholder="自动(按模型)"><span class="dim">留空 = 自动（原生UI > 模型目录）</span></label>' +
+      '<div class="cap">' + L("上下文窗口", "Context window") + '</div>' +
+      '<label><input type="text" id="zu-ctxov" placeholder="' + L("自动(按模型)", "auto") + '"><span class="dim">' + L("留空 = 自动（原生UI > 模型目录）", "leave empty = auto (native UI > model catalog)") + '</span></label>' +
       '<div class="hr"></div>' +
-      '<div class="pnote">悬停条面各项看明细；点击子代理项看全部明细面板。数据源 ~/.zcode/cli/db/db.sqlite（只读），请求完成后才落库，数值随上次完成请求变化。</div>';
+      '<div class="cap">Language / 语言</div>' +
+      '<label><input type="radio" name="zu-lang" value="zh"><span>中文</span></label>' +
+      '<label><input type="radio" name="zu-lang" value="en"><span>English</span></label>' +
+      '<div class="hr"></div>' +
+      '<div class="pnote">' + L("悬停条面各项看明细；点击子代理项看全部明细面板。数据源 ~/.zcode/cli/db/db.sqlite（只读），请求完成后才落库，数值随上次完成请求变化。",
+        "Hover bar items for details; click the sub-agent item for the full detail panel. Data source ~/.zcode/cli/db/db.sqlite (read-only); rows are written when requests complete, numbers follow the latest completed request.") + '</div>';
+      panel.querySelectorAll('input[name=zu-lang]').forEach(function (r) {
+        r.checked = state.lang === r.value;
+      });
+      /* 重建后回填全部控件状态（语言切换路径不走 syncPanel）：checkbox 按 state.show、
+         上下文窗口输入框按 state.ctxOv——否则切语言后勾选态清空、首次点击语义反转 */
+      panel.querySelectorAll("input[type=checkbox]").forEach(function (cb) {
+        cb.checked = !!state.show[cb.dataset.k];
+      });
+      var ovInput = panel.querySelector("#zu-ctxov");
+      if (ovInput) ovInput.value = state.ctxOv;
+    }
+    buildPanel();
     bar.appendChild(panel);
     /* 子代理明细面板（v49）：与设置面板同款 .panel 机制，点击条目开关，互斥打开 */
     var subPanel = document.createElement("div");
@@ -220,19 +244,28 @@
     try {
       document.querySelectorAll(".zusage-exc").forEach(function (el) { if (el !== excBubble) el.remove(); });
     } catch (e) { }
-    /* 文案只进 textContent/静态 innerHTML；会话 ID 是动态数据，一律走 textContent 防注入 */
-    excBubble.innerHTML =
-      '<div class="xb-head"><span class="xb-title">⚠ 上下文超限</span>' +
-      '<span class="xb-close" aria-label="关闭，本次不再提醒">✕</span></div>' +
-      '<div class="xb-step">最近一次请求因超出上下文窗口容量被拒绝，本轮对话暂时无法继续。建议依次尝试：</div>' +
-      '<div class="xb-step">① 回滚上一轮对话，去掉超限的那次请求后继续；</div>' +
-      '<div class="xb-step">② 换用上下文窗口更大的模型继续，或压缩 / 精简本会话；</div>' +
-      '<div class="xb-step">③ 仍无法解决时，新开一个对话，把下面的会话 ID（必要时连同工作区路径）发给它，' +
-      '让新会话读取本会话的记录文件接手修复。</div>' +
-      '<div>会话 ID：<span class="xb-sid"></span><span class="xb-copied">已复制</span></div>';
-    document.body.appendChild(excBubble);
-    var excSid = excBubble.querySelector(".xb-sid"), excCopied = excBubble.querySelector(".xb-copied");
-    excSid.addEventListener("click", function () {
+    /* 文案只进 textContent/静态 innerHTML；会话 ID 是动态数据，一律走 textContent 防注入。
+     * 面板语言切换时 rebuildExcBubble() 重建气泡文案。 */
+    var excSid, excCopied;
+    function rebuildExcBubble() {
+      excBubble.innerHTML =
+      '<div class="xb-head"><span class="xb-title">' + L("⚠ 上下文超限", "⚠ Context over limit") + '</span>' +
+      '<span class="xb-close" aria-label="' + L("关闭，本次不再提醒", "Close; do not remind again this session") + '">✕</span></div>' +
+      '<div class="xb-step">' + L("最近一次请求因超出上下文窗口容量被拒绝，本轮对话暂时无法继续。建议依次尝试：",
+        "The latest request was rejected for exceeding the context window; this turn cannot continue for now. Try these in order:") + '</div>' +
+      '<div class="xb-step">' + L("① 回滚上一轮对话，去掉超限的那次请求后继续；",
+        "① Roll back the previous turn, drop the over-limit request and continue;") + '</div>' +
+      '<div class="xb-step">' + L("② 换用上下文窗口更大的模型继续，或压缩 / 精简本会话；",
+        "② Continue with a larger-window model, or compress / trim this session;") + '</div>' +
+      '<div class="xb-step">' + L("③ 仍无法解决时，新开一个对话，把下面的会话 ID（必要时连同工作区路径）发给它，让新会话读取本会话的记录文件接手修复。",
+        "③ If that still fails, start a new conversation and send it the session ID below (workspace path if needed) — the new session can pick up this session's rollout files to take over.") + '</div>' +
+      '<div>' + L("会话 ID：", "Session ID: ") + '<span class="xb-sid"></span><span class="xb-copied">' + L("已复制", "Copied") + '</span></div>';
+      excSid = excBubble.querySelector(".xb-sid");
+      excCopied = excBubble.querySelector(".xb-copied");
+      excSid.addEventListener("click", onExcSidCopy);
+      excBubble.querySelector(".xb-close").addEventListener("click", onExcClose);
+    }
+    function onExcSidCopy() {
       if (stale() || !excSid.textContent) return;
       try {
         var ta = document.createElement("textarea");
@@ -246,12 +279,14 @@
       excCopied.style.display = "inline";
       clearTimeout(excCopied.timer);
       excCopied.timer = setTimeout(function () { excCopied.style.display = "none"; }, 1500);
-    });
-    excBubble.querySelector(".xb-close").addEventListener("click", function () {
+    }
+    function onExcClose() {
       if (stale()) return;
       state.excGone = true;
       syncExcBubble();
-    });
+    }
+    rebuildExcBubble();
+    document.body.appendChild(excBubble);
 
     var $ = function (id) { return bar.querySelector(id); };
     var main = $("#zu-main"), gear = $("#zu-gear");
@@ -288,9 +323,9 @@
         (d.getSeconds() < 10 ? "0" : "") + d.getSeconds() : "?";
     }
     function ioc(inp, out, cache, rea, cw) {   // 悬停明细行：输入/输出/缓存命中/缓存写入/思考
-      return "输入 " + fmt(inp) + " / 输出 " + fmt(out) + " / 缓存命中 " + fmt(cache) +
-        (cw > 0 ? " / 缓存写入 " + fmt(cw) : "") +
-        (rea > 0 ? " / 思考 " + fmt(rea) : "");
+      return L("输入 ", "Input ") + fmt(inp) + L(" / 输出 ", " / Output ") + fmt(out) + L(" / 缓存命中 ", " / Cache read ") + fmt(cache) +
+        (cw > 0 ? L(" / 缓存写入 ", " / Cache write ") + fmt(cw) : "") +
+        (rea > 0 ? L(" / 思考 ", " / Thinking ") + fmt(rea) : "");
     }
     /* 行内 SVG 线性图标（v54）：stroke 走 currentColor，颜色由 .ico 控制统一换色 */
     function ico(paths) {
@@ -305,7 +340,8 @@
         var tpsCls = last.tps >= 70 ? "ok" : last.tps >= 40 ? "warm" : "hot";
         it(ico('<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>') +
           '<span class="' + tpsCls + '">' + last.tps + '</span><span class="dim">t/s</span>',
-          "生成速度：最近完成请求的输出 tokens ÷ 生成耗时（首 token → 完成）\n≥70 t/s 绿色 · 40–70 黄色 · <40 红色");
+          L("生成速度：最近完成请求的输出 tokens ÷ 生成耗时（首 token → 完成）\n≥70 t/s 绿色 · 40–70 黄色 · <40 红色",
+            "Generation speed: output tokens ÷ generation time of the latest completed request (first token → completion)\n≥70 t/s green · 40–70 yellow · <40 red"));
       }
       if (state.show.ctx) {
         var cw = parseInt(state.ctxOv, 10) || state.nativeCtx || d.context_window || 0;
@@ -318,63 +354,65 @@
           Math.min(100, pct).toFixed(1) + '%"></i></span>' : "";
         it(bar + (cw ? '<span class="pct ' + cls + '">' + pct.toFixed(1) + "%</span>"
               : '<span class="v' + (exc ? " exc" : "") + '">' + fmt(sess.ctx) + "</span>"),
-          "上下文：当前会话上下文大小（最近一次请求的总输入）÷ 窗口容量\n已用 " +
-          fmt(sess.ctx) + " / 窗口 " + fmt(cw) +
-          "\n颜色随占比：" + (big
-            ? "≤40% 绿 · 40–60% 黄 · ≥60% 红（窗口 ≥100 万）"
-            : "<70% 绿 · 70–85% 黄 · ≥85% 红") +
-          " · 超限被拒=亮红闪烁" +
-          (exc ? "\n⚠ 上下文超限：最近一次请求超出窗口容量被拒绝（" + fmtTime(d.ctx_exc) +
-            "），需要压缩会话或新开会话" : ""));
+          L("上下文：当前会话上下文大小（最近一次请求的总输入）÷ 窗口容量",
+            "Context: session context size (total input of the latest request) ÷ window capacity") + "\n" +
+          L("已用 ", "Used ") + fmt(sess.ctx) + L(" / 窗口 ", " / window ") + fmt(cw) +
+          "\n" + L("颜色随占比：", "Color by usage: ") + (big
+            ? L("≤40% 绿 · 40–60% 黄 · ≥60% 红（窗口 ≥100 万）", "≤40% green · 40–60% yellow · ≥60% red (windows ≥1M)")
+            : L("<70% 绿 · 70–85% 黄 · ≥85% 红", "<70% green · 70–85% yellow · ≥85% red")) +
+          L(" · 超限被拒=亮红闪烁", " · rejected over-limit = flashing red") +
+          (exc ? "\n" + L("⚠ 上下文超限：最近一次请求超出窗口容量被拒绝（", "⚠ Context over limit: the latest request was rejected for exceeding the window capacity (") +
+            fmtTime(d.ctx_exc) + L("），需要压缩会话或新开会话", ") — compress the session or start a new one") : ""));
       }
       if (state.show.turn) {
         it(ico('<path d="M23 4v6h-6"/><path d="M20.49 15A9 9 0 1 1 18.36 5.64L23 10"/>') +
           '<span class="v">' + fmt(lt.total) + "</span>" +
           cachePct(lt.cache_read, lt.input) +
-          '<span class="dim">' + (lt.requests || 0) + "次</span>" +
+          '<span class="dim">' + (lt.requests || 0) + L("次", " req") + "</span>" +
           ico('<path d="M6 3h12M6 21h12M8 3v3.5L12 11l4-4.5V3M8 21v-3.5L12 13l4 4.5V21"/>') +
           '<span class="dim">' + sec(last.duration_ms) + "</span>" +
           ico('<path d="M5 20v-5M12 20v-9M19 20V5"/>') +
           '<span class="dim">' + sec(last.ttft_ms) + "</span>",
-          "本轮：最近一轮的 token 消耗（该轮共 " + (lt.requests || 0) + " 次模型请求）\n" +
+          L("本轮：最近一轮的 token 消耗（该轮共 ", "Turn: token usage of the latest turn (") + (lt.requests || 0) +
+          L(" 次模型请求）", " model requests in total)") + "\n" +
           ioc(lt.input, lt.output, lt.cache_read, lt.reasoning, lt.cache_write) +
-          "\n单次耗时 " + sec(last.duration_ms) + " · 首字 " + sec(last.ttft_ms) +
-          " · 轮总耗时 " + sec(lt.duration_ms) +
-          (lt.tool_calls ? " · 工具调用 " + lt.tool_calls : "") +
-          ((lt.retries || lt.tool_errors) ? " · 重试 " + (lt.retries || 0) + " · 工具错误 " + (lt.tool_errors || 0) : ""));
+          "\n" + L("单次耗时 ", "Single request ") + sec(last.duration_ms) + L(" · 首字 ", " · First token ") + sec(last.ttft_ms) +
+          L(" · 轮总耗时 ", " · Turn total ") + sec(lt.duration_ms) +
+          (lt.tool_calls ? L(" · 工具调用 ", " · Tool calls ") + lt.tool_calls : "") +
+          ((lt.retries || lt.tool_errors) ? L(" · 重试 ", " · Retries ") + (lt.retries || 0) + L(" · 工具错误 ", " · Tool errors ") + (lt.tool_errors || 0) : ""));
       }
       if (state.show.win) {
         it(ico('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>') +
           '<span class="v">' + fmt(sess.total) + "</span>" +
           cachePct(sess.cache_read, sess.input) +
-          '<span class="dim">' + (sess.turns || 0) + "轮 " + (sess.requests || 0) + "次</span>",
-          "会话累计：当前会话全部请求的 token 消耗\n" + ioc(sess.input, sess.output, sess.cache_read, sess.reasoning, sess.cache_write) +
-          "\n" + (sess.turns || 0) + " 轮 · " + (sess.requests || 0) + " 次请求" +
-          (sess.tool_calls ? " · 工具调用 " + sess.tool_calls : "") +
-          (sess.retries ? " · 重试 " + sess.retries : "") +
+          '<span class="dim">' + (sess.turns || 0) + L("轮 ", " turns · ") + (sess.requests || 0) + L("次", " req") + "</span>",
+          L("会话累计：当前会话全部请求的 token 消耗", "Session total: tokens of all requests in the current session") + "\n" + ioc(sess.input, sess.output, sess.cache_read, sess.reasoning, sess.cache_write) +
+          "\n" + (sess.turns || 0) + L(" 轮 · ", " turns · ") + (sess.requests || 0) + L(" 次请求", " requests") +
+          (sess.tool_calls ? L(" · 工具调用 ", " · Tool calls ") + sess.tool_calls : "") +
+          (sess.retries ? L(" · 重试 ", " · Retries ") + sess.retries : "") +
           (d.code && (d.code.add || d.code.del) ?
-            "\n代码变更 +" + (d.code.add || 0) + " / -" + (d.code.del || 0) +
-            (d.code.files ? "（" + d.code.files + " 文件）" : "") : ""));
+            "\n" + L("代码变更 +", "Code changes +") + (d.code.add || 0) + L(" / -", " / −") + (d.code.del || 0) +
+            (d.code.files ? L("（", " (") + d.code.files + L(" 文件）", " files)") : "") : ""));
       }
       if (state.show.tools) {
         var toolLines = [];
         (tls.list || []).forEach(function (t1) {
-          toolLines.push(t1.name + " " + t1.count + "次 · " + sec(t1.duration_ms) +
-            (t1.errors ? " · 错 " + t1.errors : ""));
+          toolLines.push(t1.name + " " + t1.count + L("次", " calls") + " · " + sec(t1.duration_ms) +
+          (t1.errors ? L(" · 错 ", " · ") + t1.errors + L(" 个错误", " errors") : ""));
         });
         it(ico('<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>') +
           '<span class="v">' + (tls.total || 0) + "</span>" +
           (tls.errors ? '<span class="eb">' +
             ico('<circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>') +
             tls.errors + "</span>" : ""),
-          "工具调用：当前会话的工具使用统计（按调用次数排序）\n" +
-          (toolLines.length ? toolLines.join("\n") : "无工具调用记录"));
+          L("工具调用：当前会话的工具使用统计（按调用次数排序）", "Tool calls: tool usage stats of the current session (sorted by calls)") + "\n" +
+          (toolLines.length ? toolLines.join("\n") : L("无工具调用记录", "No tool calls recorded")));
       }
       if (state.show.today) {
         it(ico('<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>') +
           '<span class="v">' + fmt(today.total) + "</span>",
-          "今日合计：今天所有会话的 token 消耗\n" + ioc(today.input, today.output, today.cache_read, today.reasoning, today.cache_write) +
-          "\n" + (today.requests || 0) + " 次请求" + (today.retries ? " · 重试 " + today.retries : ""));
+          L("今日合计：今天所有会话的 token 消耗", "Today's total: tokens of all sessions today") + "\n" + ioc(today.input, today.output, today.cache_read, today.reasoning, today.cache_write) +
+          "\n" + (today.requests || 0) + L(" 次请求", " requests") + (today.retries ? L(" · 重试 ", " · Retries ") + today.retries : ""));
       }
       if (state.show.sub && d.sub && (d.sub.total || d.sub.active)) {
         /* v50：悬停 tooltip 只放汇总 + 打开面板的提示；各子代理明细在点击弹出的
@@ -382,12 +420,12 @@
         it(ico('<path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>') +
           '<span class="v">' + fmt(d.sub.total) + "</span>" +
           (d.sub.active ? '<span class="ok dot">●</span>' : ""),
-          "子代理：当前会话的后台子代理消耗（独立统计，不计入会话累计）\n" +
+          L("子代理：当前会话的后台子代理消耗（独立统计，不计入会话累计）", "Sub-agents: background sub-agent usage of the current session (tracked separately, not counted in the session total)") + "\n" +
           ioc(d.sub.input, d.sub.output, d.sub.cache_read, d.sub.reasoning, d.sub.cache_write) +
-          "，共 " + (d.sub.requests || 0) + " 次" + (d.sub.active ? " · 运行中" : "") +
-          "\n点击条目打开面板，查看每个子代理的具体消耗", "zu-sub");
+          L("，共 ", ", ") + (d.sub.requests || 0) + L(" 次", " requests in total") + (d.sub.active ? L(" · 运行中", " · running") : "") +
+          "\n" + L("点击条目打开面板，查看每个子代理的具体消耗", "Click the item to open the panel with per-sub-agent details"), "zu-sub");
       }
-      return { s: items.join('<span class="sep"></span>') || '<span class="dim">全部显示项已关闭</span>', tips: tips };
+      return { s: items.join('<span class="sep"></span>') || '<span class="dim">' + L("全部显示项已关闭", "All display items are off") + '</span>', tips: tips };
     }
 
     /* 当前会话识别（v34 起 mine 优先，此处为兜底启发式）：ZCode 在 localStorage 的
@@ -744,12 +782,20 @@
       }
     });
     panel.addEventListener("change", function (e) {
-      var t = e.target;
-      if (t.type === "checkbox") {
-        state.show[t.dataset.k] = t.checked ? 1 : 0;
+      var t2 = e.target;
+      if (t2.name === "zu-lang") {
+        state.lang = t2.value;
         persist();
-      } else if (t.id === "zu-ctxov") {
-        state.ctxOv = t.value.trim();
+        buildPanel();   // 面板自身文案随语言重建（含 radio 勾选态）
+        rebuildExcBubble();
+        if (state.data) render(state.data);   // 条面单位与 tooltip 文案随语言刷新
+        return;
+      }
+      if (t2.type === "checkbox") {
+        state.show[t2.dataset.k] = t2.checked ? 1 : 0;
+        persist();
+      } else if (t2.id === "zu-ctxov") {
+        state.ctxOv = t2.value.trim();
         persist();
       }
       if (state.data) render(state.data);
@@ -767,23 +813,23 @@
       subPanel.innerHTML = "";
       var head = document.createElement("div");
       head.className = "phead";
-      head.textContent = "子代理明细";
+      head.textContent = L("子代理明细", "Sub-agent details");
       var ver = document.createElement("span");
       ver.className = "pver";
-      ver.textContent = "独立统计 · 不计入会话累计";
+      ver.textContent = L("独立统计 · 不计入会话累计", "Tracked separately · not counted in session total");
       head.appendChild(ver);
       subPanel.appendChild(head);
       if (!sub || (!sub.total && !sub.active)) {
         var empty = document.createElement("div");
         empty.className = "pnote";
-        empty.textContent = "当前会话没有子代理记录";
+        empty.textContent = L("当前会话没有子代理记录", "No sub-agent records in the current session");
         subPanel.appendChild(empty);
         return;
       }
       /* 页签行：汇总 + 每个子代理（复用 .ttabs/.ttab 样式）；动态名走 textContent 防注入 */
       var tabsRow = document.createElement("div");
       tabsRow.className = "ttabs";
-      var labels = ["汇总"];
+      var labels = [L("汇总", "Summary")];
       list.forEach(function (s1) {
         /* task=派发时的 description（右侧"子智能体目录"同源）；无则退回 title/线路名 */
         var nm = String(s1.task || "").trim() || String(s1.title || "").trim() ||
@@ -806,18 +852,18 @@
           String(s1.agent || "sub").replace(/^zcode-/, "") + "…" + String(s1.sid).slice(-4);
         var n = document.createElement("div");
         n.className = "subname";
-        n.textContent = nm + "（" + String(s1.agent || "subagent").replace(/^zcode-/, "") +
-          " …" + String(s1.sid).slice(-4) + "）";
+        n.textContent = nm + L("（", " (") + String(s1.agent || "subagent").replace(/^zcode-/, "") +
+          " …" + String(s1.sid).slice(-4) + L("）", ")");
         if (s1.active) {   // 运行中徽章：动态名仍走 textContent，徽章是独立 span
           var live = document.createElement("span");
           live.className = "sublive";
-          live.textContent = "运行中";
+          live.textContent = L("运行中", "running");
           n.appendChild(live);
         }
         var st = document.createElement("div");
         st.className = "substat";
-        st.textContent = "总消耗 " + fmt(s1.total) + " · " + (s1.requests || 0) + " 次请求" +
-          (s1.last ? " · 最后活动 " + fmtTime(s1.last) : "");
+        st.textContent = L("总消耗 ", "Total ") + fmt(s1.total) + L(" · ", " · ") + (s1.requests || 0) +
+          L(" 次请求", " requests") + (s1.last ? L(" · 最后活动 ", " · last activity ") + fmtTime(s1.last) : "");
         var br = document.createElement("div");
         br.className = "substat dim";
         br.textContent = ioc(s1.input, s1.output, s1.cache_read, s1.reasoning, s1.cache_write);
@@ -829,12 +875,13 @@
         var p1 = document.createElement("div");
         p1.className = "pnote";
         p1.textContent = ioc(sub.input, sub.output, sub.cache_read, sub.reasoning, sub.cache_write) +
-          "，共 " + (sub.requests || 0) + " 次" + (sub.active ? " · 有子代理运行中" : "");
+          L("，共 ", ", ") + (sub.requests || 0) + L(" 次", " requests in total") +
+          (sub.active ? L(" · 有子代理运行中", " · sub-agent running") : "");
         body.appendChild(p1);
         if (!list.length) {
           var p2 = document.createElement("div");
           p2.className = "pnote";
-          p2.textContent = "当前会话还没有子代理记录";
+          p2.textContent = L("当前会话还没有子代理记录", "No sub-agent records in the current session yet");
           body.appendChild(p2);
         }
       } else {
@@ -1083,7 +1130,7 @@
         if (excBubble.style.display !== "none") excBubble.style.display = "none";
         return;
       }
-      var sidStr = pickedSid || "（未知）";
+      var sidStr = pickedSid || L("（未知）", "(unknown)");
       if (excSid.textContent !== sidStr) excSid.textContent = sidStr;
       if (excBubble.style.display !== "block") excBubble.style.display = "block";
       var br = bar.getBoundingClientRect();
