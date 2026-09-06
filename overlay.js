@@ -29,7 +29,7 @@
   }, 0);
 
   function main$() {
-    var VERSION = "v49";   // 每轮递增；悬停状态条可见，用于确认热更新到达
+    var VERSION = "v50";   // 每轮递增；悬停状态条可见，用于确认热更新到达
     var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv" };
 
     /* ---------- 状态 ---------- */
@@ -334,10 +334,14 @@
           "\n" + (today.requests || 0) + " 次请求" + (today.retries ? " · 重试 " + today.retries : ""));
       }
       if (state.show.sub && d.sub && (d.sub.total || d.sub.active)) {
-        /* v49：子代理不再用悬停 tooltip（悬停+tab 的几何问题根除）——点击条目弹出
-         * 固定明细面板（toggleSubPanel），面板不随鼠标消失、全部子代理一列排开 */
+        /* v50：悬停 tooltip 只放汇总 + 打开面板的提示；各子代理明细在点击弹出的
+         * 固定面板里用页签切换（面板固定不随鼠标，页签点击没有几何问题） */
         it('<span class="k">子代理</span><span class="v">' + fmt(d.sub.total) + "</span>" +
-          (d.sub.active ? '<span class="ok dot">●</span>' : ""), null, "zu-sub");
+          (d.sub.active ? '<span class="ok dot">●</span>' : ""),
+          "子代理：当前会话的后台子代理消耗（独立统计，不计入会话累计）\n" +
+          ioc(d.sub.input, d.sub.output, d.sub.cache_read, d.sub.reasoning, d.sub.cache_write) +
+          "，共 " + (d.sub.requests || 0) + " 次" + (d.sub.active ? " · 运行中" : "") +
+          "\n点击条目打开面板，查看每个子代理的具体消耗", "zu-sub");
       }
       return { s: items.join('<span class="sep">│</span>') || '<span class="dim">全部显示项已关闭</span>', tips: tips };
     }
@@ -712,8 +716,19 @@
     });
 
     /* ---------- 子代理明细面板（v49）：点击条目弹出的固定面板，替代悬停 tooltip ---------- */
+    var subPanelTab = 0;   // 面板当前页签（0=汇总，i=第 i 个子代理）；数据刷新时保持
     function buildSubPanel(sub) {
-      subPanel.innerHTML = '<div class="phead">子代理明细<span class="pver">独立统计 · 不计入会话累计</span></div>';
+      var list = (sub && sub.list) || [];
+      if (subPanelTab > list.length) subPanelTab = 0;   // 列表变短则回汇总
+      subPanel.innerHTML = "";
+      var head = document.createElement("div");
+      head.className = "phead";
+      head.textContent = "子代理明细";
+      var ver = document.createElement("span");
+      ver.className = "pver";
+      ver.textContent = "独立统计 · 不计入会话累计";
+      head.appendChild(ver);
+      subPanel.appendChild(head);
       if (!sub || (!sub.total && !sub.active)) {
         var empty = document.createElement("div");
         empty.className = "pnote";
@@ -721,22 +736,32 @@
         subPanel.appendChild(empty);
         return;
       }
-      var head = document.createElement("div");
-      head.className = "pnote";
-      head.textContent = ioc(sub.input, sub.output, sub.cache_read, sub.reasoning, sub.cache_write) +
-        "，共 " + (sub.requests || 0) + " 次" + (sub.active ? " · 有子代理运行中" : "");
-      subPanel.appendChild(head);
-      var hr = document.createElement("div");
-      hr.className = "hr";
-      subPanel.appendChild(hr);
-      (sub.list || []).forEach(function (s1) {
-        var name = String(s1.title || "").trim() ||
+      /* 页签行：汇总 + 每个子代理（复用 .ttabs/.ttab 样式）；动态名走 textContent 防注入 */
+      var tabsRow = document.createElement("div");
+      tabsRow.className = "ttabs";
+      var labels = ["汇总"];
+      list.forEach(function (s1) {
+        var nm = String(s1.title || "").trim() ||
           String(s1.agent || "sub").replace(/^zcode-/, "") + "…" + String(s1.sid).slice(-4);
-        var row = document.createElement("div");
-        row.className = "subrow";
+        labels.push(nm.length > 12 ? nm.slice(0, 11) + "…" : nm);
+      });
+      labels.forEach(function (lb, i) {
+        var tb = document.createElement("span");
+        tb.className = "ttab" + (i === subPanelTab ? " on" : "");
+        tb.setAttribute("data-i", String(i));
+        tb.textContent = lb;
+        tabsRow.appendChild(tb);
+      });
+      subPanel.appendChild(tabsRow);
+      var body = document.createElement("div");
+      body.className = "tbody";   // 复用 tooltip 内容容器的限高滚动
+      subPanel.appendChild(body);
+      function fillRow(row, s1) {
+        var nm = String(s1.title || "").trim() ||
+          String(s1.agent || "sub").replace(/^zcode-/, "") + "…" + String(s1.sid).slice(-4);
         var n = document.createElement("div");
         n.className = "subname";
-        n.textContent = name + "（" + String(s1.agent || "subagent").replace(/^zcode-/, "") +
+        n.textContent = nm + "（" + String(s1.agent || "subagent").replace(/^zcode-/, "") +
           " …" + String(s1.sid).slice(-4) + "）" + (s1.active ? " · 运行中" : "");
         var st = document.createElement("div");
         st.className = "substat";
@@ -748,8 +773,25 @@
         row.appendChild(n);
         row.appendChild(st);
         row.appendChild(br);
-        subPanel.appendChild(row);
-      });
+      }
+      if (subPanelTab === 0) {
+        var p1 = document.createElement("div");
+        p1.className = "pnote";
+        p1.textContent = ioc(sub.input, sub.output, sub.cache_read, sub.reasoning, sub.cache_write) +
+          "，共 " + (sub.requests || 0) + " 次" + (sub.active ? " · 有子代理运行中" : "");
+        body.appendChild(p1);
+        if (!list.length) {
+          var p2 = document.createElement("div");
+          p2.className = "pnote";
+          p2.textContent = "当前会话还没有子代理记录";
+          body.appendChild(p2);
+        }
+      } else {
+        var row = document.createElement("div");
+        row.className = "subrow";
+        fillRow(row, list[subPanelTab - 1]);
+        body.appendChild(row);
+      }
     }
     function toggleSubPanel() {
       var opening = !subPanel.classList.contains("open");
@@ -766,6 +808,13 @@
         e.stopPropagation();
         toggleSubPanel();
       }
+    });
+    subPanel.addEventListener("click", function (e) {
+      if (stale()) return;
+      var b = e.target && e.target.closest ? e.target.closest(".ttab") : null;
+      if (!b) return;
+      subPanelTab = +b.getAttribute("data-i") || 0;
+      buildSubPanel(state.lastSub);   // 面板固定，切页签只换内容
     });
 
     /* ---------- 输入框查找（穿透 open shadow / 同源 iframe） ---------- */
