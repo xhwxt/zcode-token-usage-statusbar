@@ -21,11 +21,10 @@
     font:14px/1.75 "Segoe UI","Microsoft YaHei UI","Microsoft YaHei",sans-serif}
 
   /* ---------- embed 迷你窗口模式 ----------
-     高度用定逻辑值不用 100vh：html zoom 2 时 vh 会被放大导致布景跑出视口，
-     overlay 判定输入框不可见就整条隐藏。170/450 的 2 倍正好是截图视口高 340/900。 */
+     布景高度=视口高（100vh）。注意：html 设 CSS zoom 时 vh 会被放大导致布景跑出
+     视口、overlay 判定输入框不可见而整条隐藏——故 Playwright 截图用
+     device_scale_factor 直出 2x，不给 html 加 zoom。 */
   body.embed{height:100vh;overflow:hidden;position:relative;background:#17191f}
-  body.embed.hero{height:450px}
-  body.embed.closeup{height:170px}
   body.embed .chat-sim{position:absolute;top:14px;left:50%;transform:translateX(-50%);
     width:72%;max-width:760px}
   .msg{max-width:82%;margin-bottom:10px;padding:7px 12px;border-radius:11px;font-size:12.5px;line-height:1.7}
@@ -38,8 +37,9 @@
     background:transparent;color:#e9edf4;
     font:13px/1.6 "Segoe UI","Microsoft YaHei UI",sans-serif}
   body.embed .composer-card textarea::placeholder{color:#5b6474}
-  /* hero 主视觉：卡片仅作 overlay 的挂靠点，视觉隐藏（v57 起条贴窗口底，构图更干净） */
-  body.embed.hero .composer-card{width:900px;height:56px;opacity:0;pointer-events:none}
+  /* hero 主视觉：卡片仅作 overlay 的挂靠点，视觉隐藏（v57 起条贴窗口底，构图更干净）。
+     卡片宽=状态条 maxWidth 上限，须容纳英文条面（约 940px）不截断 */
+  body.embed.hero .composer-card{width:1010px;height:56px;opacity:0;pointer-events:none}
   body.embed.hero .composer-card textarea{height:54px;padding:9px 14px 0}
   /* 特写：小窗（卡片接近满宽，给状态条 maxWidth 留足空间不裁边） */
   body.embed.closeup .composer-card{width:636px;height:44px}
@@ -140,9 +140,10 @@ if (EMBED) {
   document.body.className = "embed " + (Q.hero === "1" ? "hero" : "closeup");
   document.getElementById("poster").hidden = true;
   if (Q.hero === "1") {
+    var EN0 = Q.lang === "en";
     document.getElementById("chat-sim").innerHTML =
-      '<div class="msg user">帮我把状态条的悬停明细加上缓存命中率。</div>' +
-      '<div class="msg bot">已加上：会话累计的 tooltip 里现在会显示 输入 / 输出 / 缓存命中 / 缓存写入 / 思考 的拆分明细。</div>';
+      '<div class="msg user">' + (EN0 ? "Add cache hit rate to the status bar hover details." : "帮我把状态条的悬停明细加上缓存命中率。") + '</div>' +
+      '<div class="msg bot">' + (EN0 ? "Done: the Session Total tooltip now shows the input / output / cache read / cache write / thinking breakdown." : "已加上：会话累计的 tooltip 里现在会显示 输入 / 输出 / 缓存命中 / 缓存写入 / 思考 的拆分明细。") + '</div>';
   } else {
     document.getElementById("chat-sim").style.display = "none";
   }
@@ -170,10 +171,14 @@ if (EMBED) {
 <!-- overlay.js 与数据仅在迷你窗口（embed）模式下加载：每个窗口一个独立实例 -->
 <script>
 if (EMBED) {
-  /* 预置显示项配置：保证截图不读本机浏览器 profile 里可能残留的旧配置，
-   * 与产品默认（overlay.js state.show，含开启的「本轮」）保持一致 */
-  try { localStorage.setItem("zusage3.show",
-    JSON.stringify({ win: 1, ctx: 1, today: 1, turn: 1, sub: 1, tools: 1 })); } catch (e) { }
+  /* 预置配置：保证截图不读本机浏览器 profile 里可能残留的旧配置，
+   * 与产品默认（overlay.js state.show，含开启的「本轮」）保持一致；
+   * 语言显式写 zh/en（英文截图走 overlay.js 产品级 i18n，非文本替换） */
+  try {
+    localStorage.setItem("zusage3.show",
+      JSON.stringify({ win: 1, ctx: 1, today: 1, turn: 1, sub: 1, tools: 1 }));
+    localStorage.setItem("zusage3.lang", Q.lang === "en" ? "en" : "zh");
+  } catch (e) { }
 
   var s = document.createElement("script");
   s.src = "../../overlay.js";
@@ -188,7 +193,7 @@ if (EMBED) {
   var TODAY = { total: 3421800, input: 2864100, output: 557700, reasoning: 213400,
     cache_read: 2412300, cache_write: 154900, requests: 1240, retries: 6 };
   var SESS = {
-    sid: "sess_demo01a2b3c4d5e6", title: "功能演示", active: true,
+    sid: "sess_demo01a2b3c4d5e6", title: Q.lang === "en" ? "Feature demo" : "功能演示", active: true,
     turns: 23, requests: 187,
     input: 1284300, output: 164200, reasoning: 96400, cache_read: 1102300, cache_write: 42100,
     total: 1448500, tool_calls: 142, retries: 3,
@@ -208,9 +213,9 @@ if (EMBED) {
       { name: "TodoWrite", count: 9,  duration_ms: 300,   errors: 0 } ] },
     sub: { requests: 34, total: 236400, input: 198200, output: 30200, cache_read: 141000,
       reasoning: 8200, cache_write: 6100, active: true, list: [
-      { task: "重设计状态条视觉样式",     title: "", agent: "agentA",   sid: "sess_sub_a1b2c3d4", active: true,  total: 88400, requests: 12, last: NOW - 6000,     input: 74200, output: 12100, cache_read: 52300, reasoning: 3100, cache_write: 1800 },
-      { task: "核验 tooltip 生命周期回归", title: "", agent: "agentsDS", sid: "sess_sub_e5f6a7b8", active: false, total: 61200, requests: 9,  last: NOW - 5700000,  input: 51200, output: 8400,  cache_read: 39800, reasoning: 2600, cache_write: 1200 },
-      { task: "性能取证与泵日志分析",     title: "", agent: "agentC",   sid: "sess_sub_c9d0e1f2", active: false, total: 86800, requests: 13, last: NOW - 1440000,  input: 72800, output: 9700,  cache_read: 48900, reasoning: 2500, cache_write: 3100 } ] }
+      { task: Q.lang === "en" ? "Redesign status bar visuals" : "重设计状态条视觉样式",     title: "", agent: "agentA",   sid: "sess_sub_a1b2c3d4", active: true,  total: 88400, requests: 12, last: NOW - 6000,     input: 74200, output: 12100, cache_read: 52300, reasoning: 3100, cache_write: 1800 },
+      { task: Q.lang === "en" ? "Verify tooltip lifecycle regression" : "核验 tooltip 生命周期回归", title: "", agent: "agentsDS", sid: "sess_sub_e5f6a7b8", active: false, total: 61200, requests: 9,  last: NOW - 5700000,  input: 51200, output: 8400,  cache_read: 39800, reasoning: 2600, cache_write: 1200 },
+      { task: Q.lang === "en" ? "Profiling and pump log analysis" : "性能取证与泵日志分析",     title: "", agent: "agentC",   sid: "sess_sub_c9d0e1f2", active: false, total: 86800, requests: 13, last: NOW - 1440000,  input: 72800, output: 9700,  cache_read: 48900, reasoning: 2500, cache_write: 3100 } ] }
   };
   var PAYLOAD = { mine: SESS.sid, recent: [SESS], today: TODAY };
 
@@ -264,6 +269,7 @@ if (EMBED) {
       host.appendChild(m);
     });
   }
+
 }
 </script>
 </body>
