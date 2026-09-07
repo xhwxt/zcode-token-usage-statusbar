@@ -1,4 +1,4 @@
-/* ZCode token 用量状态条 v54（渲染进程注入，自包含 IIFE）。
+/* ZCode token 用量状态条 v58（渲染进程注入，自包含 IIFE）。
  * 形态：输入框视觉卡片正下方的悬浮胶囊条 —— 给卡片加 margin-bottom 上移让位，
  *       条 fixed 悬浮在卡片边框外、窗口底边上的空带里，rAF 每帧跟随，左缘与卡片对齐。
  *       （条不能放在输入框中心点所在矩形内：命中检测自遮挡 = 周期性闪烁，v12-v14 实测。）
@@ -7,6 +7,9 @@
  * 视觉（v54 重写）：玻璃拟态胶囊（blur+内高光+分层投影）、发丝分隔线替代 │ 字符、
  *       条目悬浮底色提示可交互、行内 SVG 线性图标、tabular 数字、exc 呼吸闪烁、
  *       面板/tooltip/气泡统一圆角玻璃系；行为机制（tooltip 生命周期/遮挡豁免/面板互斥）零改动。
+ * 主题（v58）：配色全量跟随客户端主题 —— 颜色一律 var(--color-*, 兜底值) 引用客户端语义
+ *       变量（<html> 的 .dark 类翻转整套值，zai-light/zai-dark 特殊主题同样适配），
+ *       MutationObserver 观察该类同步 .zu-light（仅剩阴影/光晕程度性差异）。
  * 数据：主进程泵推 window.__zusageUpdate；显示项可在 ⚙ 面板配置（localStorage 持久化）。
  * 当前会话（v34）：泵按窗口注入 payload.mine（客户端渲染端经 IPC 向主进程上报的焦点会话 id，
  *       可为空串）；overlay 优先显示 mine 对应的池条目，池里还没有（新会话没数据）就显示
@@ -32,7 +35,7 @@
   }, 0);
 
   function main$() {
-    var VERSION = "v57";   // v57：⚙ 面板新增语言开关（中/EN），界面文案双语化   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
+    var VERSION = "v58";   // v58：定位回归贴输入框下方 + 配色全量跟随客户端主题（CSS 变量）+ 修滚动锁定穿透误显示   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
     var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv", lang: "zusage3.lang" };
 
     /* ---------- 状态 ---------- */
@@ -66,11 +69,15 @@
      * CSS 一旦失效条就退化成 static 占位元素（"输入框下方空白"的历史根因）。 */
     var style = document.createElement("style");
     style.textContent =
-      /* 胶囊条：半透明深底 + 微边框，与输入框视觉卡片形成层次；中文标签显式落雅黑 */
+      /* 胶囊条：半透明底 + 微边框。配色全量跟随客户端主题（v58）：颜色一律
+       * var(--color-*, 旧值兜底) 引用客户端语义变量（<html> 的 .dark 类翻转整套值，
+       * zai-light/zai-dark 特殊主题同样自动适配）；color-mix 处加同值前置声明，
+       * 不支持 color-mix 的旧引擎落到实色行不至于透明。 */
       "#zusage-bar{position:fixed;font:14px/1.3 Consolas,'Cascadia Mono',Menlo,'Microsoft YaHei UI','Microsoft YaHei',monospace;" +
-      "font-variant-numeric:tabular-nums;color:#8791a3;" +
-      "background:rgba(15,18,25,.84);backdrop-filter:blur(14px) saturate(1.3);-webkit-backdrop-filter:blur(14px) saturate(1.3);" +
-      "border:1px solid rgba(255,255,255,.07);border-radius:9px;padding:2px 6px;user-select:none;" +
+      "font-variant-numeric:tabular-nums;color:var(--color-foreground-subtle,#8791a3);" +
+      "background:rgba(15,18,25,.86);background:color-mix(in srgb,var(--color-background,#0f1219) 86%,transparent);" +
+      "backdrop-filter:blur(14px) saturate(1.3);-webkit-backdrop-filter:blur(14px) saturate(1.3);" +
+      "border:1px solid var(--color-border,rgba(255,255,255,.07));border-radius:9px;padding:2px 6px;user-select:none;" +
       "box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 4px 14px rgba(0,0,0,.38),0 1px 3px rgba(0,0,0,.28);" +
       "display:flex;align-items:center;gap:2px;white-space:nowrap;" +
       /* 条不能 overflow:hidden：设置面板是条的子元素、展开在条外上方，裁剪会吞掉面板（v15"点设置看不到窗口"根因）。
@@ -81,98 +88,118 @@
        * tips 全部错位一位且末项为 null —— v31"悬停只有空胶囊/内容错位"的根因 */
       ".it{display:flex;align-items:center;gap:4px;padding:2px 6px;border-radius:6px;" +
       "transition:background-color .12s ease-out}" +
-      ".it:hover{background:rgba(255,255,255,.06)}" +
-      ".sep{width:1px;height:15px;background:rgba(255,255,255,.09);flex:0 0 auto;margin:0 1px}" +
-      ".k{color:#7e8899}.v{color:#e9edf4;font-weight:600}" +
-      ".pct{font-weight:700}.dim{color:#667082}" +
+      ".it:hover{background:var(--color-hover,rgba(255,255,255,.06))}" +
+      ".sep{width:1px;height:15px;background:var(--color-border,rgba(255,255,255,.09));flex:0 0 auto;margin:0 1px}" +
+      ".k{color:#7e8899}.v{color:var(--color-foreground,#e9edf4);font-weight:600}" +
+      ".pct{font-weight:700}.dim{color:var(--color-foreground-subtle,#667082)}" +
+      /* 三档状态色刻意不走客户端变量（v58.1）：terminal-bright-* 是语法高亮色板，
+       * 绿档在条面小字号/细进度条上发白（用户实测）；改用高对比自调档，
+       * 浅色加深版在 .zu-light 组。 */
       ".ok{color:#3ecf8e}.warm{color:#f5b944}.hot{color:#ff6b57}" +
       /* 超限=亮红呼吸闪烁（v38 定性"亮红闪烁优先于一切档位"，v54 落成动画） */
       "@keyframes zuexc{0%,100%{opacity:1}50%{opacity:.4}}" +
-      ".exc{color:#ff2d55;text-shadow:0 0 8px rgba(255,45,85,.5);animation:zuexc 1.1s ease-in-out infinite}" +
-      ".btn{cursor:pointer;padding:2px 6px;border-radius:6px;color:#7e8899;" +
+      ".exc{color:var(--color-destructive,#ff2d55);text-shadow:0 0 8px rgba(255,45,85,.5);animation:zuexc 1.1s ease-in-out infinite}" +
+      ".btn{cursor:pointer;padding:2px 6px;border-radius:6px;color:var(--color-foreground-subtle,#7e8899);" +
       "transition:background-color .12s ease-out,color .12s ease-out}" +
-      ".btn:hover{color:#e9edf4;background:rgba(255,255,255,.07)}" +
+      ".btn:hover{color:var(--color-foreground,#e9edf4);background:var(--color-hover,rgba(255,255,255,.07))}" +
       ".btn:active{transform:scale(.96)}" +
       "#zu-gear{flex:0 0 auto;font-size:17px;border-radius:6px}" +
       /* 行内 SVG 线性图标（v54）：currentColor 跟随文字色，一处定义全局换色 */
-      ".ico{width:12px;height:12px;flex:0 0 auto;color:#7e8899;opacity:.85}" +
+      ".ico{width:12px;height:12px;flex:0 0 auto;color:var(--color-foreground-subtle,#7e8899);opacity:.85}" +
       /* 工具错误数徽标 */
-      ".eb{background:rgba(255,107,87,.14);color:#ff8a73;border-radius:999px;padding:0 6px;line-height:16px;font-weight:600;display:inline-flex;align-items:center;gap:2px}" +
+      ".eb{background:rgba(255,107,87,.14);background:color-mix(in srgb,var(--color-destructive,#ff6b57) 14%,transparent);" +
+      "color:var(--color-destructive,#ff8a73);border-radius:999px;padding:0 6px;line-height:16px;font-weight:600;display:inline-flex;align-items:center;gap:2px}" +
       ".eb .ico{color:inherit}" +
       /* 上下文微进度条：量感一眼可读，填充色随占比三档。
        * 填充块 background:currentColor —— 三档色类只给 color，填充靠 currentColor 着色
        * （v28 只写了 height 没写背景，填充块全透明 = "空条"根因）。 */
       ".cbar{display:inline-block;width:46px;height:5px;border-radius:999px;" +
-      "background:rgba(255,255,255,.1);box-shadow:inset 0 0 0 1px rgba(255,255,255,.03);overflow:hidden;flex:0 0 auto}" +
+      "background:var(--color-hover,rgba(255,255,255,.1));overflow:hidden;flex:0 0 auto}" +
       ".cbar>i{display:block;height:100%;border-radius:999px;background:currentColor}" +
       /* 子代理运行中呼吸灯 */
       "@keyframes zupulse{0%,100%{opacity:1}50%{opacity:.2}}" +
       ".dot{animation:zupulse 1.6s ease-in-out infinite;font-size:14px;line-height:1}" +
       ".panel{position:absolute;bottom:calc(100% + 10px);left:0;background:rgba(19,22,30,.97);" +
+      "background:color-mix(in srgb,var(--color-card,#13161e) 96%,transparent);" +
       "backdrop-filter:blur(18px) saturate(1.3);-webkit-backdrop-filter:blur(18px) saturate(1.3);" +
-      "border:1px solid rgba(255,255,255,.09);border-radius:12px;padding:12px 14px;display:none;" +
-      "flex-direction:column;gap:4px;font:13px/1.6 Consolas,Menlo,'Microsoft YaHei UI',monospace;color:#c6cdd9;" +
+      "border:1px solid var(--color-border,rgba(255,255,255,.09));border-radius:12px;padding:12px 14px;display:none;" +
+      "flex-direction:column;gap:4px;font:13px/1.6 Consolas,Menlo,'Microsoft YaHei UI',monospace;color:var(--color-foreground,#c6cdd9);" +
       "box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 12px 32px rgba(0,0,0,.5),0 2px 8px rgba(0,0,0,.35);" +
       "min-width:280px;max-width:480px;max-height:72vh;overflow:auto;white-space:normal;z-index:2147483647;" +
-      "scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.14) transparent}" +
+      "scrollbar-width:thin;scrollbar-color:var(--color-border,rgba(255,255,255,.14)) transparent}" +
       ".panel.open{display:flex}" +
       ".panel::-webkit-scrollbar{width:8px}" +
-      ".panel::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:999px}" +
+      ".panel::-webkit-scrollbar-thumb{background:var(--color-border,rgba(255,255,255,.14));border-radius:999px}" +
       ".panel label{display:flex;align-items:flex-start;gap:8px;cursor:pointer;padding:5px 8px;margin:0 -8px;" +
       "border-radius:8px;transition:background-color .12s ease-out}" +
-      ".panel input[type=text]{width:110px;background:rgba(0,0,0,.3);border:1px solid rgba(255,255,255,.14);" +
-      "color:#e9edf4;border-radius:6px;padding:2px 7px;font:inherit;outline:none}" +
-      ".panel input[type=text]:focus{border-color:rgba(87,199,255,.55);box-shadow:0 0 0 2px rgba(87,199,255,.15)}" +
-      ".panel .hr{border-top:1px solid rgba(255,255,255,.08);margin:5px 0}" +
-      ".panel .cap{color:#6b7484;margin:4px 0 2px;font-size:12px;letter-spacing:.08em}" +
-      ".panel .phead{font-weight:700;color:#eef2f8;font-size:16px;margin-bottom:5px;display:flex;align-items:center;gap:8px}" +
-      ".panel .pver{color:#57c7ff;font-weight:400;font-size:12px;background:rgba(87,199,255,.12);border-radius:999px;padding:1px 8px}" +
-      ".panel label em{font-style:normal;color:#6f7989;display:block}" +
-      ".panel input[type=checkbox]{accent-color:#57c7ff;margin-top:3px}" +
-      ".panel .pnote{line-height:1.6;color:#6f7989;margin-top:3px}" +
+      ".panel input[type=text]{width:110px;background:var(--color-input,rgba(0,0,0,.3));border:1px solid var(--color-border,rgba(255,255,255,.14));" +
+      "color:var(--color-foreground,#e9edf4);border-radius:6px;padding:2px 7px;font:inherit;outline:none}" +
+      ".panel input[type=text]:focus{border-color:var(--color-brand,#57c7ff);box-shadow:0 0 0 2px rgba(87,199,255,.15)}" +
+      ".panel .hr{border-top:1px solid var(--color-border,rgba(255,255,255,.08));margin:5px 0}" +
+      ".panel .cap{color:var(--color-foreground-subtlest,#6b7484);margin:4px 0 2px;font-size:12px;letter-spacing:.08em}" +
+      ".panel .phead{font-weight:700;color:var(--color-foreground,#eef2f8);font-size:16px;margin-bottom:5px;display:flex;align-items:center;gap:8px}" +
+      ".panel .pver{color:var(--color-brand,#57c7ff);font-weight:400;font-size:12px;background:rgba(87,199,255,.12);background:color-mix(in srgb,var(--color-brand,#57c7ff) 12%,transparent);border-radius:999px;padding:1px 8px}" +
+      ".panel label em{font-style:normal;color:var(--color-foreground-subtle,#6f7989);display:block}" +
+      ".panel input[type=checkbox]{accent-color:var(--color-brand,#57c7ff);margin-top:3px}" +
+      ".panel .pnote{line-height:1.6;color:var(--color-foreground-subtle,#6f7989);margin-top:3px}" +
       /* 子代理明细面板（v49）：点击条目弹出的固定面板（与设置面板同机制，互斥打开）；
        * 面板不随鼠标消失，绕开悬停+tab 的全部几何问题。 */
       ".zu-sub{cursor:pointer}" +
-      ".zu-sub:hover .v{color:#fff}" +
+      ".zu-sub:hover .v{color:var(--color-foreground,#fff)}" +
       ".panel.subp{width:420px;max-width:60vw;gap:8px}" +
-      ".subrow{padding:8px 10px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);border-radius:8px}" +
-      ".subname{font-weight:600;color:#e9edf4;font-size:14px;overflow-wrap:anywhere}" +
-      ".substat{color:#8791a3;margin-top:2px}" +
+      ".subrow{padding:8px 10px;background:var(--color-surface,rgba(255,255,255,.03));border:1px solid var(--color-border,rgba(255,255,255,.06));border-radius:8px}" +
+      ".subname{font-weight:600;color:var(--color-foreground,#e9edf4);font-size:14px;overflow-wrap:anywhere}" +
+      ".substat{color:var(--color-foreground-subtle,#8791a3);margin-top:2px}" +
       ".sublive{color:#3ecf8e;font-size:12px;font-weight:400;background:rgba(62,207,142,.12);border-radius:999px;padding:0 7px;margin-left:7px}" +
       /* 自绘 tooltip（v31）：向上弹出（原生 title 方向不可控且会被窗口下缘遮挡），
        * 支持多 tab；white-space:pre-line 保留数据里的 \n 换行。
        * v32：fixed 挂 body —— 原 absolute 挂 bar，被页面消息流的层叠上下文盖住
        * （diag 实证 disp=block 但不可见），挂 body 用视口坐标独立定位。 */
-      ".tip{position:fixed;background:rgba(19,22,30,.98);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);" +
-      "border:1px solid rgba(255,255,255,.1);border-radius:10px;padding:8px 12px;" +
-      "font:13px/1.6 Consolas,'Microsoft YaHei UI',monospace;color:#c6cdd9;" +
+      ".tip{position:fixed;background:rgba(19,22,30,.98);background:color-mix(in srgb,var(--color-background,#13161e) 98%,transparent);" +
+      "backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);" +
+      "border:1px solid var(--color-border,rgba(255,255,255,.1));border-radius:10px;padding:8px 12px;" +
+      "font:13px/1.6 Consolas,'Microsoft YaHei UI',monospace;color:var(--color-foreground,#c6cdd9);" +
       "box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 10px 28px rgba(0,0,0,.5),0 2px 6px rgba(0,0,0,.3);" +
       "white-space:pre-line;z-index:2147483646;max-width:560px;display:none;scrollbar-width:thin}" +
       ".ttabs{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:7px}" +
-      ".ttab{cursor:pointer;padding:2px 10px;border-radius:999px;background:rgba(255,255,255,.06);" +
-      "color:#8791a3;white-space:nowrap;font-size:13px;" +
+      ".ttab{cursor:pointer;padding:2px 10px;border-radius:999px;background:var(--color-hover,rgba(255,255,255,.06));" +
+      "color:var(--color-foreground-subtle,#8791a3);white-space:nowrap;font-size:13px;" +
       "transition:background-color .12s ease-out,color .12s ease-out}" +
-      ".ttab:hover{color:#e9edf4;background:rgba(255,255,255,.1)}" +
-      ".ttab.on{background:rgba(87,199,255,.16);color:#5ac8ff}" +
+      ".ttab:hover{color:var(--color-foreground,#e9edf4);background:rgba(255,255,255,.1);background:color-mix(in srgb,var(--color-foreground,#fff) 10%,transparent)}" +
+      ".ttab.on{background:rgba(87,199,255,.16);background:color-mix(in srgb,var(--color-brand,#5ac8ff) 16%,transparent);color:var(--color-brand,#5ac8ff)}" +
       ".tbody{max-height:60vh;overflow:auto;scrollbar-width:thin}" +
       ".tbody::-webkit-scrollbar{width:8px}" +
-      ".tbody::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:999px}" +
+      ".tbody::-webkit-scrollbar-thumb{background:var(--color-border,rgba(255,255,255,.14));border-radius:999px}" +
       /* 超限告警气泡（v39）：挂 body 的独立浮层（与 .tip 同套路，免受条面重建影响），
-       * 红边警示 + 建议步骤 + 可点击复制的会话 ID；user-select:text 允许手动选中兜底 */
+       * 红边警示 + 建议步骤 + 可点击复制的会话 ID；user-select:text 允许手动选中兜底。
+       * 底色 = 客户端 destructive 掺背景色：深色下深红黑、浅色下淡粉，自动适配。 */
       ".zusage-exc{position:fixed;max-width:470px;" +
       "background:linear-gradient(180deg,rgba(41,18,22,.98),rgba(27,14,16,.98));" +
-      "border:1px solid rgba(255,45,85,.4);border-radius:12px;padding:12px 15px;" +
-      "font:13px/1.7 Consolas,'Microsoft YaHei UI',monospace;color:#e9edf4;" +
+      "background:linear-gradient(180deg,color-mix(in srgb,var(--color-destructive,#ff2d55) 10%,var(--color-background,#1b0e10)),color-mix(in srgb,var(--color-destructive,#ff2d55) 5%,var(--color-background,#1b0e10)));" +
+      "border:1px solid rgba(255,45,85,.4);border-color:color-mix(in srgb,var(--color-destructive,#ff2d55) 40%,transparent);" +
+      "border-radius:12px;padding:12px 15px;" +
+      "font:13px/1.7 Consolas,'Microsoft YaHei UI',monospace;color:var(--color-foreground,#e9edf4);" +
       "box-shadow:0 12px 32px rgba(0,0,0,.5),0 4px 18px rgba(255,45,85,.12);white-space:normal;z-index:2147483647;" +
       "user-select:text;display:none}" +
       ".zusage-exc .xb-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}" +
-      ".zusage-exc .xb-title{font-weight:700;color:#ff5c77}" +
-      ".zusage-exc .xb-step{color:#c6cdd9}" +
-      ".zusage-exc .xb-close{cursor:pointer;color:#8791a5;padding:2px 5px;border-radius:6px;font-size:16px;line-height:1}" +
-      ".zusage-exc .xb-close:hover{color:#fff;background:rgba(255,255,255,.08)}" +
-      ".zusage-exc .xb-sid{color:#57c7ff;cursor:pointer;text-decoration:underline dotted}" +
-      ".zusage-exc .xb-sid:hover{color:#8adcff}" +
+      ".zusage-exc .xb-title{font-weight:700;color:var(--color-destructive,#ff5c77)}" +
+      ".zusage-exc .xb-step{color:var(--color-foreground-subtle,#c6cdd9)}" +
+      ".zusage-exc .xb-close{cursor:pointer;color:var(--color-foreground-subtlest,#8791a5);padding:2px 5px;border-radius:6px;font-size:16px;line-height:1}" +
+      ".zusage-exc .xb-close:hover{color:var(--color-foreground,#fff);background:var(--color-hover,rgba(255,255,255,.08))}" +
+      ".zusage-exc .xb-sid{color:var(--color-brand,#57c7ff);cursor:pointer;text-decoration:underline dotted}" +
+      ".zusage-exc .xb-sid:hover{text-decoration-style:solid}" +
       ".zusage-exc .xb-copied{color:#3ecf8e;margin-left:6px;display:none}" +
+      /* 白色主题程度性覆盖（v58.1）：颜色已全量走客户端变量随 .dark 自动翻转，
+       * 这里只兜两类 —— 程度差（浅色下阴影/内高光减重、红字光晕收掉）与
+       * 三档状态色加深版（高对比自调档，见 .ok 注释）。 */
+      "#zusage-bar.zu-light{box-shadow:inset 0 1px 0 rgba(255,255,255,.85),0 4px 14px rgba(15,23,42,.12),0 1px 3px rgba(15,23,42,.08)}" +
+      ".zu-light .panel{box-shadow:inset 0 1px 0 rgba(255,255,255,.9),0 12px 32px rgba(15,23,42,.14),0 2px 8px rgba(15,23,42,.08)}" +
+      ".tip.zu-light{box-shadow:inset 0 1px 0 rgba(255,255,255,.9),0 10px 28px rgba(15,23,42,.16),0 2px 6px rgba(15,23,42,.08)}" +
+      ".zusage-exc.zu-light{box-shadow:0 12px 32px rgba(15,23,42,.14),0 4px 18px rgba(220,38,38,.1)}" +
+      ".zu-light .exc{text-shadow:none}" +
+      ".zu-light .ok{color:#0f9d6c}.zu-light .warm{color:#b6791a}.zu-light .hot{color:#d8482f}" +
+      ".zu-light .sublive{color:#0c8a63;background:rgba(15,140,102,.12)}" +
+      ".zu-light .xb-copied{color:#0c8a63}" +
       /* 减少动态偏好：关闭呼吸/闪烁与悬浮过渡 */
       "@media (prefers-reduced-motion:reduce){.exc,.dot{animation:none}" +
       ".it,.btn,.ttab,.panel label{transition:none}}";
@@ -287,6 +314,30 @@
     }
     rebuildExcBubble();
     document.body.appendChild(excBubble);
+
+    /* ---------- 主题跟随（v58）：深浅由客户端根元素 .dark 类驱动 ----------
+     * 客户端主题切换时往 <html> 挂/摘 .dark（zai-dark 时挂；theme-zai-* 同步），整套
+     * CSS 变量（--color-background/foreground/border/hover/card/destructive/brand/
+     * terminal-* …）随级联翻转，上面的配色自动换装 —— 本块只负责观察 .dark 摘挂，
+     * 同步 .zu-light（仅剩阴影/光晕程度性覆盖）。观察类属性而非 matchMedia：
+     * 信号源与变量翻转同源，客户端强制浅色+系统深色等错位态不会劈叉。 */
+    var rootEl = document.documentElement;
+    function themeIsDark() {
+      try { return rootEl.classList.contains("dark"); } catch (e) { return true; }
+    }
+    var themeDark = themeIsDark();
+    function applyTheme() {
+      bar.classList.toggle("zu-light", !themeDark);
+      tip.classList.toggle("zu-light", !themeDark);
+      excBubble.classList.toggle("zu-light", !themeDark);
+    }
+    try {
+      new MutationObserver(function () {
+        var d = themeIsDark();
+        if (d !== themeDark) { themeDark = d; applyTheme(); }
+      }).observe(rootEl, { attributes: true, attributeFilter: ["class"] });
+    } catch (e) { }
+    applyTheme();
 
     var $ = function (id) { return bar.querySelector(id); };
     var main = $("#zu-main"), gear = $("#zu-gear");
@@ -960,12 +1011,20 @@
     function isOwnOverlay(el) {
       try { return !!(el && el.closest && el.closest("#zusage-tip,.panel,.zusage-exc")); } catch (e) { return false; }
     }
+    /* 命中根元素 = 穿透假象（v59）：客户端下拉/模态打开瞬间，滚动锁定（react-remove-scroll
+     * 同款机制）给应用层设 pointer-events:none，elementFromPoint 跳过这些层一路穿到底 ——
+     * 被设置页完全盖住的输入框被误判"未被遮挡"，条错误显示（用户实测：设置里开下拉就冒条）。
+     * 正常情况下输入框中心至少命中卡片/输入框自身的某个元素，不可能落到根元素上。 */
+    function hitIsThroughRoot(hit) {
+      return hit === document.body || hit === document.documentElement;
+    }
     function reallyVisible(el, ownOK) {
       if (!visible(el)) return false;
       var r = el.getBoundingClientRect();
       var hit;
       try { hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); } catch (e) { return true; }
       if (!hit) return false;
+      if (hitIsThroughRoot(hit)) return false;   // 穿透假象视同被盖（v59）
       if (hit === el || hit.contains(el) || el.contains(hit)) return true;   // 命中自身/祖先/内部装饰层
       if (ownOK && isOwnOverlay(hit)) return true;
       return false;
@@ -1029,7 +1088,7 @@
 
     /* 卡片下移让位：给视觉卡片加 margin-bottom 空出悬浮带（条在卡片正下方）。
      * React 重渲染会重置内联样式，track() 逐帧对比补回（v14 同款机制）。 */
-    var CARD_MARGIN = "24px";   // 条贴窗口底后只需把卡片推高到条顶上方 ~5px（v58；原生底距 ~15px + 24 ≈ 条高+顶缝）
+    var CARD_MARGIN = "24px";   // v58 贴卡片定位回归：24px 让位带 = 条高 ~28 + 顶缝 4 - 原生底距 ~15 → 条下仅余 ~7px
     function ensureCardPad() {
       if (!cardCache) return;
       try {
@@ -1104,6 +1163,7 @@
           ensureCardPad();   // React 重渲染可能重建卡片/重置内联边距，对比后再补
           state.nativeCtx = readNativeCtx(cardCache);
         }
+        updateCoverLock();   // 滚动锁定态随 heavy 低频刷新（下拉/模态开合检测，v59）
       }
       if (state.data) {
         var msid = typeof state.data.mine === "string" ? state.data.mine : null;
@@ -1149,11 +1209,36 @@
       var hit;
       try { hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); } catch (e) { return true; }
       if (!hit) return false;
+      if (hitIsThroughRoot(hit)) return false;   // 穿透假象视同被盖（v59）
       if (hit === el || hit.contains(el) || el.contains(hit)) return true;
       if (cardCache && cardCache.contains(el) && cardCache.contains(hit)) return true;
       if (isOwnOverlay(hit)) return true;   // 自己的面板/气泡盖住输入框中心不算被盖（v40）
       return false;
     }
+    /* 滚动锁定态检测（v59，判据 2）：穿透不一定穿到底 —— 若只有部分层被设
+     * pointer-events:none，elementFromPoint 会停在更下层的正常元素上（如输入框自身），
+     * 上面的根元素特判兜不住。这里低频（heavy 600ms）检测锁定本身：存在可见的、
+     * 覆盖输入框中心的 body 直接子层 pointer-events 为 none = 有模态/下拉开着
+     * （react-remove-scroll 正是锁 body 直接子层），可见性判定直接判否。
+     * fail-closed：锁定态下真露着的输入框也暂时藏条，宁可少显不可错显。 */
+    var coverLock = false;
+    function updateCoverLock() {
+      coverLock = false;
+      if (!composer || !composer.isConnected) return;
+      try {
+        var r = composer.getBoundingClientRect();
+        var cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+        var kids = document.body.children;
+        for (var i = 0; i < kids.length; i++) {
+          var el = kids[i];
+          var kr = el.getBoundingClientRect();
+          if (kr.width < 4 || kr.height < 4) continue;                     // 不可见的层不构成遮挡
+          if (cx < kr.left || cx > kr.right || cy < kr.top || cy > kr.bottom) continue;
+          if (getComputedStyle(el).pointerEvents === "none") { coverLock = true; return; }
+        }
+      } catch (e) { }
+    }
+
     function track() {
       if (stale()) return;   // 旧实例罢工，把舞台让给新实例
       try {
@@ -1162,6 +1247,7 @@
         if (cardCache && cardCache.style.marginBottom !== CARD_MARGIN) ensureCardPad();   // 流式期间 React 重置内联边距时立刻补回
         var r = composer.getBoundingClientRect();
         var on = r.width > 60 && r.height > 14 && r.bottom > 0 && r.top < innerHeight &&
+          !coverLock &&   // 滚动锁定穿透（设置页/模态开着）时命中结果不可信，直接判被盖（v59）
           (reallyVisible(composer, true) || coverOK(composer));
         if (!on) {
           // 迟滞：连续 400ms 判定不可见才隐藏，瞬时失败（流式装饰层等）不闪
@@ -1171,12 +1257,14 @@
         }
         hideSince = 0;
         if (curDisplay !== "flex") { bar.style.display = "flex"; curDisplay = "flex"; }
-        /* 悬浮贴窗口底（条下只留 3px）：v57 前贴卡片底，让位带与条高之差+ZCode 原生
-         * 底部留白全漏在条下方（用户实测 ~15px 空白）；水平仍与卡片左缘对齐 */
+        /* 悬浮在输入框视觉卡片正下方（v58 定位回归）：v55-v57 改贴窗口底，新对话 hero 页
+         * 输入框垂直居中时条与输入框彻底脱钩（用户点名回退）。让位带 24px 比条高+顶缝
+         * 短 ~7px，条底落进原生底部留白、距窗口底 ~7px —— v54 的"条下 15px 空白"不复发。
+         * 水平仍与卡片左缘对齐 */
         var anchor = cardCache || composer;
         var ar = anchor.getBoundingClientRect();
         var left = Math.round(ar.left);
-        var top = Math.max(8, Math.round(innerHeight - bar.offsetHeight - 3));
+        var top = Math.max(8, Math.min(Math.round(ar.bottom + 4), innerHeight - bar.offsetHeight - 2));
         if (left !== lastPos[0] || top !== lastPos[1]) {
           bar.style.left = left + "px"; bar.style.top = top + "px";
           lastPos = [left, top];
@@ -1190,6 +1278,7 @@
           try { bh = document.elementFromPoint(br.left + br.width / 2, br.top + br.height / 2); } catch (e) { }
           FATAL.mount = {
             version: VERSION, mode: "below-card",
+            theme: themeDark ? "dark" : "light",
             tip: (function () { return { stats: tipStats, disp: tip.style.display, barRect: (function () { var b = bar.getBoundingClientRect(); return [Math.round(b.left), Math.round(b.top), Math.round(b.width), Math.round(b.height)]; })() }; })(),
             composerRect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
             anchorRect: [Math.round(ar.left), Math.round(ar.top), Math.round(ar.width), Math.round(ar.height)],
