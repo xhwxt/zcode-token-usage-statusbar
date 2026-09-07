@@ -5,11 +5,16 @@
   python patch_install.py install   # 安装/重定向（幂等；自动替换旧注入行，含指向旧目录的历史行；
                                     # 客户端运行中则生成 .tmp 待退出后替换）
   python patch_install.py install --finalize  # 客户端退出后完成替换
-  python patch_install.py remove    # 卸载（优先从 .bak 恢复）
+  python patch_install.py remove    # 卸载（从 asar 剥离本工具注入行，不依赖备份）
   python patch_install.py check     # 检查当前注入状态与入口语法
 
 原理：asar 主入口 out/main/index.js 尾部追加一行 dynamic import(loader)（ESM 入口，实测见下）。
 Electron fuses: EmbeddedAsarIntegrityValidation=0（已实测），改动 asar 可正常加载。
+
+安装/卸载均只增删本工具自己的注入行（ZUSAGE_LINE_RE 识别，不限目录的历史行一并匹配），
+不制作也不依赖 asar 备份：卸载不会连带移除其它工具后装的注入行；ZCode 官方升级覆盖 asar
+之后再卸载，也不会把客户端降级回安装时的旧版本。历史版本遗留的 app.asar.zusage.bak
+会在成功安装/卸载后自动清理。
 
 安装成功后自动弹出常驻监控窗口（install_monitor.py，每 10 秒检测一次）：提醒重启
 ZCode、确认注入加载后自动退出；运行中替换失败（.tmp 待替换）时还会在 ZCode 退出后
@@ -19,7 +24,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import struct
 import subprocess
 import sys
@@ -197,14 +201,15 @@ def entry_bytes_of(asar_path: Path) -> bytes:
         return f.read(node["size"])
 
 
-def self_check(asar_path: Path):
-    """结构自检：header 可解析、文件数、入口含注入行。"""
+def self_check(asar_path: Path, expect=True):
+    """结构自检：header 可解析、文件数、入口注入行符合预期（install 期望有，remove 期望无）。"""
     with open(asar_path, "rb") as f:
         header, base = read_header(f)
         n = sum(1 for _ in iter_files(header))
-    ok = INJECT_LINE.encode() in entry_bytes_of(asar_path)
-    print(L(f"  [check] header ok, 文件数={n}, 注入行已写入={ok}",
-            f"  [check] header ok, files={n}, entry injected={ok}"))
+    has = INJECT_LINE.encode() in entry_bytes_of(asar_path)
+    ok = has == expect
+    print(L(f"  [check] header ok, 文件数={n}, 注入行{'符合' if ok else '不符合'}预期（期望{'有' if expect else '无'}）",
+            f"  [check] header ok, files={n}, injection line {'as expected' if ok else 'UNEXPECTED'} (expected {'present' if expect else 'absent'})"))
     return ok
 
 
@@ -220,6 +225,18 @@ def syntax_check(asar_path: Path):
     return r.returncode == 0
 
 
+def cleanup_legacy_bak():
+    """备份机制已退役（安装/卸载均改为剥离注入行）：清掉历史版本遗留的 .bak，省约 300MB 磁盘。"""
+    if not BAK.exists():
+        return
+    try:
+        BAK.unlink()
+        print(L(f"已清理历史遗留备份 {BAK}", f"Removed legacy backup {BAK}"))
+    except OSError as e:
+        print(L(f"（遗留备份清理失败，可手动删除 {BAK}：{e}）",
+                f"(failed to remove legacy backup {BAK}; delete it manually: {e})"))
+
+
 # ---------- 安装 / 卸载 ----------
 
 def install(finalize=False):
@@ -230,10 +247,8 @@ def install(finalize=False):
     if stripped + INJECT_LINE.encode() == entry:
         print(L("已安装，注入行已指向当前目录。如需重装先 remove。",
                 "Already installed; the injection line points at the current directory. Run remove first to reinstall."))
+        cleanup_legacy_bak()
         return True
-    if not BAK.exists():
-        print(L(f"备份 {ASAR} -> {BAK} ...", f"backing up {ASAR} -> {BAK} ..."))
-        shutil.copy2(ASAR, BAK)
 
     new_entry = stripped + INJECT_LINE.encode()
     if stripped != entry:
@@ -252,6 +267,7 @@ def install(finalize=False):
                     "\nZCode is running, but the asar was replaced atomically (running processes keep reading the old data)."))
             print(L("重启 ZCode 后悬浮条生效；已弹出监控窗口，确认生效后自动关闭。",
                     "The floating bar activates after restarting ZCode; a monitor window has opened and will close itself once the load is confirmed."))
+            cleanup_legacy_bak()
             launch_monitor(time.time())
             return True
         except OSError as e:
@@ -263,32 +279,37 @@ def install(finalize=False):
             return False
     os.replace(TMP, ASAR)
     print(L("完成。启动 ZCode 即可在窗口底部看到悬浮条。", "Done. Start ZCode and the floating bar appears at the bottom of the window."))
+    cleanup_legacy_bak()
     launch_monitor(time.time())
     return True
 
 
 def remove():
-    """返回 True=已卸载/本就未注入，False=需人工处理（运行中/替换失败）。"""
-    if BAK.exists():
-        if client_running():
-            print(L("ZCode 正在运行，请退出后再卸载。", "ZCode is running; quit it before uninstalling."))
-            return False
-        os.replace(BAK, ASAR)
-        print(L("已从备份恢复原版 asar。", "Original asar restored from backup."))
-        return True
-    print(L("无备份，尝试从当前 asar 剥离注入行...", "No backup; trying to strip the injection line from the current asar..."))
+    """卸载：从当前 asar 剥离本工具注入行（不依赖备份，其它工具的注入行不受影响）。
+    返回 True=已卸载/本就未注入，False=需人工处理（替换失败待收尾）。"""
     old = entry_bytes_of(ASAR)
     stripped = ZUSAGE_LINE_RE.sub(b"", old)
     if stripped == old:
         print(L("当前 asar 未注入。", "The current asar is not injected."))
+        cleanup_legacy_bak()
         return True
+    print(L("重打包（剥离注入行，约需十几秒）...", "repacking (stripping the injection line, takes ~10-20 seconds)..."))
     repack(ASAR, {"/" + ENTRY: stripped}, TMP)
-    if client_running():
-        print(L(f"ZCode 正在运行，请退出后手动替换：move /y {TMP} {ASAR}",
-                f"ZCode is running; quit it and replace manually: move /y {TMP} {ASAR}"))
+    print(L("结构自检：", "self-check:"))
+    if not (self_check(TMP, expect=False) and syntax_check(TMP)):
+        print(L("自检失败，未替换。TMP 保留供排查:", "self-check failed; not replaced. TMP kept for inspection:"), TMP)
         return False
-    os.replace(TMP, ASAR)
-    print(L("已剥离。", "Stripped."))
+    running = client_running()
+    try:
+        os.replace(TMP, ASAR)
+    except OSError as e:
+        print(L(f"\n替换失败（{e}）。请完全退出 ZCode 后重跑 python patch_install.py remove，",
+                f"\nReplacement failed ({e}). Quit ZCode completely and re-run python patch_install.py remove, "))
+        print(L(f"或手动替换：move /y {TMP} {ASAR}", f"or replace manually: move /y {TMP} {ASAR}"))
+        return False
+    print(L("已剥离注入行" + ("（客户端运行中，已原子替换，运行中进程仍读旧数据）" if running else "") + "。重启 ZCode 后生效。",
+            "Injection line stripped" + (" (ZCode was running; replaced atomically, the running process keeps the old data)" if running else "") + ". Takes effect after restarting ZCode."))
+    cleanup_legacy_bak()
     return True
 
 
@@ -296,7 +317,7 @@ def check():
     injected = bool(ZUSAGE_LINE_RE.search(entry_bytes_of(ASAR)))   # 宽松匹配任意目录的历史注入行（独立运行时 INJECT_LINE 指向仓库路径，精确匹配会误报未注入）
     print("asar:", ASAR, ASAR.stat().st_size, "bytes")
     print(L("注入状态:", "Injection:"), L("已注入", "injected") if injected else L("未注入", "not injected"))
-    print(L("备份:", "Backup:"), BAK.exists())
+    print(L("遗留备份（机制已退役，成功安装/卸载后自动清理）:", "Legacy backup (retired; auto-removed on successful install/remove):"), BAK.exists())
     if injected:
         syntax_check(ASAR)
     if TMP.exists():

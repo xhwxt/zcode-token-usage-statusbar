@@ -78,7 +78,7 @@ cd zcode-token-usage-statusbar
 python install.py            # add --lang en for English installer/CLI/MCP output
 ```
 
-One command does it all: locate the ZCode installation → copy the runtime into the data directory `~/.zcode/zcode-token-usage-statusbar/` → migrate/generate config.json → patch app.asar (a single loader line) → register the MCP server → install the /usage command → open an install-monitor window that reminds you to restart ZCode and confirms the injection took effect.
+One command does it all: locate the ZCode installation (the `ZCODE_ASAR` environment variable or `--asar` flag for non-default locations; remembered after the first run) → copy the runtime into the data directory `~/.zcode/zcode-token-usage-statusbar/` → migrate/generate config.json → patch app.asar (a single loader line) → register the MCP server → install the /usage command → open an install-monitor window that reminds you to restart ZCode and confirms the injection took effect.
 
 **ZCode upgrades overwrite app.asar — just re-run `python install.py`.**
 
@@ -91,6 +91,8 @@ Reads `~/.zcode/cli/db/db.sqlite` (`model_usage` / `turn_usage` / `tool_usage` �
 ```bash
 python install.py --remove
 ```
+
+Uninstall does not rely on a backup: it only adds/removes this tool's own injection line inside app.asar, works while ZCode is running (effective after restart), leaves injections added later by other tools untouched, and never "restores" an officially upgraded asar back to an older snapshot.
 
 ## Notes
 

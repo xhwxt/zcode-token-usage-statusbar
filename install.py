@@ -10,19 +10,21 @@ asar 注入行与 MCP 注册都指向数据目录 —— 之后 clone 目录可�
 
 用法（仓库根目录）：
   python install.py               # 全量安装：复制运行时 → 注入 asar → 注册 MCP → /usage 命令 → 监控窗口
-  python install.py --asar PATH   # 指定 app.asar（自动探测失败时用）
+  python install.py --asar PATH   # 指定 app.asar（自动探测失败时用；首次成功后记住，之后免传）
   python install.py --no-mcp      # 只装状态条，不动 MCP 与 /usage 命令
   python install.py --dev         # 开发模式：不复制运行时，注入直指本仓库目录，配置/诊断留在仓库
                                   #   （作者迭代用，改仓库文件即时热更新；与标准形态重跑 install 即互切）
-  python install.py --remove      # 卸载：恢复原版 asar + 移除 MCP 注册与命令 + 删除数据目录
+  python install.py --remove      # 卸载：剥离 asar 注入行 + 移除 MCP 注册与命令 + 删除数据目录
   python install.py --dry-run     # 打印将执行的动作，不写任何文件
   python install.py --lang en     # 安装器与各组件的输出语言（zh/en；写入 config.json 供 CLI/MCP 沿用）
 
 升级：git pull 后重跑 python install.py —— 注入行不变则 asar 不重打包（秒级），
 overlay 副本刷新后由泵 2 秒内热重载；改了 inject-main.cjs（泵）才需要重启 ZCode。
 
-ZCode 安装位置自动探测：常见目录（D:\\ZCode、C:\\ZCode、%LOCALAPPDATA%\\Programs 等）
-下找 resources\\app.asar；失败且终端可交互时询问，或用 --asar 指定。
+ZCode 安装位置自动探测：环境变量 ZCODE_ASAR → 常见目录（D:\\ZCode、C:\\ZCode、
+%LOCALAPPDATA%\\Programs 等）下找 resources\\app.asar；失败且终端可交互时询问，
+或用 --asar 指定。非默认位置首次安装成功后路径记住在 config.json（asar_path 字段），
+之后的安装/卸载一律免传 --asar。
 """
 import argparse
 import json
@@ -71,6 +73,11 @@ def load_lang_from_config(dev):
 
 
 def find_asar():
+    env = os.environ.get("ZCODE_ASAR")   # 非默认安装位置：设一次环境变量，永久免 --asar
+    if env:
+        p = expand(env)
+        if p.is_file():
+            return p
     for c in ASAR_CANDIDATES:
         p = expand(c)
         if p.is_file():
@@ -95,6 +102,36 @@ def ask_asar():
         return None
     p = Path(s)
     return p if p.is_file() else None
+
+
+def find_installed_asar(explicit=None):
+    """卸载时定位 asar：--asar > config 记住的安装位置（数据目录与仓库 config 都查）> 自动探测 > 询问。"""
+    if explicit:
+        return Path(explicit)
+    for cfg in (DATA_DIR / "config.json", HERE / "config.json"):
+        try:
+            p = json.loads(cfg.read_text(encoding="utf-8")).get("asar_path")
+            if p and Path(p).is_file():
+                return Path(p)
+        except (OSError, ValueError):
+            pass
+    return find_asar() or ask_asar()
+
+
+def remember_asar(asar, dev):
+    """安装后把 asar 路径记进 config.json 的 asar_path 字段（其余组件忽略未知字段），
+    之后的安装/卸载免传 --asar。config 定位与 load_lang_from_config 同款（--dev 在仓库目录）。"""
+    cfg = HERE / "config.json" if dev else DATA_DIR / "config.json"
+    try:
+        data = json.loads(cfg.read_text(encoding="utf-8")) if cfg.exists() else {}
+    except (OSError, ValueError):
+        data = {}
+    if data.get("asar_path") == str(asar):
+        return
+    data["asar_path"] = str(asar)
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(L(f"[目标] 已记住安装位置 → {cfg}", f"[target] install location remembered -> {cfg}"))
 
 
 def copy_runtime(dry):
@@ -247,7 +284,8 @@ def main():
 
     ap = argparse.ArgumentParser(description=L("ZCode Token 用量状态栏 一键安装",
                                                "ZCode Token Usage Status Bar one-shot installer"))
-    ap.add_argument("--asar", help=L("app.asar 路径（默认自动探测）", "path to app.asar (auto-detected by default)"))
+    ap.add_argument("--asar", help=L("app.asar 路径（默认自动探测；首次安装成功后记住，之后免传）",
+                                     "path to app.asar (auto-detected by default; remembered after the first install)"))
     ap.add_argument("--no-mcp", action="store_true", help=L("跳过 MCP 注册与 /usage 命令", "skip MCP registration and the /usage command"))
     ap.add_argument("--dev", action="store_true", help=L("开发模式：不复制运行时，注入直指本仓库目录（配置/诊断留在仓库）",
                                                          "dev mode: no runtime copy; injection points at this repo (config/diagnostics stay in the repo)"))
@@ -265,10 +303,18 @@ def main():
 
     if args.remove:
         if args.dry_run:
-            print(L("[卸载] （dry-run）python patch_install.py remove + 清理 MCP 注册与 /usage 命令 + 删除数据目录",
-                    "[uninstall] (dry-run) python patch_install.py remove + MCP registration & /usage command cleanup + data dir removal"))
+            print(L("[卸载] （dry-run）剥离 asar 注入行 + 清理 MCP 注册与 /usage 命令 + 删除数据目录",
+                    "[uninstall] (dry-run) strip the asar injection line + MCP registration & /usage command cleanup + data dir removal"))
             return 0
-        ok = pi.remove()
+        asar = find_installed_asar(args.asar)
+        ok = True
+        if asar and asar.is_file():
+            print(L(f"[目标] {asar}", f"[target] {asar}"))
+            pi.set_target(asar)
+            ok = pi.remove()
+        else:
+            print(L("[卸载] 未找到 app.asar（ZCode 可能已卸载或换了位置），跳过 asar 剥离，仅清理注册与数据。",
+                    "[uninstall] app.asar not found (ZCode may be uninstalled or relocated); skipping the asar strip, cleaning registration & data only."))
         if args.no_mcp:
             return 0 if ok else 1
         remove_mcp(args.dry_run)
@@ -297,6 +343,7 @@ def main():
         ok = True
     else:
         ok = pi.install()
+        remember_asar(asar, args.dev)   # 无论注入是否收尾成功都记住（卸载/收尾要用）
     if not ok:
         print(L("asar 注入未完成，MCP/命令部分仍会继续（可稍后单独重跑 patch_install.py install）。",
                 "asar injection did not finish; MCP/command parts will continue (re-run patch_install.py install later on its own)."))

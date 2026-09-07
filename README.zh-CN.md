@@ -81,7 +81,7 @@ ZCode 的插件机制（`plugin.json`）只能提供 MCP / skills / commands / h
 | `install.py` | **一键安装**：探测 ZCode 安装位置 → 复制运行时到数据目录 → 生成 config → 注入 asar → 注册 MCP → 装 /usage 命令 → 弹监控窗口。`--remove` 卸载，`--dry-run` 预览，`--no-mcp` 只装状态条，`--dev` 开发模式（不复制，注入直指本仓库目录）。 |
 | `overlay.js` | 状态条本体（渲染进程注入，自包含 IIFE）。fixed 悬浮在**窗口最底部**（条下只留 3px 缝，给输入卡片加 margin-bottom 上移让位），rAF 每帧跟随；输入框定位要求 textarea 在视口下半部（排除设置页等处的输入元素）。 |
 | `inject-main.cjs` | 主进程 loader：向每个窗口注入 overlay.js + **触发式监听 db 写入**（fs.watch db 目录，有写入→去抖 300ms→查询推送；空闲零进程零轮询，仅 30s 兜底心跳）。查询走**常驻 python**（`zusage.py serve` 行协议；意外退出自动重启、30s 内 3 次判不稳定回退一次性 spawn、zusage.py mtime 变化自动重启；stdin EOF 随泵退出自清理）。 |
-| `patch_install.py` | asar 注入/卸载工具（install.py 的底层，可单独用）：备份 → 在入口 `out/main/index.js` 尾部追加 dynamic import 行 → 重打包 → 自检 → 原子替换。幂等，自动替换旧注入行（迁移友好）。安装成功自动弹出监控窗口。 |
+| `patch_install.py` | asar 注入/卸载工具（install.py 的底层，可单独用）：在入口 `out/main/index.js` 尾部追加/剥离本工具的 dynamic import 行 → 重打包 → 自检 → 原子替换。不制作也不依赖备份，卸载只动自己的注入行（其它工具后装的注入行不受影响）。幂等，自动替换旧注入行（迁移友好）。安装成功自动弹出监控窗口。 |
 | `install_monitor.py` | 安装监控窗口（常驻命令行，每 10 秒检测一次）：持续提醒重启 ZCode；重启后通过 diag 更新确认注入加载，显示成功并自动退出。运行中原子替换失败（生成 .tmp）时，它还会在 ZCode 退出后自动完成替换——**收尾不依赖计划任务**。 |
 | `zusage.py` | 查询库 + CLI + 机器可读快照（`json` 子命令，状态条数据源）。 |
 | `usage_mcp.py` | 零依赖 stdio MCP server。 |
@@ -99,7 +99,7 @@ cd zcode-token-usage-statusbar
 python install.py            # 加 --lang en 可让安装器/CLI/MCP 输出英文
 ```
 
-一条命令完成：探测 ZCode 安装位置（找不到时询问，或 `--asar` 指定）→ **复制运行时到数据目录 `~/.zcode/zcode-token-usage-statusbar/`** → 迁移/生成 config.json → 注入 asar（注入行指向数据目录副本）→ 注册 MCP（server 名 `zcode-token-usage-statusbar`，指向数据目录副本）→ 安装 /usage 命令 → 弹出「安装监控」窗口（每 10 秒检测一次，提醒重启 ZCode；重启后检测到注入加载即显示成功并自动关闭；万一运行中原子替换失败，监控窗口会在你退出 ZCode 后自动完成替换）。
+一条命令完成：探测 ZCode 安装位置（环境变量 `ZCODE_ASAR` → 常见目录 → 找不到时询问或 `--asar` 指定；首次成功后记住位置，之后一律免传）→ **复制运行时到数据目录 `~/.zcode/zcode-token-usage-statusbar/`** → 迁移/生成 config.json → 注入 asar（注入行指向数据目录副本）→ 注册 MCP（server 名 `zcode-token-usage-statusbar`，指向数据目录副本）→ 安装 /usage 命令 → 弹出「安装监控」窗口（每 10 秒检测一次，提醒重启 ZCode；重启后检测到注入加载即显示成功并自动关闭；万一运行中原子替换失败，监控窗口会在你退出 ZCode 后自动完成替换）。
 
 **ZCode 升级会覆盖 app.asar，重跑一次 `python install.py` 即可**（监控窗口提示"未检测到注入加载"通常就是这个原因）。
 
@@ -157,17 +157,19 @@ python patch_install.py install
 ## 已知限制
 
 - 仅 Windows（tasklist 检测、`CREATE_NEW_CONSOLE`、asar 路径均平台相关）。
-- ZCode 安装位置自动探测常见目录，非标准位置用 `python install.py --asar <路径>` 指定。
-- 依赖 fuses `EmbeddedAsarIntegrityValidation=0`。官方一旦收紧此 fuse 或改入口结构，注入路线即失效（届时 `python install.py --remove` 恢复原版）。
+- ZCode 安装位置自动探测常见目录，非标准位置用 `python install.py --asar <路径>` 指定（首次成功后记住，之后免传；也可设环境变量 `ZCODE_ASAR`）。
+- 依赖 fuses `EmbeddedAsarIntegrityValidation=0`。官方一旦收紧此 fuse 或改入口结构，注入路线即失效（届时 `python install.py --remove` 剥离注入行即恢复原样）。
 - 修改客户端 asar 属非官方注入方式，ZCode 升级会覆盖，需重跑 install。
 - 上下文超限亮红依赖 db 中 `context_exceeded` 标记行；触发条件是请求真被服务端拒绝，无法本地模拟测试。
 
 ## 卸载
 
 ```bash
-python install.py --remove    # 恢复原版 asar（需先退出 ZCode）+ 移除 MCP 注册与 /usage 命令 + 删除数据目录
+python install.py --remove    # 从 asar 剥离本工具注入行 + 移除 MCP 注册与 /usage 命令 + 删除数据目录
 # 或只卸状态条：python patch_install.py remove
 ```
+
+卸载不依赖备份：只在 asar 里增删本工具自己的注入行，运行中也可执行（重启后生效）；其它工具后装的注入行不受影响，也不会把官方升级后的新版 asar"还原"回旧版本。
 
 ## 目录迁移
 
