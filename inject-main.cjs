@@ -211,10 +211,6 @@ function killResidentForUpgrade() {
   try { pyRes.proc.kill(); } catch (e) { }
 }
 
-function residentBusy() {
-  return !!(pyRes && pyRes.waiters.length > 0);
-}
-
 /* 统一查询入口：resident 可用走行协议，否则一次性 spawn（config.resident=false 或判不稳定） */
 function runQuery(wants) {
   busy = true;
@@ -243,7 +239,6 @@ function runQuery(wants) {
 
 /* 回退路径（一次性 spawn）：常驻不可用时走 */
 function legacySpawn(wants) {
-  const { spawn } = require("child_process");
   /* wants：各窗口当前会话 id（逗号分隔）。全部强制纳入快照，共享池里包含每个窗口
    * 自己的会话；zusage.py 逐个白名单校验。泵侧整体格式白名单防注入。 */
   const args = [path.join(HERE, "zusage.py"), "json"];

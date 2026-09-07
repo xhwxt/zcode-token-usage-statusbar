@@ -106,27 +106,13 @@ def _cached_agg(key, fn):
 
 def _scan_session_ids(con):
     """全库 session_id → max(completed_at) 一次分组扫描（731MB 库 ~55ms）。
-    current_session 与 recent 池原先各自独立做同样的全表 group by（3 次 118ms），
+    最新会话与 recent 池原先各自独立做同样的全表 group by（3 次 118ms），
     合并为一次扫描并挂 2s TTL。"""
     def run():
         return con.execute(
             """select session_id, max(completed_at) as m
                from model_usage group by session_id""").fetchall()
     return _cached_agg("scan", run)
-
-
-def current_session(con):
-    """返回 (session_row_or_None, usage_dict)；usage_dict 为该会话聚合。"""
-    rows = _scan_session_ids(con)
-    if not rows:
-        return None, None
-    row = max(rows, key=lambda r: r[1])
-    sid, last_at = row[0], row[1]
-    active = last_at and (int(time.time() * 1000) - last_at) < SESSION_TIMEOUT_MS
-    usage = session_usage(con, sid)
-    usage["active"] = bool(active)
-    usage["last_activity"] = _ts(last_at)
-    return con.execute("select * from session where id=?", (sid,)).fetchone(), usage
 
 
 def session_usage(con, sid):
@@ -199,10 +185,17 @@ def model_usage(con, days=7):
 # ---------- 展示 ----------
 
 def render_current(con):
-    sess, u = current_session(con)
+    """当前会话 = _scan_session_ids 最近活跃的会话（子代理会话也在候选内）。"""
+    rows = _scan_session_ids(con)
+    sess, last_at = None, 0
+    if rows:
+        sid, last_at = max(rows, key=lambda r: r[1])
+        sess = con.execute("select * from session where id=?", (sid,)).fetchone()
     lines = []
     if sess is not None:
-        mark = L("🟢 活跃", "🟢 active") if u["active"] else L("⚪ 闲置", "⚪ idle")
+        u = session_usage(con, sess["id"])
+        active = last_at and (int(time.time() * 1000) - last_at) < SESSION_TIMEOUT_MS
+        mark = L("🟢 活跃", "🟢 active") if active else L("⚪ 闲置", "⚪ idle")
         lines.append(L(f"■ 当前会话 [{mark}]  ", f"■ Current session [{mark}]  ") + sess["title"])
         if sess["directory"]:
             lines.append(L(f"  目录: {sess['directory']}", f"  dir: {sess['directory']}"))
@@ -218,9 +211,10 @@ def render_current(con):
         )
         lines.append(L(f"  上下文容量 ≈ {fmt(u['last_request_input'])} tokens (最近一次请求输入)",
                        f"  context capacity ≈ {fmt(u['last_request_input'])} tokens (latest request input)"))
-        if u["last_activity"]:
-            lines.append(L(f"  最后活动: {u['last_activity']:%H:%M:%S}",
-                           f"  last activity: {u['last_activity']:%H:%M:%S}"))
+        if last_at:
+            la = _ts(last_at)
+            lines.append(L(f"  最后活动: {la:%H:%M:%S}",
+                           f"  last activity: {la:%H:%M:%S}"))
         lines.append("")
     today = range_usage(con, _epoch_ms(_day_start()), _epoch_ms(_day_start() + timedelta(days=1)))
     lines.append(L(f"■ 今日 ({datetime.now():%Y-%m-%d %a})", f"■ Today ({datetime.now():%Y-%m-%d %a})"))
@@ -573,8 +567,8 @@ def snapshot(force_sid=""):
                 force_sids.append(fs)
         today = _cached_agg("today", lambda: range_usage(
             con, _epoch_ms(_day_start()), _epoch_ms(_day_start() + timedelta(days=1))))
-        sess, u = current_session(con)
-        latest_sid = sess["id"] if sess is not None else None
+        rows = _scan_session_ids(con)
+        latest_sid = max(rows, key=lambda r: r[1])[0] if rows else None
         if latest_sid:
             base = _session_snapshot(con, latest_sid, cfg)
         else:
@@ -590,8 +584,6 @@ def snapshot(force_sid=""):
                     "sub": {"requests": 0, "total": 0, "input": 0, "output": 0, "cache_read": 0,
                             "reasoning": 0, "cache_write": 0, "active": False, "list": []},
                     "context_window": cfg["context_window"], "context_auto": False}
-        ids = []
-        rows = _scan_session_ids(con)
         normal = sorted((r for r in rows if not str(r[0]).startswith("sess_subagent")),
                         key=lambda r: -r[1])[:6]
         suba = sorted((r for r in rows if str(r[0]).startswith("sess_subagent")),

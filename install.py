@@ -44,7 +44,6 @@ ASAR_CANDIDATES = [
     r"D:\ZCode\resources\app.asar",
     r"C:\ZCode\resources\app.asar",
     r"%LOCALAPPDATA%\Programs\ZCode\resources\app.asar",
-    r"%LOCALAPPDATA%\Programs\zcode\resources\app.asar",
     r"%LOCALAPPDATA%\ZCode\resources\app.asar",
     r"%ProgramFiles%\ZCode\resources\app.asar",
 ]

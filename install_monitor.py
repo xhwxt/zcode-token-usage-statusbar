@@ -15,6 +15,7 @@
 
 输出语言：运行时目录 config.json 的 "lang" 字段（zh/en，缺省 zh）——与安装器/CLI 同一来源。
 """
+import csv
 import json
 import os
 import subprocess
@@ -57,10 +58,9 @@ def zcode_pids():
     except OSError:
         return None
     pids = set()
-    for line in r.stdout.decode("gbk", "replace").splitlines():
-        parts = [p.strip().strip('"') for p in line.split('","')]
-        if len(parts) >= 2 and parts[0].lower() == "zcode.exe":
-            pids.add(parts[1])
+    for row in csv.reader(r.stdout.decode("gbk", "replace").splitlines()):
+        if len(row) >= 2 and row[0].strip().lower() == "zcode.exe":
+            pids.add(row[1].strip())
     return pids
 
 

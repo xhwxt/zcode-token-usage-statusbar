@@ -202,7 +202,6 @@ def self_check(asar_path: Path):
     with open(asar_path, "rb") as f:
         header, base = read_header(f)
         n = sum(1 for _ in iter_files(header))
-    tail = entry_bytes_of(asar_path)[-300:]
     ok = INJECT_LINE.encode() in entry_bytes_of(asar_path)
     print(L(f"  [check] header ok, 文件数={n}, 注入行已写入={ok}",
             f"  [check] header ok, files={n}, entry injected={ok}"))
