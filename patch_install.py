@@ -30,7 +30,18 @@ import sys
 import time
 from pathlib import Path
 
-ASAR_DEFAULT = Path(r"D:\ZCode\resources\app.asar")
+IS_WIN = sys.platform == "win32"
+IS_MAC = sys.platform == "darwin"
+
+if IS_WIN:
+    ASAR_DEFAULT = Path(r"D:\ZCode\resources\app.asar")
+    ZCODE_EXE_DEFAULT = Path(r"D:\ZCode\ZCode.exe")
+elif IS_MAC:
+    ASAR_DEFAULT = Path("/Applications/ZCode.app/Contents/Resources/app.asar")
+    ZCODE_EXE_DEFAULT = Path("/Applications/ZCode.app/Contents/MacOS/ZCode")
+else:
+    ASAR_DEFAULT = Path("app.asar")   # 其它平台无默认位置，用 --asar / install.py 指定
+    ZCODE_EXE_DEFAULT = None
 ASAR = ASAR_DEFAULT          # 可被 set_target() 改指其它安装位置（install.py 探测后调用）
 BAK = ASAR.with_name("app.asar.zusage.bak")
 TMP = ASAR.with_name("app.asar.zusage.tmp")
@@ -51,7 +62,7 @@ ZUSAGE_LINE_RE = re.compile(
     rb'\n;import\("[^"]*inject-main\.cjs"\)\.then\(\(\) => null, '
     rb'\(e\) => console\.error\("\[zusage\] load failed", e\)\);'
 )
-ZCODE_EXE = Path(r"D:\ZCode\ZCode.exe")
+ZCODE_EXE = ZCODE_EXE_DEFAULT
 ALIGN = 4
 BLOCK = 4194304
 
@@ -84,39 +95,56 @@ def set_runtime(path):
     INJECT_LINE = INJECT_LINE_TMPL.format(url=LOADER.as_uri())
 
 
+def zcode_exe_for(asar_path):
+    """从 asar 位置推 ZCode 可执行文件（仅语法自检用）：Windows 布局 <root>/ZCode.exe，
+    macOS bundle 布局 <root>/MacOS/ZCode；其它平台返回 None（语法检查自动跳过）。"""
+    root = asar_path.parent.parent
+    if IS_WIN:
+        return root / "ZCode.exe"
+    if IS_MAC:
+        return root / "MacOS" / "ZCode"
+    return None
+
+
 def set_target(asar_path):
-    """改指目标安装位置（BAK/TMP/ZCODE_EXE 随动）。ZCODE_EXE 只用于语法自检，缺了不影响主流程。"""
+    """改指目标安装位置（BAK/TMP/ZCODE_EXE 随动）。ZCODE_EXE 只用于语法自检，缺了自动跳过。"""
     global ASAR, BAK, TMP, ZCODE_EXE
     asar_path = Path(asar_path)
     ASAR = asar_path
     BAK = asar_path.with_name("app.asar.zusage.bak")
     TMP = asar_path.with_name("app.asar.zusage.tmp")
-    ZCODE_EXE = asar_path.parent.parent / "ZCode.exe"
+    ZCODE_EXE = zcode_exe_for(asar_path)
 
 
 def client_running():
     try:
-        out = subprocess.run(
-            ["tasklist", "/FI", "IMAGENAME eq ZCode.exe"],
-            capture_output=True, text=True, encoding="gbk", errors="replace",
-        ).stdout
-        return "ZCode.exe" in out
+        if IS_WIN:
+            out = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq ZCode.exe"],
+                capture_output=True, text=True, encoding="gbk", errors="replace",
+            ).stdout
+            return "ZCode.exe" in out
+        # macOS/Linux：pgrep 精确匹配主进程名；误判"未运行"在 POSIX 上也无害
+        # （运行中替换本就允许：rename 语义，旧进程继续读旧 inode）
+        return subprocess.run(["pgrep", "-x", "ZCode"], capture_output=True).returncode == 0
     except Exception:
         return True  # 查不到时按在跑处理，走安全路径
 
 
 def launch_monitor(epoch):
-    """新控制台窗口跑安装监控（提醒重启 + 确认生效 + .tmp 收尾）。设 ZUSAGE_NO_MONITOR=1 可禁用。"""
+    """Windows 开新控制台窗口跑安装监控（提醒重启 + 确认生效 + .tmp 收尾）；
+    macOS/Linux 无控制台概念，后台静默跑（收尾与自动退出照常）。设 ZUSAGE_NO_MONITOR=1 可禁用。"""
     if os.environ.get("ZUSAGE_NO_MONITOR"):
         return
     monitor = HERE / "install_monitor.py"
     if not monitor.exists():
         return
+    cmd = [sys.executable, str(monitor), "%.3f" % epoch, str(ASAR), str(RUNTIME)]
     try:
-        return subprocess.Popen(
-            [sys.executable, str(monitor), "%.3f" % epoch, str(ASAR), str(RUNTIME)],
-            creationflags=subprocess.CREATE_NEW_CONSOLE, cwd=str(HERE),
-        )
+        if IS_WIN:
+            return subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE, cwd=str(HERE))
+        return subprocess.Popen(cmd, cwd=str(HERE),
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError as e:
         print(L(f"（监控窗口启动失败，不影响安装：{e}）",
                 f"(monitor window failed to launch; installation is unaffected: {e})"))
@@ -214,13 +242,28 @@ def self_check(asar_path: Path, expect=True):
 
 
 def syntax_check(asar_path: Path):
-    """用 ZCode 自身当 node（ELECTRON_RUN_AS_NODE）对入口做语法检查。"""
+    """用 ZCode 自身当 node（ELECTRON_RUN_AS_NODE）对入口做语法检查；
+    找不到/无法运行 ZCode 可执行文件时跳过（自检是锦上添花，不应挡安装）。"""
+    exe = ZCODE_EXE
+    if not exe or not exe.is_file():
+        print(L("  [check] 未找到 ZCode 可执行文件，跳过语法检查",
+                "  [check] ZCode executable not found; syntax check skipped"))
+        return True
     src = entry_bytes_of(asar_path)
     tmp_js = HERE / ".entry-check.js"
     tmp_js.write_bytes(src)
     env = dict(os.environ, ELECTRON_RUN_AS_NODE="1")
-    r = subprocess.run([str(ZCODE_EXE), "--check", str(tmp_js)], capture_output=True, text=True, env=env)
-    tmp_js.unlink(missing_ok=True)
+    try:
+        r = subprocess.run([str(exe), "--check", str(tmp_js)], capture_output=True, text=True, env=env)
+    except OSError as e:
+        r = None
+        run_err = str(e)
+    finally:
+        tmp_js.unlink(missing_ok=True)
+    if r is None:
+        print(L(f"  [check] 语法检查无法执行（{run_err}），跳过",
+                f"  [check] syntax check failed to run ({run_err}); skipped"))
+        return True
     print(L("  [check] 语法检查 exit=", "  [check] node --check exit=") + str(r.returncode) + " " + r.stderr.strip()[:200])
     return r.returncode == 0
 
@@ -305,7 +348,8 @@ def remove():
     except OSError as e:
         print(L(f"\n替换失败（{e}）。请完全退出 ZCode 后重跑 python patch_install.py remove，",
                 f"\nReplacement failed ({e}). Quit ZCode completely and re-run python patch_install.py remove, "))
-        print(L(f"或手动替换：move /y {TMP} {ASAR}", f"or replace manually: move /y {TMP} {ASAR}"))
+        hint = f"move /y {TMP} {ASAR}" if IS_WIN else f"mv -f '{TMP}' '{ASAR}'"
+        print(L(f"或手动替换：{hint}", f"or replace manually: {hint}"))
         return False
     print(L("已剥离注入行" + ("（客户端运行中，已原子替换，运行中进程仍读旧数据）" if running else "") + "。重启 ZCode 后生效。",
             "Injection line stripped" + (" (ZCode was running; replaced atomically, the running process keeps the old data)" if running else "") + ". Takes effect after restarting ZCode."))

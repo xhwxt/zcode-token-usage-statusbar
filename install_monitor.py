@@ -24,7 +24,10 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).parent.resolve()
-ASAR = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(r"D:\ZCode\resources\app.asar")
+IS_MAC = sys.platform == "darwin"
+ASAR = Path(sys.argv[2]) if len(sys.argv) > 2 else (
+    Path("/Applications/ZCode.app/Contents/Resources/app.asar") if IS_MAC
+    else Path(r"D:\ZCode\resources\app.asar"))
 RUNTIME_DIR = Path(sys.argv[3]) if len(sys.argv) > 3 else HERE
 TMP = ASAR.with_name("app.asar.zusage.tmp")
 POLL = 10            # 检测间隔（秒）
@@ -49,19 +52,29 @@ def L(zh, en):
 
 
 def zcode_pids():
-    """ZCode.exe 全部进程的 PID 集合；tasklist 不可用时返回 None。"""
+    """ZCode 主进程 PID 集合（Windows=tasklist，macOS/Linux=pgrep）；探测命令不可用时返回 None。"""
+    if os.name == "nt":
+        try:
+            r = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq ZCode.exe", "/FO", "CSV", "/NH"],
+                capture_output=True,
+            )
+        except OSError:
+            return None
+        pids = set()
+        for row in csv.reader(r.stdout.decode("gbk", "replace").splitlines()):
+            if len(row) >= 2 and row[0].strip().lower() == "zcode.exe":
+                pids.add(row[1].strip())
+        return pids
     try:
-        r = subprocess.run(
-            ["tasklist", "/FI", "IMAGENAME eq ZCode.exe", "/FO", "CSV", "/NH"],
-            capture_output=True,
-        )
+        r = subprocess.run(["pgrep", "-x", "ZCode"], capture_output=True)
     except OSError:
         return None
-    pids = set()
-    for row in csv.reader(r.stdout.decode("gbk", "replace").splitlines()):
-        if len(row) >= 2 and row[0].strip().lower() == "zcode.exe":
-            pids.add(row[1].strip())
-    return pids
+    if r.returncode == 1:
+        return set()   # pgrep：无匹配进程
+    if r.returncode != 0:
+        return None    # pgrep 自身出错
+    return {t.strip() for t in r.stdout.decode().split() if t.strip()}
 
 
 def diag_fresh(since):
@@ -100,8 +113,8 @@ def main():
         now = time.time()
         done = False
         if pids is None:
-            lines = [L("[!] 无法检测 ZCode 进程（tasklist 不可用）。",
-                       "[!] Cannot detect ZCode processes (tasklist unavailable).")]
+            lines = [L("[!] 无法检测 ZCode 进程（探测命令不可用）。",
+                       "[!] Cannot detect ZCode processes (detection command unavailable).")]
         elif TMP.exists():
             # 运行中替换失败的收尾：ZCode 一退出就自动替换，无需计划任务
             if not pids:

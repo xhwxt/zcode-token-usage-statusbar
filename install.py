@@ -21,10 +21,10 @@ asar 注入行与 MCP 注册都指向数据目录 —— 之后 clone 目录可�
 升级：git pull 后重跑 python install.py —— 注入行不变则 asar 不重打包（秒级），
 overlay 副本刷新后由泵 2 秒内热重载；改了 inject-main.cjs（泵）才需要重启 ZCode。
 
-ZCode 安装位置自动探测：环境变量 ZCODE_ASAR → 常见目录（D:\\ZCode、C:\\ZCode、
-%LOCALAPPDATA%\\Programs 等）下找 resources\\app.asar；失败且终端可交互时询问，
-或用 --asar 指定。非默认位置首次安装成功后路径记住在 config.json（asar_path 字段），
-之后的安装/卸载一律免传 --asar。
+ZCode 安装位置自动探测：环境变量 ZCODE_ASAR → 当前平台常见安装位置下找 resources\\app.asar
+（Windows：D:\\ZCode 等；macOS：/Applications、~/Applications 下的 ZCode.app）；
+失败且终端可交互时询问，或用 --asar 指定。非默认位置首次安装成功后路径记住在 config.json
+（asar_path 字段），之后的安装/卸载一律免传 --asar。
 """
 import argparse
 import json
@@ -41,14 +41,20 @@ MCP_NAME = "zcode-token-usage-statusbar"   # MCP server 注册名（与仓库名
 MCP_NAME_OLD = ("token-usage", "zusage")   # 历史注册名
 RUNTIME_FILES = ("inject-main.cjs", "overlay.js", "zusage.py", "usage_mcp.py")
 
-# ZCode 安装位置候选：resources/app.asar 存在即命中（按序探测）
-ASAR_CANDIDATES = [
-    r"D:\ZCode\resources\app.asar",
-    r"C:\ZCode\resources\app.asar",
-    r"%LOCALAPPDATA%\Programs\ZCode\resources\app.asar",
-    r"%LOCALAPPDATA%\ZCode\resources\app.asar",
-    r"%ProgramFiles%\ZCode\resources\app.asar",
-]
+# ZCode 安装位置候选：resources/app.asar 存在即命中（按序探测，按当前平台取组）
+if sys.platform == "darwin":
+    ASAR_CANDIDATES = [
+        "/Applications/ZCode.app/Contents/Resources/app.asar",
+        "~/Applications/ZCode.app/Contents/Resources/app.asar",
+    ]
+else:
+    ASAR_CANDIDATES = [
+        r"D:\ZCode\resources\app.asar",
+        r"C:\ZCode\resources\app.asar",
+        r"%LOCALAPPDATA%\Programs\ZCode\resources\app.asar",
+        r"%LOCALAPPDATA%\ZCode\resources\app.asar",
+        r"%ProgramFiles%\ZCode\resources\app.asar",
+    ]
 
 LANG = "zh"   # 输出语言（main 里按 --lang / 已有 config.json 确定）
 
@@ -82,13 +88,14 @@ def find_asar():
         p = expand(c)
         if p.is_file():
             return p
-    # 兜底：扫 %LOCALAPPDATA%\Programs 一层子目录
-    prog = expand(r"%LOCALAPPDATA%\Programs")
-    if prog.is_dir():
-        for ch in prog.iterdir():
-            p = ch / "resources" / "app.asar"
-            if p.is_file():
-                return p
+    if sys.platform == "win32":
+        # 兜底：扫 %LOCALAPPDATA%\Programs 一层子目录
+        prog = expand(r"%LOCALAPPDATA%\Programs")
+        if prog.is_dir():
+            for ch in prog.iterdir():
+                p = ch / "resources" / "app.asar"
+                if p.is_file():
+                    return p
     return None
 
 
@@ -325,8 +332,10 @@ def main():
 
     asar = Path(args.asar) if args.asar else (find_asar() or ask_asar())
     if not asar or not asar.is_file():
-        print(L("找不到 app.asar。用 --asar 指定，例如：python install.py --asar E:\\Apps\\ZCode\\resources\\app.asar",
-                "app.asar not found. Specify it with --asar, e.g.: python install.py --asar E:\\Apps\\ZCode\\resources\\app.asar"))
+        example = (r"E:\Apps\ZCode\resources\app.asar" if sys.platform == "win32"
+                   else "/Applications/ZCode.app/Contents/Resources/app.asar")
+        print(L(f"找不到 app.asar。用 --asar 指定，例如：python install.py --asar {example}",
+                f"app.asar not found. Specify it with --asar, e.g.: python install.py --asar {example}"))
         return 1
     print(L(f"[目标] {asar}", f"[target] {asar}"))
     if not args.dry_run:

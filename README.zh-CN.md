@@ -4,7 +4,7 @@
 
 给 [ZCode](https://zcode.ai) 桌面客户端（Electron 应用）加上一个悬浮的 token 用量状态条。数据源是本地 SQLite（`~/.zcode/cli/db/db.sqlite` 的 `model_usage` / `turn_usage` / `tool_usage` 表，每次模型请求一行），**全程只读、不联网**。
 
-平台：Windows ｜ 许可：[MIT](LICENSE)
+平台：Windows、macOS ｜ 许可：[MIT](LICENSE)
 
 > 文档与界面统一使用中文名「ZCode Token 用量状态栏」；仓库与 MCP 注册名为 `zcode-token-usage-statusbar`（全称的英文写法），代码内部标识符为 `zusage`。
 
@@ -91,7 +91,7 @@ ZCode 的插件机制（`plugin.json`）只能提供 MCP / skills / commands / h
 
 ## 安装
 
-前提：Windows；Python 3.8+（零第三方依赖）；fuses `EmbeddedAsarIntegrityValidation=0`（ZCode 当前版本实测为 0）。
+前提：Windows 或 macOS；Python 3.8+（零第三方依赖）；fuses `EmbeddedAsarIntegrityValidation=0`（ZCode 当前版本实测为 0）。
 
 ```bash
 git clone https://github.com/xhwxt/zcode-token-usage-statusbar.git
@@ -113,7 +113,7 @@ cp inject-main.cjs overlay.js zusage.py usage_mcp.py ~/.zcode/zcode-token-usage-
 cp config.example.json ~/.zcode/zcode-token-usage-statusbar/config.json   # 然后编辑它
 
 # 1) 状态条：注入 asar（注入行须指向数据目录的 inject-main.cjs；ZCode 运行中也可执行；
-#    ZCode 不在 D:\ZCode 时先改脚本顶部 ASAR，或直接用 install.py）
+#    ZCode 不在脚本默认位置时先改脚本顶部 ASAR，或直接用 install.py）
 python patch_install.py install
 
 # 2) MCP：在 ~/.zcode/cli/config.json 的 mcp.servers 注册（指向数据目录副本）：
@@ -156,7 +156,7 @@ python patch_install.py install
 
 ## 已知限制
 
-- 仅 Windows（tasklist 检测、`CREATE_NEW_CONSOLE`、asar 路径均平台相关）。
+- Windows 为全功能实测平台；macOS 支持自 v60 起（issue #2 反馈驱动），作者无 macOS 设备、未经实测，遇到问题欢迎开 issue 反馈。
 - ZCode 安装位置自动探测常见目录，非标准位置用 `python install.py --asar <路径>` 指定（首次成功后记住，之后免传；也可设环境变量 `ZCODE_ASAR`）。
 - 依赖 fuses `EmbeddedAsarIntegrityValidation=0`。官方一旦收紧此 fuse 或改入口结构，注入路线即失效（届时 `python install.py --remove` 剥离注入行即恢复原样）。
 - 修改客户端 asar 属非官方注入方式，ZCode 升级会覆盖，需重跑 install。

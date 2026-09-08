@@ -70,7 +70,7 @@ Click ⚙ to toggle any bar item, override the context window size, or switch th
 
 ## Installation
 
-Requirements: Windows; Python 3.8+ (zero third-party dependencies).
+Requirements: Windows or macOS; Python 3.8+ (zero third-party dependencies).
 
 ```bash
 git clone https://github.com/xhwxt/zcode-token-usage-statusbar.git
@@ -98,4 +98,5 @@ Uninstall does not rely on a backup: it only adds/removes this tool's own inject
 
 - Data semantics, performance measurements, diagnostics and pitfall notes (Chinese) live in [docs/design-notes.md](docs/design-notes.md).
 - Patching app.asar is an unofficial injection route; ZCode updates overwrite it — re-run install after upgrading.
+- macOS support was added in v60 (issue #2). Windows is the fully tested platform; the author has no macOS device, so macOS is untested — issues and feedback are welcome.
 - License: [MIT](LICENSE).

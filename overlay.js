@@ -35,7 +35,7 @@
   }, 0);
 
   function main$() {
-    var VERSION = "v59";   // v59：过度工程清理（无行为变化）：删 tooltip 多页签死机制/demo.html/residentBusy 等 8 项，snapshot 少一次全量聚合   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
+    var VERSION = "v60";   // v60：macOS 支持（issue #2）——语法自检缺 ZCode 可执行文件自动跳过、安装器/监控按平台推导路径与进程检测（tasklist/pgrep）   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
     var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv", lang: "zusage3.lang" };
 
     /* ---------- 状态 ---------- */
