@@ -75,7 +75,20 @@ def L(zh, en):
     global _LANG
     if _LANG is None:
         _LANG = "zh"
-        for base in (RUNTIME, Path.home() / ".zcode" / "zcode-token-usage-statusbar"):
+        # sudo 运行时（Linux 系统级安装）config 在真实用户的家目录，Path.home() 会指到 root
+        sudo_home = None
+        if sys.platform != "win32" and os.environ.get("SUDO_USER"):
+            try:
+                if os.geteuid() == 0:
+                    import pwd
+                    sudo_home = Path(pwd.getpwnam(os.environ["SUDO_USER"]).pw_dir)
+            except (KeyError, OSError, AttributeError):
+                pass
+        bases = [RUNTIME,
+                 Path.home() / ".zcode" / "zcode-token-usage-statusbar"]
+        if sudo_home:
+            bases.append(sudo_home / ".zcode" / "zcode-token-usage-statusbar")
+        for base in bases:
             try:
                 lang = json.loads((base / "config.json").read_text(encoding="utf-8")).get("lang")
                 if lang in ("zh", "en"):
@@ -97,12 +110,15 @@ def set_runtime(path):
 
 def zcode_exe_for(asar_path):
     """从 asar 位置推 ZCode 可执行文件（仅语法自检用）：Windows 布局 <root>/ZCode.exe，
-    macOS bundle 布局 <root>/MacOS/ZCode；其它平台返回 None（语法检查自动跳过）。"""
+    macOS bundle 布局 <root>/MacOS/ZCode，Linux 布局 <root>/zcode（deb/rpm 官方包，/opt/ZCode）；
+    其它平台返回 None（语法检查自动跳过）。"""
     root = asar_path.parent.parent
     if IS_WIN:
         return root / "ZCode.exe"
     if IS_MAC:
         return root / "MacOS" / "ZCode"
+    if sys.platform.startswith("linux"):
+        return root / "zcode"
     return None
 
 
@@ -285,6 +301,14 @@ def cleanup_legacy_bak():
 def install(finalize=False):
     """返回 True=已安装/已指向当前目录，False=失败或待收尾。"""
     assert LOADER.exists(), L(f"loader 缺失：{LOADER}", f"loader missing: {LOADER}")
+    if not os.access(ASAR, os.W_OK) or not os.access(ASAR.parent, os.W_OK):
+        print(L(f"[权限] app.asar 或所在目录不可写（Linux 上 /opt 等系统位置需要 root）：{ASAR}",
+                f"[permission] app.asar or its directory is not writable (Linux system locations like /opt need root): {ASAR}"))
+        print(L("请用 sudo 重跑（推荐走一键安装，会自动处理目标定位与数据目录归属）：",
+                "Please re-run with sudo (the one-shot installer is recommended; it resolves the target and data-dir ownership automatically):"))
+        print(L("  sudo python install.py            # 自动探测（含 /opt/ZCode）",
+                "  sudo python install.py            # auto-detects (including /opt/ZCode)"))
+        return False
     entry = entry_bytes_of(ASAR)
     stripped = ZUSAGE_LINE_RE.sub(b"", entry)   # 剥离任何旧注入行（含指向旧目录的）
     if stripped + INJECT_LINE.encode() == entry:

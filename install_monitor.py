@@ -25,8 +25,11 @@ from pathlib import Path
 
 HERE = Path(__file__).parent.resolve()
 IS_MAC = sys.platform == "darwin"
+IS_LINUX = sys.platform.startswith("linux")
+# 缺省仅兜底（patch_install.py 拉起时必传 argv[2]）：按平台取常见安装位置
 ASAR = Path(sys.argv[2]) if len(sys.argv) > 2 else (
     Path("/Applications/ZCode.app/Contents/Resources/app.asar") if IS_MAC
+    else Path("/opt/ZCode/resources/app.asar") if IS_LINUX
     else Path(r"D:\ZCode\resources\app.asar"))
 RUNTIME_DIR = Path(sys.argv[3]) if len(sys.argv) > 3 else HERE
 TMP = ASAR.with_name("app.asar.zusage.tmp")

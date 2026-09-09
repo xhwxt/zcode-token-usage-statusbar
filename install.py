@@ -22,7 +22,8 @@ asar 注入行与 MCP 注册都指向数据目录 —— 之后 clone 目录可�
 overlay 副本刷新后由泵 2 秒内热重载；改了 inject-main.cjs（泵）才需要重启 ZCode。
 
 ZCode 安装位置自动探测：环境变量 ZCODE_ASAR → 当前平台常见安装位置下找 resources\\app.asar
-（Windows：D:\\ZCode 等；macOS：/Applications、~/Applications 下的 ZCode.app）；
+（Windows：D:\\ZCode 等；macOS：/Applications、~/Applications 下的 ZCode.app；
+Linux：/opt/ZCode、/usr/lib/zcode 等 deb/rpm 布局）；
 失败且终端可交互时询问，或用 --asar 指定。非默认位置首次安装成功后路径记住在 config.json
 （asar_path 字段），之后的安装/卸载一律免传 --asar。
 """
@@ -34,9 +35,36 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).parent.resolve()
-DATA_DIR = Path.home() / ".zcode" / "zcode-token-usage-statusbar"   # 标准安装的数据/运行目录
-ZCODE_CONFIG = Path.home() / ".zcode" / "cli" / "config.json"
-COMMANDS_DIR = Path.home() / ".zcode" / "commands"
+
+
+def _sudo_user():
+    """sudo 运行时的真实用户名（POSIX；非 sudo / Windows 返回 None）。"""
+    if sys.platform != "win32" and os.environ.get("SUDO_USER"):
+        try:
+            if os.geteuid() == 0:
+                return os.environ["SUDO_USER"]
+        except AttributeError:
+            pass
+    return None
+
+
+def real_home():
+    """真实用户家目录：sudo 运行时 Path.home() 是 root 的家，而数据目录/MCP 注册/
+    /usage 命令必须落在真实用户的 ~/.zcode（ZCode 客户端与泵都以普通用户身份运行）。
+    Linux 上 /opt 等系统安装位置写入需要 root，这是本函数存在的唯一场景。"""
+    sudo_user = _sudo_user()
+    if sudo_user:
+        try:
+            import pwd
+            return Path(pwd.getpwnam(sudo_user).pw_dir)
+        except (KeyError, OSError):
+            pass
+    return Path.home()
+
+
+DATA_DIR = real_home() / ".zcode" / "zcode-token-usage-statusbar"   # 标准安装的数据/运行目录
+ZCODE_CONFIG = real_home() / ".zcode" / "cli" / "config.json"
+COMMANDS_DIR = real_home() / ".zcode" / "commands"
 MCP_NAME = "zcode-token-usage-statusbar"   # MCP server 注册名（与仓库名一致；老安装叫 token-usage/zusage，自动迁移）
 MCP_NAME_OLD = ("token-usage", "zusage")   # 历史注册名
 RUNTIME_FILES = ("inject-main.cjs", "overlay.js", "zusage.py", "usage_mcp.py")
@@ -46,6 +74,13 @@ if sys.platform == "darwin":
     ASAR_CANDIDATES = [
         "/Applications/ZCode.app/Contents/Resources/app.asar",
         "~/Applications/ZCode.app/Contents/Resources/app.asar",
+    ]
+elif sys.platform.startswith("linux"):
+    ASAR_CANDIDATES = [
+        "/opt/ZCode/resources/app.asar",       # deb/rpm 官方包默认布局（<root>/zcode）
+        "/opt/zcode/resources/app.asar",
+        "/usr/lib/zcode/resources/app.asar",
+        "/usr/local/ZCode/resources/app.asar",
     ]
 else:
     ASAR_CANDIDATES = [
@@ -96,6 +131,22 @@ def find_asar():
                 p = ch / "resources" / "app.asar"
                 if p.is_file():
                     return p
+    elif sys.platform.startswith("linux"):
+        # 兜底：扫 /opt、/usr/lib、/usr/local/lib 一层子目录，目录名含 zcode 即命中
+        for base in ("/opt", "/usr/lib", "/usr/local/lib"):
+            b = Path(base)
+            if not b.is_dir():
+                continue
+            try:
+                children = sorted(b.iterdir())
+            except OSError:
+                continue
+            for ch in children:
+                if "zcode" not in ch.name.lower():
+                    continue
+                p = ch / "resources" / "app.asar"
+                if p.is_file():
+                    return p
     return None
 
 
@@ -141,6 +192,20 @@ def remember_asar(asar, dev):
     print(L(f"[目标] 已记住安装位置 → {cfg}", f"[target] install location remembered -> {cfg}"))
 
 
+def chown_to_user(path):
+    """sudo 运行时把产物归还给真实用户（数据目录、config、注册文件）；
+    asar 属系统安装（root 所有），保持原属主不动。非 sudo 是 no-op。"""
+    sudo_user = _sudo_user()
+    if not sudo_user:
+        return
+    try:
+        import pwd
+        st = pwd.getpwnam(sudo_user)
+        os.chown(path, st.pw_uid, st.pw_gid)
+    except (KeyError, OSError, AttributeError):
+        pass
+
+
 def copy_runtime(dry):
     """复制运行时四件套到数据目录（无条件覆盖：overlay 的 mtime 变化会让泵 2 秒内热重载）。"""
     for name in RUNTIME_FILES:
@@ -150,8 +215,10 @@ def copy_runtime(dry):
             f"[runtime] copying {len(RUNTIME_FILES)} files -> {DATA_DIR}"))
     if not dry:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
+        chown_to_user(DATA_DIR)
         for name in RUNTIME_FILES:
             shutil.copy2(HERE / name, DATA_DIR / name)
+            chown_to_user(DATA_DIR / name)
     return True
 
 
@@ -192,7 +259,9 @@ def prepare_config(dry, dev):
             f"[config] generating {cfg} (python_path = {sys.executable})"))
     if not dry:
         cfg.parent.mkdir(parents=True, exist_ok=True)
+        chown_to_user(cfg.parent)
         cfg.write_text(json.dumps(vals, indent=2, ensure_ascii=False), encoding="utf-8")
+        chown_to_user(cfg)
     return True
 
 
@@ -223,9 +292,11 @@ def register_mcp(dry, dev):
     print(L(f"[MCP] 注册 {MCP_NAME} → {usage_mcp}", f"[mcp] registering {MCP_NAME} -> {usage_mcp}") + removed_note)
     if not dry:
         ZCODE_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+        chown_to_user(ZCODE_CONFIG.parent)
         if ZCODE_CONFIG.is_file():
             shutil.copy2(ZCODE_CONFIG, ZCODE_CONFIG.with_suffix(".json.zusage.bak"))
         ZCODE_CONFIG.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        chown_to_user(ZCODE_CONFIG)
     return True
 
 
@@ -332,12 +403,27 @@ def main():
 
     asar = Path(args.asar) if args.asar else (find_asar() or ask_asar())
     if not asar or not asar.is_file():
-        example = (r"E:\Apps\ZCode\resources\app.asar" if sys.platform == "win32"
-                   else "/Applications/ZCode.app/Contents/Resources/app.asar")
+        if sys.platform == "win32":
+            example = r"E:\Apps\ZCode\resources\app.asar"
+        elif sys.platform.startswith("linux"):
+            example = "/opt/ZCode/resources/app.asar"
+        else:
+            example = "/Applications/ZCode.app/Contents/Resources/app.asar"
         print(L(f"找不到 app.asar。用 --asar 指定，例如：python install.py --asar {example}",
                 f"app.asar not found. Specify it with --asar, e.g.: python install.py --asar {example}"))
         return 1
     print(L(f"[目标] {asar}", f"[target] {asar}"))
+    if (sys.platform != "win32" and os.geteuid() != 0
+            and not os.access(asar, os.W_OK)):
+        hint = " ".join(sys.argv[1:])
+        print(L(f"[权限] {asar.parent} 不可写（系统级安装位置，Linux 上常见），需要 sudo：",
+                f"[permission] {asar.parent} is not writable (a system-level install location, common on Linux); sudo is required:"))
+        print(L(f"  sudo {Path(sys.executable).name} {Path(__file__).name} {hint}".rstrip(),
+                f"  sudo {Path(sys.executable).name} {Path(__file__).name} {hint}".rstrip()))
+        print(L("（数据目录/MCP 注册会自动落到你的用户家目录，产物归属普通用户；asar 本身保持 root 属主）",
+                "(the data dir / MCP registration go to your real user home with user ownership; the asar keeps its root ownership)"))
+        if not args.dry_run:
+            return 1
     if not args.dry_run:
         pi.set_target(asar)
         if not args.dev:
