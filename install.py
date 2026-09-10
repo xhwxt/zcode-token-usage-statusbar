@@ -307,6 +307,8 @@ def install_command(dry):
     print(L(f"[命令] {dst}", f"[command] {dst}"))
     if not dry:
         shutil.copy2(HERE / "usage.command.md", dst)
+        chown_to_user(COMMANDS_DIR)
+        chown_to_user(dst)
     return True
 
 
