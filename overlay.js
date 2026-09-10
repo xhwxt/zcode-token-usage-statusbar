@@ -387,6 +387,13 @@
       var tls = d.tools || { total: 0, errors: 0, list: [] };
       var items = [], tips = [];
       function it(inner, tip, cls) { items.push('<span class="it' + (cls ? " " + cls : "") + '">' + inner + "</span>"); tips.push(tip || null); }
+      if (d.remote) {   // v9：SSH 远程会话（数据取自远端机），置顶徽标标明数据源
+        it(ico('<path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>') +
+          '<span class="dim">' + L("远端", "remote") + "</span>",
+          L("数据源：SSH 远程服务器 ", "Data source: remote server over SSH ") + (d.remote_host || "?") + "\n" +
+          L("会话数据实时取自远端机的 ZCode 数据库，「今日合计」亦为远端值", "Session data is fetched live from the remote machine's ZCode database; today's total is the remote value") +
+          (d.remote_error ? "\n⚠ " + L("最近一次远端查询失败：", "Last remote query failed: ") + d.remote_error : ""));
+      }
       if (last.tps) {   // 最近一次请求的生成速度，置顶显示；随数值三档变色
         var tpsCls = last.tps >= 70 ? "ok" : last.tps >= 40 ? "warm" : "hot";
         it(ico('<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>') +
@@ -572,8 +579,11 @@
       state.excActive = excActive(p);   // 气泡的显示依据（track 每帧消费）
       var view = {
         session: p, last_turn: p.last_turn || {}, last: p.last || {},
-        today: d.today, context_window: p.context_window, context_auto: p.context_auto,
+        /* v9：远端会话的「今日合计」用远端机数据，本地 today 只在显示本地会话时使用 */
+        today: (p.remote && d.remote_today) ? d.remote_today : d.today,
+        context_window: p.context_window, context_auto: p.context_auto,
         code: p.code, ctx_exc: p.ctx_exc, tools: p.tools,
+        remote: !!p.remote, remote_host: p.remote_host || "", remote_error: d.remote_error || "",
         sub: p.sub || {requests: 0, total: 0, input: 0, output: 0, cache_read: 0, active: false, list: []},
       };
       state.lastSub = view.sub;   // 子代理明细面板的数据源（开关面板/数据推送刷新用）

@@ -70,6 +70,21 @@ ZCode 的插件机制（`plugin.json`）只能提供 MCP / skills / commands / h
 
 - **上下文窗口自动识别**：优先读 ZCode 原生 UI（输入框工具行按钮文本"…总量 N"，服务端下发、自动跟随模型）→ 模型目录查表 → `config.json` 兜底。
 - **会话跟随**：泵按窗口注入本窗口焦点会话 id（渲染端经客户端 IPC 通道上报），每个对话窗口只显示它自己的数据，池里没有就显示零值、绝不串显别的会话。
+- **SSH 远程会话支持（v9）**：桌面客户端连远端 zcode-server 时，会话数据落在远端机的 `~/.zcode/cli/db/db.sqlite`，本地库查不到。配置 `config.json` 的 `remote` 段后，切换到远端对话会**自动改为 SSH 到远端机查询**：条面出现 ☁「远端」徽标（悬停显示主机名与最近错误），会话数据与「今日合计」均为远端值。远端机只需部署同一份 `zusage.py`（保持其 config 不含 remote 段即可，防递归）：
+
+  ```json
+  "remote": {
+    "enabled": true,
+    "ssh": "ssh 用户名@服务器地址",
+    "script": "~/.zcode/zcode-token-usage-statusbar/zusage.py",
+    "python": "python3",
+    "timeout_s": 6,
+    "poll_ms": 3000,
+    "host_label": "我的服务器"
+  }
+  ```
+
+  前提：本地到服务器的 `ssh` 免密可用（公钥认证）。实现上，本地 `zusage.py` 对本地库查不到的会话 id（双重白名单校验）执行 `ssh <host> python3 <script> json <sids>`，把远端快照合并进 payload；远端返回 `known_sids` 供负缓存（确认无此会话 2 分钟内不重问，ssh 失败 60 秒退避），本地新会话（session 表已有行）不会触发远端查询。泵在远端会话聚焦期间按 `poll_ms` 轮询（本地会话仍是纯事件触发、零轮询）；`poll_ms` 别低于 1000，跨公网建议配合 ssh ControlMaster 连接复用。
 - **MCP 对话内查询**：`token_usage(scope)` 工具，scope 支持 current / today / week / days:N / sessions:N / models:days / session:<id前缀>。
 - **CLI**：`python zusage.py [now|today|json|days N|sessions [N]|models [days]|watch [秒]]`。
 - **/usage 命令**：对话输入框触发 MCP 查询。

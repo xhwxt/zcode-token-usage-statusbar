@@ -6,7 +6,9 @@
 """
 import json
 import re
+import shlex
 import sqlite3
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
@@ -552,6 +554,121 @@ _EMPTY_TURN = {"requests": 0, "retries": 0, "tool_calls": 0, "tool_errors": 0, "
                "total": 0, "duration_ms": 0, "ttft_ms": 0}
 
 
+# ---------- 远端数据源（SSH，v9）----------
+# SSH 远程场景：桌面客户端连的是远端 zcode-server，会话数据落在远端机的
+# ~/.zcode/cli/db/db.sqlite，本地库里查不到。config.json 配了 remote 时，
+# force 会话中本地无数据的 sid 改为 SSH 到远端执行同一份 zusage.py json，
+# 把远端快照（结构同源）打上 remote 标记合并进本 payload；today 同理带回远端值。
+# 服务器侧只需部署同一份 zusage.py（无需 config 的 remote 段，保持关闭防递归）。
+
+_REMOTE_NEG_TTL_OK = 2 * 60 * 1000      # 远端确认"无此会话"后多久内不再问（远端新会话极少数竞态下最迟 2 分钟自愈）
+_REMOTE_NEG_TTL_ERR = 60 * 1000         # ssh 失败/超时：短退避，尽快自愈
+_REMOTE_NEG = {}                        # sid -> [查询时刻ms, 生效TTLms]
+
+
+def _remote_cfg(cfg):
+    """config.json 的 remote 段 → 归一化配置或 None。字段：
+    enabled(true) / ssh("ssh 主机别名" 或 argv 数组) / script(远端 zusage.py 路径) /
+    python(远端解释器) / timeout_s(ssh 超时) / host_label(徽标显示名)。"""
+    r = cfg.get("remote")
+    if not isinstance(r, dict) or not r.get("enabled"):
+        return None
+    ssh = r.get("ssh") or ""
+    if isinstance(ssh, list):
+        ssh_argv = [str(x) for x in ssh]
+    else:
+        try:
+            ssh_argv = shlex.split(str(ssh))
+        except ValueError:
+            ssh_argv = str(ssh).split()
+    if not ssh_argv:
+        return None
+    return {
+        "ssh_argv": ssh_argv,
+        "script": str(r.get("script") or ".zcode/zcode-token-usage-statusbar/zusage.py"),
+        "python": str(r.get("python") or "python3"),
+        "timeout_s": min(14.0, max(1.0, float(r.get("timeout_s") or 6))),
+        "host_label": str(r.get("host_label") or (ssh_argv[-1] if len(ssh_argv) > 1 else "remote")),
+    }
+
+
+def _remote_exec(sids, rcfg):
+    """SSH 执行远端 zusage.py json <sids>。返回 (by_sid, remote_today, err)。
+    sid 在进入该函数前已过 [A-Za-z0-9_-]+ 白名单（snapshot 与泵双重校验），
+    ssh 远端命令按 shell 拼接，此处不再引入任何可注入内容。"""
+    cmd = rcfg["ssh_argv"] + [rcfg["python"], rcfg["script"], "json", ",".join(sids)]
+    err = None
+    payload = None
+    try:
+        p = subprocess.run(cmd, capture_output=True, timeout=rcfg["timeout_s"])
+        out = p.stdout.decode("utf-8", "replace")
+        if p.returncode != 0:
+            err = f"ssh rc={p.returncode}: {p.stderr.decode('utf-8', 'replace').strip()[:160]}"
+        else:
+            # 取最后一行能解析的 JSON 对象：容忍远端登录 banner 混进 stdout
+            for line in reversed(out.splitlines()):
+                line = line.strip()
+                if line.startswith("{"):
+                    try:
+                        payload = json.loads(line)
+                        break
+                    except ValueError:
+                        continue
+            if payload is None:
+                err = "remote returned no JSON payload"
+    except subprocess.TimeoutExpired:
+        err = f"ssh timeout after {rcfg['timeout_s']:g}s"
+    except OSError as e:
+        err = f"ssh spawn failed: {e}"
+    if payload is None:
+        return {}, None, err or "remote query failed"
+    # known_sids = 远端库里真实存在的 force 会话（session 行或任一 usage 行）。
+    # 远端对未知 sid 也会产出零值快照，不按它过滤的话"确无此会话"永远判不了，
+    # 负缓存失效 → 本地新会话每轮都白跑一次 ssh。缺 known_sids 字段 = 远端是旧版
+    # 脚本：退化为按活跃度识别（零值快照 requests/last_at 恒为 0）。
+    known = payload.get("known_sids")
+    legacy = not isinstance(known, list)
+    known = set(known or [])
+    by = {}
+    for rec in payload.get("recent") or []:
+        if not isinstance(rec, dict) or rec.get("sid") not in sids:
+            continue
+        # 远端旧版脚本（无 known_sids）退化为按活跃度识别：零值快照 requests/last_at 恒为 0
+        found = (rec["sid"] in known) if not legacy else (
+            (rec.get("requests") or 0) > 0 or (rec.get("last_at") or 0) > 0)
+        if found:
+            rec["remote"] = True
+            rec["remote_host"] = rcfg["host_label"]
+            by[rec["sid"]] = rec
+    return by, payload.get("today"), err
+
+
+def _remote_fetch(force_sids, have_local, rcfg):
+    """本地库不存在的 force 会话 → 远端补齐。带负缓存：远端确认无此会话按 TTL 免问；
+    ssh 失败用短 TTL 快速自愈。have_local = 本地 session/usage 表真实存在的 sid 集合
+    （本地新会话即便还没有请求也不会去远端白跑）。"""
+    now_ms = int(time.time() * 1000)
+    missing = []
+    for s in force_sids:
+        if s in have_local:
+            continue
+        ent = _REMOTE_NEG.get(s)
+        if ent and now_ms - ent[0] < ent[1]:
+            continue
+        missing.append(s)
+    if not missing:
+        return {}, None, None
+    by, today, err = _remote_exec(missing, rcfg)
+    if len(_REMOTE_NEG) > 256:
+        _REMOTE_NEG.clear()   # 防长驻膨胀，正常会话数到不了
+    for s in missing:
+        if s in by:
+            _REMOTE_NEG.pop(s, None)
+        else:
+            _REMOTE_NEG[s] = (now_ms, _REMOTE_NEG_TTL_ERR if err else _REMOTE_NEG_TTL_OK)
+    return by, today, err
+
+
 def snapshot(force_sid=""):
     """单次快照：最新会话 + 最近 6+6 会话池 + 今日。
     force_sid：各窗口当前会话 id，逗号分隔（泵按窗口汇总上报：主进程 IPC 映射的焦点会话 +
@@ -568,6 +685,23 @@ def snapshot(force_sid=""):
         today = _cached_agg("today", lambda: range_usage(
             con, _epoch_ms(_day_start()), _epoch_ms(_day_start() + timedelta(days=1))))
         rows = _scan_session_ids(con)
+        # v9：force 会话在本库的真实存在性（session 行或任一 usage 行）。远端数据源
+        # 双向依赖它：本地已存在 → 不去远端白跑；远端按同款判定区分"确无此会话"与
+        # "零值快照"（负缓存的依据）。两次索引点查 <1ms。
+        known_sids = []
+        if force_sids:
+            qmarks = ",".join("?" * len(force_sids))
+            have_local = {r[0] for r in con.execute(
+                f"select id from session where id in ({qmarks})", force_sids)}
+            have_local |= {r[0] for r in con.execute(
+                f"select distinct session_id from model_usage where session_id in ({qmarks})",
+                force_sids)}
+            known_sids = [s for s in force_sids if s in have_local]
+        # 远端补齐（v9）：本地不存在的 force 会话（SSH 远程会话）改查远端库
+        rcfg = _remote_cfg(cfg)
+        remote_by, remote_today, remote_err = {}, None, None
+        if rcfg and force_sids:
+            remote_by, remote_today, remote_err = _remote_fetch(force_sids, have_local, rcfg)
         latest_sid = max(rows, key=lambda r: r[1])[0] if rows else None
         if latest_sid:
             base = _session_snapshot(con, latest_sid, cfg)
@@ -593,8 +727,10 @@ def snapshot(force_sid=""):
         ids = [x for x in ids if not (x in seen or seen.add(x))]
         if latest_sid and latest_sid not in ids:
             ids.insert(0, latest_sid)
+        # 远端命中的会话不进本地 ids 循环（本地 _session_snapshot 查不到只会产出零值行）
+        remote_ids = [s for s in force_sids if s in remote_by]
         for fs in reversed(force_sids):
-            if fs not in ids:
+            if fs not in ids and fs not in remote_ids:
                 ids.insert(0, fs)
         # recent 池瘦身（v8）：状态条只渲染 1 个会话，完整快照只给兜底候选
         # （force + latest + 最近活跃前 2），其余长尾行走轻量查询（单会话 38ms→2ms）。
@@ -607,6 +743,8 @@ def snapshot(force_sid=""):
                 rec.append(_session_snapshot(con, sid, cfg))
             else:
                 rec.append(_light_snapshot(con, sid, cfg))
+        # rec 建好后把远端快照挂到池首：overlay 按 sid 匹配 mine，顺序只影响兜底展示
+        rec = [remote_by[s] for s in reversed(remote_ids)] + rec
         return {
             "session": base,
             "last_turn": base["last_turn"],
@@ -616,6 +754,10 @@ def snapshot(force_sid=""):
                 "cache_read": today[3], "total": today[4],
                 "reasoning": today[6], "retries": today[7], "cache_write": today[8],
             },
+            # 远端数据源（v9）：显示远端会话时 overlay 用 remote_today 替代本地 today
+            "remote_today": remote_today,
+            "remote_error": remote_err,
+            "known_sids": known_sids,
             "context_window": base["context_window"],
             "context_auto": base["context_auto"],
             "code": base["code"],

@@ -122,6 +122,16 @@ function dbStamp() {
   return m;
 }
 
+/* v9 远程数据源：payload.recent 里带 remote 标记的会话 = zusage.py 经 SSH 从远端机取得。
+ * 本地 fs.watch 对远端库写入无感，聚焦远端会话期间由泵按 remote.poll_ms 主动轮询
+ * （默认 3s），切回本地会话即恢复纯事件触发、零进程零轮询。 */
+const remoteSids = new Set();
+let lastHadRemote = false;
+function remotePollMs() {
+  const r = readCfgCached().remote;
+  return Math.max(1000, (r && r.poll_ms | 0) || 3000);
+}
+
 let busy = false;
 let pushCount = 0;
 let lastSpawn = 0;    // 上次发起查询时刻（activity_min_ms 限频用）
@@ -130,6 +140,8 @@ let lastWants = "";   // 上次查询用的会话 id 集合（变化即拉，防
 
 function handlePayload(payload) {
   if (!payload || typeof payload !== "object") return;
+  remoteSids.clear();
+  for (const r of (payload.recent || [])) if (r && r.remote && r.sid) remoteSids.add(r.sid);
   for (const wc of webContents.getAllWebContents()) pushOnce(wc, payload);
   // 定位诊断：每 ~15 次拉取收集每个窗口各自的 __zusageDiag，附加泵侧证据后写 diag-<n>.json（多窗口互不覆盖）
   if (++pushCount % 15 === 1) {
@@ -217,6 +229,7 @@ function runQuery(wants) {
   const done = (payload) => {
     busy = false;
     if (payload) handlePayload(payload);
+    if (lastHadRemote) scheduleRetry(remotePollMs());   // 远端会话聚焦期间维持轮询链
     // 失败不原地重试：下一笔 db 写入/心跳会再拉，最多滞后一个心跳
   };
   if (readCfgCached().resident !== false && pyFail < 3) {
@@ -252,6 +265,7 @@ function legacySpawn(wants) {
   py.on("close", () => {
     clearTimeout(killTimer);
     busy = false;
+    if (lastHadRemote) scheduleRetry(remotePollMs());
     if (out.trim()) {
       let payload;
       try { payload = JSON.parse(out); } catch (e) { payload = null; }
@@ -292,10 +306,14 @@ function maybeSpawn() {
         if (sid && !wants.includes(sid)) wants.push(sid);
       });
       const key = wants.join(",");
-      if (key === lastWants && st && st === lastStamp) return;   // 会话与数据都没变：零进程
+      /* v9：聚焦 SSH 远程会话时本地 db 不写入（st 恒定），短路径放行、改按 remote 轮询间隔 */
+      const remoteActive = wants.some((s) => remoteSids.has(s));
+      if (key === lastWants && st && st === lastStamp && !remoteActive) return;   // 会话与数据都没变：零进程
       const now = Date.now();
-      if (now - lastSpawn < wait) { scheduleRetry(wait - (now - lastSpawn) + 50); return; }
+      const effWait = remoteActive ? remotePollMs() : wait;
+      if (now - lastSpawn < effWait) { scheduleRetry(effWait - (now - lastSpawn) + 50); return; }
       lastWants = key;
+      lastHadRemote = remoteActive;
       if (st) lastStamp = st;
       lastSpawn = now;
       runQuery(key);
@@ -364,4 +382,4 @@ const hook = (wc) => {
 app.on("web-contents-created", (e, wc) => hook(wc));
 for (const wc of webContents.getAllWebContents()) hook(wc);
 
-LOG("injected v8, resident query mode (per-window active session via IPC, fs.watch db dir, zusage serve + one-shot fallback, activity_min_ms/heartbeat_ms, query timeout 15s)");
+LOG("injected v9, resident query mode + remote SSH datasource (per-window active session via IPC, fs.watch db dir, remote poll_ms while remote session focused, zusage serve + one-shot fallback, activity_min_ms/heartbeat_ms, query timeout 15s)");
