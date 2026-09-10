@@ -4,5 +4,14 @@
   "heartbeat_ms": 30000,
   "hot_reload": true,
   "context_window": 1000000,
-  "lang": "zh"
+  "lang": "zh",
+  "remote": {
+    "enabled": false,
+    "ssh": "ssh 用户名@服务器地址",
+    "script": "~/.zcode/zcode-token-usage-statusbar/zusage.py",
+    "python": "python3",
+    "timeout_s": 6,
+    "poll_ms": 3000,
+    "host_label": "我的服务器"
+  }
 }

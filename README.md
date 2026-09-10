@@ -64,6 +64,19 @@ Click ⚙ to toggle any bar item, override the context window size, or switch th
 
 - **Automatic context-window detection**: native ZCode UI → model catalog → `config.json` fallback.
 - **Session tracking**: each window shows only the data of its own focused session — zero cross-window bleed.
+- **SSH remote sessions (v9)**: when the desktop client is connected to a remote zcode-server, session data lives in the remote machine's `~/.zcode/cli/db/db.sqlite`. Add a `remote` section to `config.json` and the bar **automatically switches to querying the remote host over SSH** when a remote conversation is focused — a ☁ "remote" badge appears (hover for host name / last error), and both session stats and the "today" total come from the remote database. The remote host only needs the same `zusage.py` deployed (its own config must NOT enable `remote`, to avoid recursion). Requires passwordless SSH (public-key auth) to the server; the pump polls at `remote.poll_ms` (default 3000) while a remote session is focused — local sessions remain purely event-driven.
+
+  ```json
+  "remote": {
+    "enabled": true,
+    "ssh": "ssh user@server",
+    "script": "~/.zcode/zcode-token-usage-statusbar/zusage.py",
+    "python": "python3",
+    "timeout_s": 6,
+    "poll_ms": 3000,
+    "host_label": "my-server"
+  }
+  ```
 - **MCP in-chat query**: `token_usage(scope)` supporting current / today / week / days:N / sessions:N / models:days / session:<id prefix>.
 - **CLI**: `python zusage.py [now|today|json|days N|sessions [N]|models [days]|watch]`.
 - **/usage command** in the chat input.
