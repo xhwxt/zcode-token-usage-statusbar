@@ -10,7 +10,11 @@ asar 注入行与 MCP 注册都指向数据目录 —— 之后 clone 目录可�
 
 用法（仓库根目录）：
   python install.py               # 全量安装：复制运行时 → 注入 asar → 注册 MCP → /usage 命令 → 监控窗口
-  python install.py --asar PATH   # 指定 app.asar（自动探测失败时用；首次成功后记住，之后免传）
+  python install.py --root PATH   # 指定 ZCode 根目录（自动接上平台固定的 resources/app.asar）；
+                                  #   Windows：python install.py --root D:\Apps\ZCode
+                                  #   macOS：  python install.py --root /Applications/ZCode.app
+                                  #   首次成功后记住，之后免传
+  python install.py --asar PATH   # 指定 app.asar 完整路径（自动探测失败时用；同样记住）
   python install.py --no-mcp      # 只装状态条，不动 MCP 与 /usage 命令
   python install.py --dev         # 开发模式：不复制运行时，注入直指本仓库目录，配置/诊断留在仓库
                                   #   （作者迭代用，改仓库文件即时热更新；与标准形态重跑 install 即互切）
@@ -35,6 +39,28 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).parent.resolve()
+
+
+def normalize_asar_arg(p, kind="asar"):
+    """把 --asar/--root 的实参归一成 app.asar 路径：三者都接受——
+      * 完整 asar 路径（尾部 app.asar，惯用写法）
+      * asar 所在目录（.../resources）
+      * ZCode 根目录（--root：win/linux 下的安装目录；macOS 下 ZCode.app）
+    Electron 布局下相对根目录的路径是固定的（Windows/Linux <root>/resources/app.asar，
+    macOS bundle <root>/Contents/Resources/app.asar），所以指向根目录就够了。"""
+    p = expand(p)
+    if p.is_file():
+        return p
+    if kind == "root":
+        cands = [p / "resources" / "app.asar"]
+        if sys.platform == "darwin":
+            cands.insert(0, p / "Contents" / "Resources" / "app.asar")
+    else:
+        cands = [p / "app.asar"]
+    for c in cands:
+        if c.is_file():
+            return c
+    return p / "app.asar" if kind == "root" else p
 
 
 def _sudo_user():
@@ -399,8 +425,10 @@ def main():
 
     ap = argparse.ArgumentParser(description=L("ZCode Token 用量状态栏 一键安装",
                                                "ZCode Token Usage Status Bar one-shot installer"))
-    ap.add_argument("--asar", help=L("app.asar 路径（默认自动探测；首次安装成功后记住，之后免传）",
-                                     "path to app.asar (auto-detected by default; remembered after the first install)"))
+    ap.add_argument("--asar", help=L("app.asar 完整路径（默认自动探测；也可传 --root 指向安装目录）",
+                                     "full path to app.asar (auto-detected by default; or use --root for the install directory)"))
+    ap.add_argument("--root", help=L("ZCode 根目录（如 D:\\Apps\\ZCode 或 ZCode.app；自动接上平台固定的 resources/app.asar）",
+                                     "ZCode root directory (e.g. D:\\Apps\\ZCode or ZCode.app; the platform-fixed resources/app.asar is appended)"))
     ap.add_argument("--no-mcp", action="store_true", help=L("跳过 MCP 注册与 /usage 命令", "skip MCP registration and the /usage command"))
     ap.add_argument("--dev", action="store_true", help=L("开发模式：不复制运行时，注入直指本仓库目录（配置/诊断留在仓库）",
                                                          "dev mode: no runtime copy; injection points at this repo (config/diagnostics stay in the repo)"))
@@ -438,16 +466,19 @@ def main():
         print(L("卸载完成。", "Uninstall complete."))
         return 0 if ok else 1
 
-    asar = Path(args.asar) if args.asar else (find_asar() or ask_asar())
+    asar = normalize_asar_arg(args.root, "root") if args.root else (
+        normalize_asar_arg(args.asar) if args.asar else (find_asar() or ask_asar()))
     if not asar or not asar.is_file():
         if sys.platform == "win32":
-            example = r"E:\Apps\ZCode\resources\app.asar"
+            example = r"--root D:\Apps\ZCode"
         elif sys.platform.startswith("linux"):
-            example = "/opt/ZCode/resources/app.asar"
+            example = "--root /opt/ZCode"
         else:
-            example = "/Applications/ZCode.app/Contents/Resources/app.asar"
-        print(L(f"找不到 app.asar。用 --asar 指定，例如：python install.py --asar {example}",
-                f"app.asar not found. Specify it with --asar, e.g.: python install.py --asar {example}"))
+            example = "--root /Applications/ZCode.app"
+        print(L(f"找不到 app.asar。用 --root 指向 ZCode 安装目录，例如：python install.py {example}",
+                f"app.asar not found. Point --root at the ZCode install directory, e.g.: python install.py {example}"))
+        print(L("（也可用 --asar 指定 app.asar 完整路径）",
+                "(or specify the full app.asar path with --asar)"))
         return 1
     print(L(f"[目标] {asar}", f"[target] {asar}"))
     if (sys.platform != "win32" and os.geteuid() != 0
