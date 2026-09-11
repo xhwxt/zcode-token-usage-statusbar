@@ -113,6 +113,40 @@ def load_lang_from_config(dev):
         return None
 
 
+def asar_package_name(asar_path):
+    """读 asar 内 package.json 的 name 字段，辅助识别"这是不是 ZCode 的 asar"；
+    读不到（非 asar / 无 package.json / 条目 unpacked 外置）返回 None。"""
+    import struct
+    try:
+        with open(asar_path, "rb") as f:
+            a, b, c, d = struct.unpack("<4I", f.read(16))
+            if a != 4:
+                return None
+            header = json.loads(f.read(d))
+        node = header.get("files", {}).get("package.json")
+        if not isinstance(node, dict) or "size" not in node:
+            return None
+        with open(asar_path, "rb") as f:
+            f.seek(8 + b + int(node["offset"]))
+            data = f.read(int(node["size"]))
+        if b"\x00" in data:   # 被 pickle 对齐补零 / 条目加密等异常，放弃识别
+            return None
+        return json.loads(data.decode("utf-8")).get("name")
+    except (OSError, ValueError, KeyError, struct.error):
+        return None
+
+
+def is_zcode_app(asar_path):
+    """该 asar 是否属于 ZCode：ZCode.exe 与 asar 同级，或包里 package.json 的 name 含 zcode。
+    兜底扫描必须过此判定——%LOCALAPPDATA%\\Programs 下可能有其它 Electron 应用
+    （如 opencode-aidesktop），按目录名猜会注入错目标：真 ZCode 永不生效。"""
+    asar_path = Path(asar_path)
+    if (asar_path.parent.parent / "ZCode.exe").is_file():
+        return True
+    name = asar_package_name(asar_path)
+    return isinstance(name, str) and "zcode" in name.lower()
+
+
 def find_asar():
     env = os.environ.get("ZCODE_ASAR")   # 非默认安装位置：设一次环境变量，永久免 --asar
     if env:
@@ -125,11 +159,12 @@ def find_asar():
             return p
     if sys.platform == "win32":
         # 兜底：扫 %LOCALAPPDATA%\Programs 一层子目录
+        # （必须过 is_zcode_app：该目录下可能有其它 Electron 应用，命中它们会注入错目标）
         prog = expand(r"%LOCALAPPDATA%\Programs")
         if prog.is_dir():
             for ch in prog.iterdir():
                 p = ch / "resources" / "app.asar"
-                if p.is_file():
+                if p.is_file() and is_zcode_app(p):
                     return p
     elif sys.platform.startswith("linux"):
         # 兜底：扫 /opt、/usr/lib、/usr/local/lib 一层子目录，目录名含 zcode 即命中
