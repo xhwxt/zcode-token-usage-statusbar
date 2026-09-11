@@ -11,7 +11,7 @@ asar 注入行与 MCP 注册都指向数据目录 —— 之后 clone 目录可�
 用法（仓库根目录）：
   python install.py               # 全量安装：复制运行时 → 注入 asar → 注册 MCP → /usage 命令 → 监控窗口
   python install.py --root PATH   # 指定 ZCode 根目录（自动接上平台固定的 resources/app.asar）；
-                                  #   Windows：python install.py --root D:\Apps\ZCode
+                                  #   Windows：python install.py --root D:\\Apps\\ZCode
                                   #   macOS：  python install.py --root /Applications/ZCode.app
                                   #   首次成功后记住，之后免传
   python install.py --asar PATH   # 指定 app.asar 完整路径（自动探测失败时用；同样记住）
@@ -28,7 +28,7 @@ overlay 副本刷新后由泵 2 秒内热重载；改了 inject-main.cjs（泵�
 ZCode 安装位置自动探测：环境变量 ZCODE_ASAR → 当前平台常见安装位置下找 resources\\app.asar
 （Windows：D:\\ZCode 等；macOS：/Applications、~/Applications 下的 ZCode.app；
 Linux：/opt/ZCode、/usr/lib/zcode 等 deb/rpm 布局）；
-失败且终端可交互时询问，或用 --asar 指定。非默认位置首次安装成功后路径记住在 config.json
+失败且终端可交互时询问，或用 --root/--asar 指定。非默认位置首次安装成功后路径记住在 config.json
 （asar_path 字段），之后的安装/卸载一律免传 --asar。
 """
 import argparse

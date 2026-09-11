@@ -108,39 +108,6 @@ def set_runtime(path):
     INJECT_LINE = INJECT_LINE_TMPL.format(url=LOADER.as_uri())
 
 
-def asar_package_name(asar_path):
-    """读 asar 内 package.json 的 name 字段，辅助识别"这是不是 ZCode 的 asar"；
-    读不到（非 asar / 无 package.json / 条目 unpacked 外置）返回 None。"""
-    try:
-        with open(asar_path, "rb") as f:
-            a, b, c, d = struct.unpack("<4I", f.read(16))
-            if a != 4:
-                return None
-            header = json.loads(f.read(d))
-        node = header.get("files", {}).get("package.json")
-        if not isinstance(node, dict) or "size" not in node:
-            return None
-        with open(asar_path, "rb") as f:
-            f.seek(8 + b + int(node["offset"]))
-            data = f.read(int(node["size"]))
-        if b"\x00" in data:   # 被 pickle 对齐补零 / 条目加密等异常，放弃识别
-            return None
-        return json.loads(data.decode("utf-8")).get("name")
-    except (OSError, ValueError, KeyError, struct.error):
-        return None
-
-
-def is_zcode_app(asar_path):
-    """该 asar 是否属于 ZCode：可执行文件在 <root>/ZCode.exe，或包里 name 含 zcode。
-    用于兜底扫描时排除同机其它 Electron 应用——%LOCALAPPDATA%\\Programs 下可能有
-    opencode 等应用，命中它们会注入错目标且真 ZCode 永不生效。"""
-    asar_path = Path(asar_path)
-    if zcode_exe_for(asar_path) is not None:
-        return True
-    name = asar_package_name(asar_path)
-    return isinstance(name, str) and "zcode" in name.lower()
-
-
 def zcode_exe_for(asar_path):
     """从 asar 位置推 ZCode 可执行文件（语法自检用）：Windows 布局 <root>/ZCode.exe，
     macOS bundle 布局 <root>/MacOS/ZCode，Linux 布局 <root>/zcode（deb/rpm 官方包，/opt/ZCode）；
