@@ -91,7 +91,7 @@ cd zcode-token-usage-statusbar
 python install.py            # add --lang en for English installer/CLI/MCP output
 ```
 
-One command does it all: locate the ZCode installation (the `ZCODE_ASAR` environment variable or `--asar` flag for non-default locations; remembered after the first run) → copy the runtime into the data directory `~/.zcode/zcode-token-usage-statusbar/` → migrate/generate config.json → patch app.asar (a single loader line) → register the MCP server → install the /usage command → open an install-monitor window that reminds you to restart ZCode and confirms the injection took effect.
+One command does it all: locate the ZCode installation (`ZCODE_ASAR` environment variable → common install locations → otherwise `--root` for the ZCode directory, e.g. `--root D:\Apps\ZCode`, or `--asar` for the full app.asar path; remembered after the first run) → copy the runtime into the data directory `~/.zcode/zcode-token-usage-statusbar/` → migrate/generate config.json → patch app.asar (a single loader line) → register the MCP server → install the /usage command → open an install-monitor window that reminds you to restart ZCode and confirms the injection took effect.
 
 **ZCode upgrades overwrite app.asar — just re-run `python install.py`.**
 
@@ -111,5 +111,7 @@ Uninstall does not rely on a backup: it only adds/removes this tool's own inject
 
 - Data semantics, performance measurements, diagnostics and pitfall notes (Chinese) live in [docs/design-notes.md](docs/design-notes.md).
 - Patching app.asar is an unofficial injection route; ZCode updates overwrite it — re-run install after upgrading.
+- Non-default install locations: pass `--root <ZCode directory>` (recommended — the platform's fixed `resources/app.asar` is appended) or `--asar <full app.asar path>`, or set the `ZCODE_ASAR` environment variable; the location is remembered after the first successful run.
+- Auto-detection and the fallback scan only accept a target confirmed to be ZCode (a sibling `ZCode.exe`, or a package `name` containing zcode), so other Electron apps on the same machine (e.g. opencode) are never injected (added with the issue #6 fix).
 - macOS support was added in v60 (issue #2). Windows is the fully tested platform; the author has no macOS device, so macOS is untested — issues and feedback are welcome.
 - License: [MIT](LICENSE).

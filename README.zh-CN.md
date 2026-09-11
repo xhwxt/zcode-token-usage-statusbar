@@ -114,7 +114,7 @@ cd zcode-token-usage-statusbar
 python install.py            # 加 --lang en 可让安装器/CLI/MCP 输出英文
 ```
 
-一条命令完成：探测 ZCode 安装位置（环境变量 `ZCODE_ASAR` → 常见目录 → 找不到时询问或 `--asar` 指定；首次成功后记住位置，之后一律免传）→ **复制运行时到数据目录 `~/.zcode/zcode-token-usage-statusbar/`** → 迁移/生成 config.json → 注入 asar（注入行指向数据目录副本）→ 注册 MCP（server 名 `zcode-token-usage-statusbar`，指向数据目录副本）→ 安装 /usage 命令 → 弹出「安装监控」窗口（每 10 秒检测一次，提醒重启 ZCode；重启后检测到注入加载即显示成功并自动关闭；万一运行中原子替换失败，监控窗口会在你退出 ZCode 后自动完成替换）。
+一条命令完成：探测 ZCode 安装位置（环境变量 `ZCODE_ASAR` → 常见目录 → 找不到时询问，或 `--root` 指定 ZCode 安装目录 / `--asar` 指定 app.asar 完整路径；首次成功后记住位置，之后一律免传）→ **复制运行时到数据目录 `~/.zcode/zcode-token-usage-statusbar/`** → 迁移/生成 config.json → 注入 asar（注入行指向数据目录副本）→ 注册 MCP（server 名 `zcode-token-usage-statusbar`，指向数据目录副本）→ 安装 /usage 命令 → 弹出「安装监控」窗口（每 10 秒检测一次，提醒重启 ZCode；重启后检测到注入加载即显示成功并自动关闭；万一运行中原子替换失败，监控窗口会在你退出 ZCode 后自动完成替换）。
 
 **ZCode 升级会覆盖 app.asar，重跑一次 `python install.py` 即可**（监控窗口提示"未检测到注入加载"通常就是这个原因）。
 
@@ -172,7 +172,8 @@ python patch_install.py install
 ## 已知限制
 
 - Windows 为全功能实测平台；macOS 支持自 v60 起（issue #2 反馈驱动），作者无 macOS 设备、未经实测，遇到问题欢迎开 issue 反馈。
-- ZCode 安装位置自动探测常见目录，非标准位置用 `python install.py --asar <路径>` 指定（首次成功后记住，之后免传；也可设环境变量 `ZCODE_ASAR`）。
+- ZCode 安装位置自动探测常见目录；非标准位置用 `python install.py --root <ZCode 安装目录>` 指定（推荐，自动接上平台固定的 `resources/app.asar`），或 `python install.py --asar <app.asar 完整路径>`，首次成功后记住位置、之后免传；也可设环境变量 `ZCODE_ASAR`。
+- 自动探测与兜底扫描只在确认目标是 ZCode（同级存在 `ZCode.exe`，或包内 `package.json` 的 name 含 zcode）时才会采用，同机的其它 Electron 应用（如 opencode）不会被误注入（该身份校验随 issue #6 的修复引入）。
 - 依赖 fuses `EmbeddedAsarIntegrityValidation=0`。官方一旦收紧此 fuse 或改入口结构，注入路线即失效（届时 `python install.py --remove` 剥离注入行即恢复原样）。
 - 修改客户端 asar 属非官方注入方式，ZCode 升级会覆盖，需重跑 install。
 - 上下文超限亮红依赖 db 中 `context_exceeded` 标记行；触发条件是请求真被服务端拒绝，无法本地模拟测试。
