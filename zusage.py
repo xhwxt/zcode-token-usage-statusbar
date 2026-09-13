@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """ZCode token 用量查询（只读访问 ~/.zcode/cli/db/db.sqlite）。
 
-既可作 CLI（python zusage.py [now|today|days N|sessions [N]|models [days]|watch [sec]]），
+既可作 CLI（python zusage.py [now|today|days N|sessions [N]|models [days]|workspace 关键词|session id前缀|watch [sec]]），
 也可被 usage_mcp.py import 为查询库。
 """
 import json
@@ -80,6 +80,8 @@ def L(zh, en):
 
 def fmt(n):
     n = n or 0
+    if n >= 1_000_000_000:
+        return f"{n / 1e9:.2f}B"
     if n >= 1_000_000:
         return f"{n / 1e6:.2f}M"
     if n >= 1_000:
@@ -246,10 +248,11 @@ def render_sessions(con, limit=10):
         t = _ts(last)
         if _LANG == "en" and title == "(无标题)":
             title = "(untitled)"
+        dname = d.replace("\\", "/").rsplit("/", 1)[-1] if d else "?"
         lines.append(
             L(f"  {t:%m-%d %H:%M}  {fmt(total):>8}  ({fmt(inp)} in / {fmt(outp)} out, {n} 请求)  ",
               f"  {t:%m-%d %H:%M}  {fmt(total):>8}  ({fmt(inp)} in / {fmt(outp)} out, {n} requests)  ")
-            + f"{title[:40]}  [{sid[:13]}]"
+            + f"[{dname}]  {title[:32]}  [{sid[:13]}]"
         )
     return "\n".join(lines)
 
@@ -261,6 +264,151 @@ def render_models(con, days=7):
             L(f"  {model:<22} {n:>5} 次  in {fmt(inp):>8}  out {fmt(outp):>7}  合计 {fmt(total):>8}  ({prov})",
               f"  {model:<22} {n:>5} req  in {fmt(inp):>8}  out {fmt(outp):>7}  total {fmt(total):>8}  ({prov})")
         )
+    return "\n".join(lines)
+
+
+# ---------- 工作区报表 ----------
+# 口径：主会话 = directory 命中且无父且非 sess_subagent 前缀；子代理按 parent_id 归并去重。
+# 子代理会话（sess_subagent_*）的 directory 字段也等于工作区目录，直接按 directory 聚合会把
+# 主/子重复计数，必须走 parent_id 归并。报表单连接一次算齐——库实时写入，分次查询之间对不上账。
+# 会话迁移过工作区时历史用量全部记在当前目录名下（model_usage 无工作区维度）。
+
+_SUB_PREFIX_LEN = 13   # len("sess_subagent")
+
+
+def _usage_rows(con, sids):
+    """一批会话的 completed 用量（口径与 session_usage 一致），返回 session_id → row。"""
+    qm = ",".join("?" * len(sids))
+    per = {}
+    for r in con.execute(
+        f"""select session_id, count(*) n,
+                   coalesce(sum(input_tokens),0) inp, coalesce(sum(output_tokens),0) outp,
+                   coalesce(sum(reasoning_tokens),0) reas,
+                   coalesce(sum(cache_read_input_tokens),0) crd,
+                   coalesce(sum(computed_total_tokens),0) tot,
+                   min(completed_at) first_at, max(completed_at) last_at
+            from model_usage where status='completed' and session_id in ({qm})
+            group by session_id""", sids):
+        per[r["session_id"]] = r
+    return per
+
+
+def _match_workspaces(con, pattern):
+    """工作区目录匹配：子串（SQLite LIKE 对 ASCII 大小写不敏感）或单词首字母缩写
+    （abc → **A**pple **B**anana **C**herry）。用户对工作区的称呼常是缩写而非子串。
+    返回 [(directory, 会话数)]，按会话数降序。"""
+    pat = pattern.lower()
+    out = []
+    for d, n in con.execute(
+            "select directory, count(*) n from session group by directory order by n desc"):
+        if pat in d.lower():
+            out.append((d, n))
+            continue
+        initials = "".join(w[0] for w in re.split(r"[^A-Za-z0-9]+", d) if w).lower()
+        if len(pat) >= 2 and pat in initials:
+            out.append((d, n))
+    return out
+
+
+def render_workspace(con, pattern, top=15):
+    """workspace:<目录关键词>：按工作区聚合主会话+子代理，含按会话与按模型两张明细。"""
+    pattern = (pattern or "").strip()
+    dirs = _match_workspaces(con, pattern) if pattern else []
+    if not dirs:
+        lines = [L(f"未找到目录含 {pattern!r} 的工作区。现有工作区（按会话数前 10）：",
+                   f"No workspace with directory matching {pattern!r}. Existing workspaces (top 10 by sessions):")]
+        for d, n in con.execute(
+                "select directory, count(*) n from session group by directory order by n desc limit 10"):
+            lines.append(f"  {n:>4}  {d}")
+        return "\n".join(lines)
+
+    dir_names = [d for d, _ in dirs]
+    qd = ",".join("?" * len(dir_names))
+    mains = con.execute(
+        f"""select id, title, time_created from session
+           where directory in ({qd}) and parent_id is null and substr(id,1,{_SUB_PREFIX_LEN})!='sess_subagent'
+           order by time_created""", dir_names).fetchall()
+    main_ids = [r["id"] for r in mains]
+    subs = []
+    if main_ids:
+        qm = ",".join("?" * len(main_ids))
+        subs = con.execute(
+            f"select id, title, parent_id from session where parent_id in ({qm})", main_ids).fetchall()
+    all_ids = list(dict.fromkeys(main_ids + [r["id"] for r in subs]))
+    per = _usage_rows(con, all_ids) if all_ids else {}
+    qm = ",".join("?" * len(all_ids))
+    models = con.execute(
+        f"""select model_id, count(*) n,
+                   coalesce(sum(input_tokens),0) inp, coalesce(sum(output_tokens),0) outp,
+                   coalesce(sum(computed_total_tokens),0) tot
+            from model_usage where status='completed' and session_id in ({qm})
+            group by model_id order by tot desc""", all_ids).fetchall() if all_ids else []
+
+    def agg(ids):
+        rows = [per[i] for i in ids if i in per]
+        return {k: sum(r[k] for r in rows)
+                for k in ("n", "inp", "outp", "reas", "crd", "tot")}
+
+    sub_of = {}
+    for s in subs:
+        sub_of.setdefault(s["parent_id"], []).append(s["id"])
+    sub_ids = [i for ids in sub_of.values() for i in ids]
+    tm, ts, ta = agg(main_ids), agg(sub_ids), agg(all_ids)
+
+    if len(dirs) == 1:
+        lines = [L(f"■ 工作区 {dirs[0][0]}", f"■ Workspace {dirs[0][0]}")]
+    else:
+        lines = [L(f"■ 工作区（匹配 {pattern!r}，命中 {len(dirs)} 个）",
+                   f"■ Workspaces matching {pattern!r} ({len(dirs)} dirs)")]
+        for d, n in dirs[:5]:
+            lines.append(f"  {n:>4}  {d}")
+    if not per:
+        lines.append(L("该工作区暂无 completed 请求。", "No completed requests in this workspace yet."))
+        return "\n".join(lines)
+    firsts = [r["first_at"] for r in per.values() if r["first_at"]]
+    lasts = [r["last_at"] for r in per.values() if r["last_at"]]
+    lines.append(L(
+        f"主会话 {len(main_ids)} 个（其中无请求 {len(main_ids) - len([i for i in main_ids if i in per])} 个）"
+        f" + 子代理 {len(subs)} 个 ｜ "
+        f"{_ts(min(firsts)):%m-%d %H:%M} ~ {_ts(max(lasts)):%m-%d %H:%M}",
+        f"{len(main_ids)} main sessions ({len(main_ids) - len([i for i in main_ids if i in per])} without requests)"
+        f" + {len(subs)} subagents ｜ {_ts(min(firsts)):%m-%d %H:%M} ~ {_ts(max(lasts)):%m-%d %H:%M}"))
+    lines.append(L(
+        f"请求 {ta['n']:,}（主 {tm['n']:,} / 子 {ts['n']:,}）  "
+        f"input {ta['inp']:,}（缓存读 {ta['crd']:,}）  "
+        f"output {ta['outp']:,}（含 reasoning {ta['reas']:,}）",
+        f"{ta['n']:,} requests (main {tm['n']:,} / sub {ts['n']:,})  "
+        f"input {ta['inp']:,} (cache-read {ta['crd']:,})  "
+        f"output {ta['outp']:,} (incl. reasoning {ta['reas']:,})"))
+    lines.append(L(
+        f"合计（=input+output，缓存读已含在 input 内） {ta['tot']:,}",
+        f"Total (=input+output; cache-read already inside input) {ta['tot']:,}"))
+
+    ranked = []
+    for m in mains:
+        if m["id"] in per:
+            su = agg(sub_of.get(m["id"], []))
+            ranked.append((m, per[m["id"]], su))
+    ranked.sort(key=lambda x: -(x[1]["tot"] + x[2]["tot"]))
+    lines.append(L(f"■ 按会话（含其子代理，按含子合计降序，前 {top}）",
+                   f"■ By session (incl. subagents, top {top} by combined total)"))
+    for m, u, su in ranked[:top]:
+        nsub = len(sub_of.get(m["id"], []))
+        subtxt = (L(f" +子{nsub}个 {su['tot']:,}", f" +{nsub} sub {su['tot']:,}") if nsub else "")
+        t = (m["title"] or L("(无标题)", "(untitled)")).replace("\n", " ")
+        lines.append(
+            f"  {_ts(u['last_at']):%m-%d %H:%M}  {u['n']:,}req  in {u['inp']:,}  out {u['outp']:,}  "
+            f"{L('合计', 'total')} {u['tot']:,}{subtxt}  {t[:26]}")
+    if len(ranked) > top:
+        rest = agg([m["id"] for m, _, _ in ranked[top:]])
+        lines.append(L(f"  （另有 {len(ranked) - top} 个会话 合计 {rest['tot']:,}）",
+                       f"  (…plus {len(ranked) - top} sessions totalling {rest['tot']:,})"))
+
+    lines.append(L("■ 按模型", "■ By model"))
+    for r in models:
+        lines.append(
+            f"  {r['model_id']:<24} {r['n']:,}req  in {r['inp']:,}  out {r['outp']:,}  "
+            f"{L('合计', 'total')} {r['tot']:,}")
     return "\n".join(lines)
 
 
@@ -355,6 +503,73 @@ def _sub_agent_tasks(con, sid):
         _TASK_CACHE.clear()
     _TASK_CACHE[sid] = (key, tasks)
     return tasks
+
+
+def render_session_detail(con, prefix):
+    """session:<id前缀>：会话总量 + 按模型 + 子代理明细（任务名与状态条"子智能体目录"同源）。"""
+    rows = con.execute("select id from session where id like ?", (prefix + "%",)).fetchall()
+    if not rows:
+        rows = con.execute(
+            "select distinct session_id from model_usage where session_id like ?",
+            (prefix + "%",)).fetchall()
+    if not rows:
+        return L(f"未找到 id 前缀为 {prefix!r} 的会话",
+                 f"No session found with id prefix {prefix!r}")
+    sid = rows[0][0]
+    sess = con.execute("select * from session where id=?", (sid,)).fetchone()
+    u = session_usage(con, sid)
+    head = L(f"■ 会话 {sid}", f"■ Session {sid}")
+    if sess is not None:
+        head += f"  {sess['title']}"
+        if sess["directory"]:
+            head += L(f"\n  目录: {sess['directory']}", f"\n  dir: {sess['directory']}")
+    body = L(
+        f"  {u['turns']} 轮 / {u['requests']} 次请求\n"
+        f"  input {fmt(u['input'])} (其中 cache read {fmt(u['cache_read'])})  "
+        f"output {fmt(u['output'])}  合计 {fmt(u['total'])}（合计=input+output，缓存读已含在 input 内）\n"
+        f"  上下文容量 ≈ {fmt(u['last_request_input'])} tokens",
+        f"  {u['turns']} turns / {u['requests']} requests\n"
+        f"  input {fmt(u['input'])} (incl. cache read {fmt(u['cache_read'])})  "
+        f"output {fmt(u['output'])}  total {fmt(u['total'])} (total=input+output; cache-read already inside input)\n"
+        f"  context capacity ≈ {fmt(u['last_request_input'])} tokens")
+    lines = [head, body]
+    last = con.execute(
+        "select max(completed_at) from model_usage where session_id=?", (sid,)).fetchone()[0]
+    if last:
+        lines.append(L(f"  最后活动: {_ts(last):%m-%d %H:%M}",
+                       f"  last activity: {_ts(last):%m-%d %H:%M}"))
+    mrows = con.execute(
+        """select model_id, count(*) n, coalesce(sum(input_tokens),0),
+                  coalesce(sum(output_tokens),0), coalesce(sum(computed_total_tokens),0)
+           from model_usage where session_id=? and status='completed'
+           group by model_id order by sum(computed_total_tokens) desc limit 6""",
+        (sid,)).fetchall()
+    if mrows:
+        lines.append(L("  按模型:", "  By model:"))
+        for r in mrows:
+            lines.append(
+                f"    {r['model_id']:<24} {r['n']:,}req  in {fmt(r[2])}  out {fmt(r[3])}  "
+                f"{L('合计', 'total')} {fmt(r[4])}")
+    sub_rows = con.execute(
+        """select m.session_id, coalesce(s2.title,''), count(*),
+                  coalesce(sum(m.computed_total_tokens),0), max(m.completed_at)
+           from model_usage m join session s2 on m.session_id = s2.id
+           where m.query_source='subagent' and s2.parent_id=? and m.status='completed'
+           group by m.session_id order by max(m.completed_at) desc""", (sid,)).fetchall()
+    if sub_rows:
+        tasks = _sub_agent_tasks(con, sid)
+        lines.append(L(
+            f"  子代理: {len(sub_rows)} 个 / {sum(r[2] for r in sub_rows):,}req / "
+            f"合计 {sum(r[3] for r in sub_rows):,}",
+            f"  Subagents: {len(sub_rows)} / {sum(r[2] for r in sub_rows):,}req / "
+            f"total {sum(r[3] for r in sub_rows):,}"))
+        for r in sub_rows[:8]:
+            name = tasks.get(r[0]) or r[1] or r[0]
+            lines.append(
+                f"    {fmt(r[3]):>8}  {r[2]:>3}req  {str(name).replace(chr(10), ' ')[:30]}  [{r[0][-6:]}]")
+        if len(sub_rows) > 8:
+            lines.append(L(f"    （另有 {len(sub_rows) - 8} 个）", f"    (…plus {len(sub_rows) - 8} more)"))
+    return "\n".join(lines)
 
 
 def _light_snapshot(con, sid, cfg):
@@ -817,6 +1032,10 @@ def main(argv):
         print(render_sessions(con, int(argv[1]) if len(argv) > 1 else 10))
     elif cmd == "models":
         print(render_models(con, int(argv[1]) if len(argv) > 1 else 7))
+    elif cmd == "workspace":
+        print(render_workspace(con, argv[1] if len(argv) > 1 else ""))
+    elif cmd == "session":
+        print(render_session_detail(con, argv[1] if len(argv) > 1 else ""))
     elif cmd == "watch":
         sec = int(argv[1]) if len(argv) > 1 else 5
         while True:

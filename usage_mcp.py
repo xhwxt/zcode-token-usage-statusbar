@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """ZCode token 用量 MCP server（stdio, 零依赖；注册名 zcode-token-usage-statusbar）。
 
-提供工具 token_usage(scope)：current(默认)/today/days:N/sessions[:N]/models[:days]/session:<id前缀>。
+提供工具 token_usage(scope)：current(默认)/today/days:N/sessions[:N]/models[:days]/session:<id前缀>/workspace:<目录关键词>。
 协议仅实现 initialize / tools/list / tools/call；调试信息只走 stderr。
 """
 import json
@@ -34,37 +34,11 @@ def tool_token_usage(scope: str = "current") -> str:
             d = int(scope.split(":", 1)[1]) if ":" in scope else 7
             return zusage.render_models(con, d)
         if scope.startswith("session:"):
-            prefix = scope.split(":", 1)[1]
-            rows = con.execute(
-                "select id from session where id like ?", (prefix + "%",)
-            ).fetchall()
-            if not rows:
-                m = con.execute(
-                    "select distinct session_id from model_usage where session_id like ?",
-                    (prefix + "%",),
-                ).fetchall()
-                rows = [(r[0],) for r in m]
-            if not rows:
-                return L(f"未找到 id 前缀为 {prefix!r} 的会话",
-                         f"No session found with id prefix {prefix!r}")
-            sid = rows[0][0]
-            sess = con.execute("select * from session where id=?", (sid,)).fetchone()
-            u = zusage.session_usage(con, sid)
-            head = L(f"■ 会话 {sid}", f"■ Session {sid}")
-            if sess is not None:
-                head += f"  {sess['title']}"
-            body = L(
-                f"  {u['turns']} 轮 / {u['requests']} 次请求\n"
-                f"  input {zusage.fmt(u['input'])} (cache read {zusage.fmt(u['cache_read'])})  "
-                f"output {zusage.fmt(u['output'])}  合计 {zusage.fmt(u['total'])}\n"
-                f"  上下文容量 ≈ {zusage.fmt(u['last_request_input'])} tokens",
-                f"  {u['turns']} turns / {u['requests']} requests\n"
-                f"  input {zusage.fmt(u['input'])} (cache read {zusage.fmt(u['cache_read'])})  "
-                f"output {zusage.fmt(u['output'])}  total {zusage.fmt(u['total'])}\n"
-                f"  context capacity ≈ {zusage.fmt(u['last_request_input'])} tokens")
-            return f"{head}\n{body}"
-        return L(f"未知 scope: {scope!r}。可用: current | today | week | days:N | sessions[:N] | models[:days] | session:<id前缀>",
-                 f"Unknown scope: {scope!r}. Available: current | today | week | days:N | sessions[:N] | models[:days] | session:<id prefix>")
+            return zusage.render_session_detail(con, scope.split(":", 1)[1].strip())
+        if scope.startswith("workspace:"):
+            return zusage.render_workspace(con, scope.split(":", 1)[1].strip())
+        return L(f"未知 scope: {scope!r}。可用: current | today | week | days:N | sessions[:N] | models[:days] | session:<id前缀> | workspace:<目录关键词>",
+                 f"Unknown scope: {scope!r}. Available: current | today | week | days:N | sessions[:N] | models[:days] | session:<id prefix> | workspace:<dir keyword>")
     finally:
         con.close()
 
@@ -75,10 +49,12 @@ TOOLS = [
         "description": (
             L("查询 ZCode 的 token 用量（数据来自本地 db.sqlite，只读）。"
               "scope 可选: current(当前会话+今日,默认), today, week, days:N(近N天每日), "
-              "sessions:N(最近N个会话), models:days(按模型), session:<id前缀>(指定会话)。",
+              "sessions:N(最近N个会话), models:days(按模型), session:<id前缀>(指定会话,含按模型与子代理明细), "
+              "workspace:<目录关键词>(按工作区聚合主会话+子代理,含按会话与按模型明细)。",
               "Query ZCode token usage (from the local db.sqlite, read-only). "
               "scope: current(current session+today, default), today, week, days:N(last N days per day), "
-              "sessions:N(last N sessions), models:days(by model), session:<id prefix>(specific session).")
+              "sessions:N(last N sessions), models:days(by model), session:<id prefix>(specific session, with per-model and subagent details), "
+              "workspace:<dir keyword>(aggregate a workspace's main sessions+subagents, with per-session and per-model details).")
         ),
         "inputSchema": {
             "type": "object",

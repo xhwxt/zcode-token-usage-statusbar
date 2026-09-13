@@ -85,8 +85,8 @@ ZCode 的插件机制（`plugin.json`）只能提供 MCP / skills / commands / h
   ```
 
   前提：本地到服务器的 `ssh` 免密可用（公钥认证）。实现上，本地 `zusage.py` 对本地库查不到的会话 id（双重白名单校验）执行 `ssh <host> python3 <script> json <sids>`，把远端快照合并进 payload；远端返回 `known_sids` 供负缓存（确认无此会话 2 分钟内不重问，ssh 失败 60 秒退避），本地新会话（session 表已有行）不会触发远端查询。泵在远端会话聚焦期间按 `poll_ms` 轮询（本地会话仍是纯事件触发、零轮询）；`poll_ms` 别低于 1000，跨公网建议配合 ssh ControlMaster 连接复用。
-- **MCP 对话内查询**：`token_usage(scope)` 工具，scope 支持 current / today / week / days:N / sessions:N / models:days / session:<id前缀>。
-- **CLI**：`python zusage.py [now|today|json|days N|sessions [N]|models [days]|watch [秒]]`。
+- **MCP 对话内查询**：`token_usage(scope)` 工具，scope 支持 current / today / week / days:N / sessions:N / models:days / session:<id前缀>（含按模型与子代理明细）/ workspace:<目录关键词>（按工作区聚合主会话+子代理，含按会话与按模型明细；关键词未命中时会列出候选目录）。
+- **CLI**：`python zusage.py [now|today|json|days N|sessions [N]|models [days]|workspace <目录关键词>|session <id前缀>|watch [秒]]`。
 - **/usage 命令**：对话输入框触发 MCP 查询。
 
 ## 文件说明
@@ -171,6 +171,8 @@ python patch_install.py install
 
 ## 已知限制
 
+- 口径说明：合计 = input + output（客户端 `computed_total_tokens` 原值），缓存读已含在 input 内、不要重复相加；reasoning（模型推理/思维链 token）仅部分提供方上报（DeepSeek 系上报且含在 output 内，部分 GLM 模型 id 恒不上报），推理拆分仅供参考。
+- 会话的用量归属其当前所在工作区目录（model_usage 无工作区维度），会话迁移过工作区的话历史用量一并算进新目录；子代理会话的 directory 与父会话相同，`workspace:` scope 按 `parent_id` 归并去重，避免主/子重复计数。
 - Windows 为全功能实测平台；macOS 支持自 v60 起（issue #2 反馈驱动），作者无 macOS 设备、未经实测，遇到问题欢迎开 issue 反馈。
 - ZCode 安装位置自动探测常见目录；非标准位置用 `python install.py --root <ZCode 安装目录>` 指定（推荐，自动接上平台固定的 `resources/app.asar`），或 `python install.py --asar <app.asar 完整路径>`，首次成功后记住位置、之后免传；也可设环境变量 `ZCODE_ASAR`。
 - 自动探测与兜底扫描只在确认目标是 ZCode（同级存在 `ZCode.exe`，或包内 `package.json` 的 name 含 zcode）时才会采用，同机的其它 Electron 应用（如 opencode）不会被误注入（该身份校验随 issue #6 的修复引入）。

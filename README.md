@@ -77,8 +77,8 @@ Click ⚙ to toggle any bar item, override the context window size, or switch th
     "host_label": "my-server"
   }
   ```
-- **MCP in-chat query**: `token_usage(scope)` supporting current / today / week / days:N / sessions:N / models:days / session:<id prefix>.
-- **CLI**: `python zusage.py [now|today|json|days N|sessions [N]|models [days]|watch]`.
+- **MCP in-chat query**: `token_usage(scope)` supporting current / today / week / days:N / sessions:N / models:days / session:<id prefix> (with per-model and subagent details) / workspace:<dir keyword> (aggregates a workspace's main sessions + subagents, with per-session and per-model details; unmatched keywords return candidate directories).
+- **CLI**: `python zusage.py [now|today|json|days N|sessions [N]|models [days]|workspace <dir keyword>|session <id prefix>|watch]`.
 - **/usage command** in the chat input.
 
 ## Installation
@@ -109,6 +109,8 @@ Uninstall does not rely on a backup: it only adds/removes this tool's own inject
 
 ## Notes
 
+- Accounting semantics: totals (`total` / 合计) = input + output as recorded by the client (`computed_total_tokens`); cache-read tokens are already **inside** input — don't add them again. Reasoning tokens are provider-reported only (e.g. DeepSeek reports them inside output; some GLM model ids never report them), so treat the reasoning split as informational.
+- A session's usage is attributed to the workspace directory it currently belongs to; `model_usage` has no workspace dimension, so usage from before a session was moved to another workspace counts toward the new one. Subagent sessions carry the same directory as their parent — the `workspace:` scope groups them via `parent_id` to avoid double counting.
 - Data semantics, performance measurements, diagnostics and pitfall notes (Chinese) live in [docs/design-notes.md](docs/design-notes.md).
 - Patching app.asar is an unofficial injection route; ZCode updates overwrite it — re-run install after upgrading.
 - Non-default install locations: pass `--root <ZCode directory>` (recommended — the platform's fixed `resources/app.asar` is appended) or `--asar <full app.asar path>`, or set the `ZCODE_ASAR` environment variable; the location is remembered after the first successful run.
