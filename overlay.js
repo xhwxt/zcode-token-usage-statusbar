@@ -11,6 +11,9 @@
  *       变量（<html> 的 .dark 类翻转整套值，zai-light/zai-dark 特殊主题同样适配），
  *       MutationObserver 观察该类同步 .zu-light（仅剩阴影/光晕程度性差异）。
  * 数据：主进程泵推 window.__zusageUpdate；显示项可在 ⚙ 面板配置（localStorage 持久化）。
+ * 分屏（v61.1）：协调器每 600ms 扫描可见输入框，按 pane（data-pane-id）派发实例——
+ *       一个 pane 一条，各自显示 composer 祖先链 data-session-id 指向的会话；
+ *       各 pane 会话 id 汇总挂 window.__zusageWantSids 交泵强制拉取（旧泵忽略）。
  * 当前会话（v34）：泵按窗口注入 payload.mine（客户端渲染端经 IPC 向主进程上报的焦点会话 id，
  *       可为空串）；overlay 优先显示 mine 对应的池条目，池里还没有（新会话没数据）就显示
  *       零值 —— 绝不回退到"别的会话"的数字（多窗口共享 localStorage 时旧启发式必错，实测）。
@@ -25,8 +28,69 @@
   function stale() { return MY_GEN !== window.__zusageGen; }
 
   var FATAL = (window.__zusageDiag = {});
+  /* 多实例（v61.1）：热更新时泵只按 id 清 0 号条，其余实例的 DOM（条/tip/气泡）
+   * 在新代码启动时按类名统一自清；旧实例闭包靠 stale() 罢工。 */
+  try {
+    document.querySelectorAll(".zusage-root,.zusage-tip-root,.zusage-exc").forEach(function (el) { el.remove(); });
+  } catch (e) { }
+
+  /* ---------- 共享状态（多实例一致）：显示项/语言/上下文覆盖/最近一次数据 ---------- */
+  var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv", lang: "zusage3.lang" };
+  var state = {
+    show: { win: 1, ctx: 1, today: 1, turn: 1, sub: 1, tools: 1 },
+    ctxOv: "", data: null,
+    lang: "zh",
+  };
+  /* ---------- i18n（v57）：L(中文, English) 内联双语文案，语言存 localStorage ---------- */
+  function L(zh, en) { return state.lang === "en" ? en : zh; }
+  function ls(k, d) { try { return localStorage.getItem(k) ?? d; } catch (e) { return d; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { } }
+  try {
+    var s0 = JSON.parse(ls(LS.show, "null"));
+    if (s0 && typeof s0 === "object") {
+      for (var k0 in state.show) if (k0 in s0) state.show[k0] = s0[k0] ? 1 : 0;
+    }
+    state.ctxOv = ls(LS.ctxOv, "");
+    if (ls(LS.lang, "") === "en") state.lang = "en";
+  } catch (e) { }
+  function persist() {
+    lsSet(LS.show, JSON.stringify(state.show));
+    lsSet(LS.ctxOv, state.ctxOv);
+    lsSet(LS.lang, state.lang);
+  }
+
+  /* ---------- 多实例注册表（v61.1）：每个分屏 pane 一个条实例 ---------- */
+  var instances = [];   // spawnInstance 返回的 api：{pid, attach, render, ...}
+  var nextSlot = 0;     // 实例序号；0 号保留兼容 id（#zusage-bar，泵热更新按它清理）
+  function renderAll(rebuildPanels) {
+    for (var i = 0; i < instances.length; i++) {
+      if (rebuildPanels) instances[i].rebuild();   // 语言切换等文案重建（各实例面板独立 DOM）
+      if (state.data) instances[i].render(state.data);
+    }
+  }
+  window.__zusageUpdate = function (d) {
+    if (stale()) return;
+    state.data = d;
+    for (var i = 0; i < instances.length; i++) {
+      try { instances[i].render(d); } catch (e) { FATAL.updateErr = String((e && e.stack) || e); }
+    }
+  };
+  function refreshWants() {
+    /* 各 pane 会话 id 汇总给泵：__zusageWantSids（新泵按数组强制纳入快照），
+     * __zusageWantSid 保底兼容旧泵单值通路（取 0 号实例的会话） */
+    try {
+      var arr = [];
+      for (var i = 0; i < instances.length; i++) {
+        var s1 = instances[i].getSid();
+        if (s1 && arr.indexOf(s1) < 0) arr.push(s1);
+      }
+      window.__zusageWantSids = arr;
+      if (arr.length) window.__zusageWantSid = arr[0];
+    } catch (e) { }
+  }
+
   setTimeout(function () {
-    try { main$(); } catch (e) {
+    try { coordinator(); } catch (e) {
       FATAL.fatal = String((e && e.stack) || e);
       var b = document.getElementById("zusage-bar");
       if (b) b.style.cssText = "position:fixed;right:16px;bottom:16px;font:12px monospace;color:#ff7a59;" +
@@ -34,35 +98,62 @@
     }
   }, 0);
 
-  function main$() {
-    var VERSION = "v60";   // v60：macOS 支持（issue #2）——语法自检缺 ZCode 可执行文件自动跳过、安装器/监控按平台推导路径与进程检测（tasklist/pgrep）   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
-    var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv", lang: "zusage3.lang" };
-
-    /* ---------- 状态 ---------- */
-    var state = {
-      show: { win: 1, ctx: 1, today: 1, turn: 1, sub: 1, tools: 1 },
-      ctxOv: "", data: null, nativeCtx: 0,
-      lang: "zh",
-      excActive: false,   // 当前会话处于"上下文超限被拒"状态（render 时按 picked 会话计算）
-      excGone: false,     // 用户点 ✕ 关闭了本次气泡；超限解除后自动复位
-    };
-    /* ---------- i18n（v57）：L(中文, English) 内联双语文案，语言存 localStorage ---------- */
-    function L(zh, en) { return state.lang === "en" ? en : zh; }
-    function ls(k, d) { try { return localStorage.getItem(k) ?? d; } catch (e) { return d; } }
-    function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { } }
-    try {
-      var s = JSON.parse(ls(LS.show, "null"));
-      if (s && typeof s === "object") {
-        for (var k in state.show) if (k in s) state.show[k] = s[k] ? 1 : 0;
+  function coordinator() {
+    /* 协调器（v61.1）：扫描主文档里全部下半屏可见输入框，按 pane 键（data-pane-id，
+     * 无属性回退 "auto"）分组派发给实例；一个 pane 一条，pane 消失对应条自藏。 */
+    function paneKeyOf(el) {
+      for (var p = el; p && p !== document.body; p = p.parentElement) {
+        if (p.hasAttribute && p.hasAttribute("data-pane-id")) return p.getAttribute("data-pane-id") || "auto";
       }
-      state.ctxOv = ls(LS.ctxOv, "");
-      if (ls(LS.lang, "") === "en") state.lang = "en";
-    } catch (e) { }
-    function persist() {
-      lsSet(LS.show, JSON.stringify(state.show));
-      lsSet(LS.ctxOv, state.ctxOv);
-      lsSet(LS.lang, state.lang);
+      return "auto";
     }
+    function sessIdOf(el) {
+      for (var p = el; p && p !== document.body; p = p.parentElement) {
+        if (p.hasAttribute && p.hasAttribute("data-session-id")) return p.getAttribute("data-session-id") || "";
+      }
+      return "";
+    }
+    var SEL = 'textarea, [contenteditable="true"], [role="textbox"], .ProseMirror, .ql-editor';
+    function tick() {
+      if (stale()) return;
+      try {
+        var best = {};
+        document.querySelectorAll(SEL).forEach(function (el) {
+          var r = el.getBoundingClientRect();
+          if (!(r.width > 40 && r.height > 8 && r.bottom > 0 && r.top < innerHeight)) return;
+          if (r.top < innerHeight * 0.45) return;   // 聊天输入框特征：视口下半部（排除设置页等处元素）
+          var k = paneKeyOf(el);
+          if (!best[k] || r.top > best[k].top) best[k] = { el: el, top: r.top };
+        });
+        var keys = Object.keys(best);
+        if (!keys.length && !instances.length) best["auto"] = { el: null, top: 0 };   // 主文档找不到（shadow/iframe 场景）→ 0 号实例走自带 deepFind 兜底
+        keys.forEach(function (k) {
+          var inst = null;
+          for (var i = 0; i < instances.length; i++) if (instances[i].pid === k) { inst = instances[i]; break; }
+          if (!inst && instances.length < 4) inst = spawnInstance(k, nextSlot++);
+          if (inst) inst.attach(best[k].el, sessIdOf(best[k].el));
+        });
+        instances.forEach(function (inst) {
+          if (keys.indexOf(inst.pid) < 0) inst.attach(null, "");   // pane 关闭：条随 composer 缺失自藏，实例保留待 pane 重开复用
+        });
+        FATAL.insts = instances.map(function (a) { return a.pid + "=" + (a.getSid() ? a.getSid().slice(-8) : "-"); }).join(" | ");
+      } catch (e) { FATAL.coordErr = String((e && e.stack) || e); }
+    }
+    tick();
+    setInterval(tick, 600);
+  }
+
+  /* ---------- 实例工厂（v61.1）：一个 pane 一套 条/面板/气泡/tooltip/定位循环。
+   * slot 0 保留 #zusage-bar/#zusage-tip 兼容 id（泵热更新按它清理），其余实例仅类名。 */
+  function spawnInstance(pid, slot) {
+    var VERSION = "v61";   // v61：修正常聊天误藏（删 coverLock/穿透=被盖，改幽灵子树检测）+ 分屏多实例   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
+    /* ---------- 状态（实例级） ---------- */
+    var excOn = false,    // 本 pane 会话处于"上下文超限被拒"状态（render 时按 picked 会话计算）
+      excGone = false,    // 用户点 ✕ 关闭了本次气泡；超限解除后自动复位
+      nativeCtxVal = 0,   // 本 pane 输入框卡片上读到的原生上下文总量
+      lastSub = null,     // 子代理明细面板数据源
+      instSid = "",       // 本 pane 当前会话（composer 祖先链 data-session-id）
+      pendingSid = "", wantedEl = null;   // 协调器派发的最新 composer/会话
 
     /* ---------- DOM ---------- */
     /* 样式表挂在 bar 内部而非 head：React 可能清理 head 里的外来 style，
@@ -73,7 +164,7 @@
        * var(--color-*, 旧值兜底) 引用客户端语义变量（<html> 的 .dark 类翻转整套值，
        * zai-light/zai-dark 特殊主题同样自动适配）；color-mix 处加同值前置声明，
        * 不支持 color-mix 的旧引擎落到实色行不至于透明。 */
-      "#zusage-bar{position:fixed;font:14px/1.3 Consolas,'Cascadia Mono',Menlo,'Microsoft YaHei UI','Microsoft YaHei',monospace;" +
+      ".zusage-root{position:fixed;font:14px/1.3 Consolas,'Cascadia Mono',Menlo,'Microsoft YaHei UI','Microsoft YaHei',monospace;" +
       "font-variant-numeric:tabular-nums;color:var(--color-foreground-subtle,#8791a3);" +
       "background:rgba(15,18,25,.86);background:color-mix(in srgb,var(--color-background,#0f1219) 86%,transparent);" +
       "backdrop-filter:blur(14px) saturate(1.3);-webkit-backdrop-filter:blur(14px) saturate(1.3);" +
@@ -83,7 +174,7 @@
       /* 条不能 overflow:hidden：设置面板是条的子元素、展开在条外上方，裁剪会吞掉面板（v15"点设置看不到窗口"根因）。
        * 超宽截断由 #zu-main 自己负责。 */
       "z-index:50}" +
-      "#zu-main{overflow:hidden;min-width:0;flex:0 1 auto;display:flex;align-items:center;gap:1px}" +
+      ".zu-main{overflow:hidden;min-width:0;flex:0 1 auto;display:flex;align-items:center;gap:1px}" +
       /* zu-main 不得带 .it class：querySelectorAll('.it') 收集 tooltip 时会把它算进第 0 位，
        * tips 全部错位一位且末项为 null —— v31"悬停只有空胶囊/内容错位"的根因 */
       ".it{display:flex;align-items:center;gap:4px;padding:2px 6px;border-radius:6px;" +
@@ -103,7 +194,7 @@
       "transition:background-color .12s ease-out,color .12s ease-out}" +
       ".btn:hover{color:var(--color-foreground,#e9edf4);background:var(--color-hover,rgba(255,255,255,.07))}" +
       ".btn:active{transform:scale(.96)}" +
-      "#zu-gear{flex:0 0 auto;font-size:17px;border-radius:6px}" +
+      ".zu-gear{flex:0 0 auto;font-size:17px;border-radius:6px}" +
       /* 行内 SVG 线性图标（v54）：currentColor 跟随文字色，一处定义全局换色 */
       ".ico{width:12px;height:12px;flex:0 0 auto;color:var(--color-foreground-subtle,#7e8899);opacity:.85}" +
       /* 工具错误数徽标 */
@@ -192,7 +283,7 @@
       /* 白色主题程度性覆盖（v58.1）：颜色已全量走客户端变量随 .dark 自动翻转，
        * 这里只兜两类 —— 程度差（浅色下阴影/内高光减重、红字光晕收掉）与
        * 三档状态色加深版（高对比自调档，见 .ok 注释）。 */
-      "#zusage-bar.zu-light{box-shadow:inset 0 1px 0 rgba(255,255,255,.85),0 4px 14px rgba(15,23,42,.12),0 1px 3px rgba(15,23,42,.08)}" +
+      ".zusage-root.zu-light{box-shadow:inset 0 1px 0 rgba(255,255,255,.85),0 4px 14px rgba(15,23,42,.12),0 1px 3px rgba(15,23,42,.08)}" +
       ".zu-light .panel{box-shadow:inset 0 1px 0 rgba(255,255,255,.9),0 12px 32px rgba(15,23,42,.14),0 2px 8px rgba(15,23,42,.08)}" +
       ".tip.zu-light{box-shadow:inset 0 1px 0 rgba(255,255,255,.9),0 10px 28px rgba(15,23,42,.16),0 2px 6px rgba(15,23,42,.08)}" +
       ".zusage-exc.zu-light{box-shadow:0 12px 32px rgba(15,23,42,.14),0 4px 18px rgba(220,38,38,.1)}" +
@@ -206,10 +297,11 @@
 
     /* 结构：文字项 + ⚙ 紧跟其后（无弹性空隙，不再推到最右）；面板绝对定位向上展开 */
     var bar = document.createElement("div");
-    bar.id = "zusage-bar";
+    bar.className = "zusage-root";
+    if (slot === 0) bar.id = "zusage-bar";
     bar.style.display = "none";   // 定位成功前不显示（避免占位）
-    bar.innerHTML = '<span id="zu-main">…</span>' +
-      '<span class="btn" id="zu-gear">⚙</span>';
+    bar.innerHTML = '<span class="zu-main">…</span>' +
+      '<span class="btn zu-gear">⚙</span>';
     var panel = document.createElement("div");
     panel.className = "panel";
     /* 面板文案可随语言重建（事件走 panel 级委托，重建不丢监听） */
@@ -225,7 +317,7 @@
       '<label><input type="checkbox" data-k="sub"><span>' + L("子代理", "Sub-agents") + '<em>' + L("后台子代理消耗，点击条目看明细面板", "background sub-agent usage, click the item for the detail panel") + '</em></span></label>' +
       '<div class="hr"></div>' +
       '<div class="cap">' + L("上下文窗口", "Context window") + '</div>' +
-      '<label><input type="text" id="zu-ctxov" placeholder="' + L("自动(按模型)", "auto") + '"><span class="dim">' + L("留空 = 自动（原生UI > 模型目录）", "leave empty = auto (native UI > model catalog)") + '</span></label>' +
+      '<label><input type="text" class="zu-ctxov" placeholder="' + L("自动(按模型)", "auto") + '"><span class="dim">' + L("留空 = 自动（原生UI > 模型目录）", "leave empty = auto (native UI > model catalog)") + '</span></label>' +
       '<div class="hr"></div>' +
       '<div class="cap">Language / 语言</div>' +
       '<label><input type="radio" name="zu-lang" value="zh"><span>中文</span></label>' +
@@ -241,7 +333,7 @@
       panel.querySelectorAll("input[type=checkbox]").forEach(function (cb) {
         cb.checked = !!state.show[cb.dataset.k];
       });
-      var ovInput = panel.querySelector("#zu-ctxov");
+      var ovInput = panel.querySelector(".zu-ctxov");
       if (ovInput) ovInput.value = state.ctxOv;
     }
     buildPanel();
@@ -253,8 +345,8 @@
     /* 自绘 tooltip：向上弹出（v45 起配空中走廊，移入点击不再被移开即隐掐断）；取代原生 title（方向不可控，在窗口底边会朝下被遮挡） */
     /* 自绘 tooltip 挂 body（fixed 视口坐标）：挂 bar 内会被消息流的层叠上下文盖住（v31 实证） */
     var tip = document.createElement("div");
-    tip.className = "tip";
-    tip.id = "zusage-tip";
+    tip.className = "tip zusage-tip-root";
+    if (slot === 0) tip.id = "zusage-tip";
     tip.style.display = "none";
     document.body.appendChild(tip);
     bar.appendChild(style);           // 样式随条走，不进 head（防清理）
@@ -267,10 +359,13 @@
     /* ---------- 超限告警气泡（v39）：当前会话"上下文超限被拒"时自动弹出，随条定位 ---------- */
     var excBubble = document.createElement("div");
     excBubble.className = "zusage-exc";
-    /* 热更新防重：上一实例的气泡可能残留（收尾清理只删 bar/tip），先移除旧的再挂新的 */
-    try {
-      document.querySelectorAll(".zusage-exc").forEach(function (el) { if (el !== excBubble) el.remove(); });
-    } catch (e) { }
+    /* 热更新防重：上一实例的气泡可能残留（收尾清理只删 bar/tip），先移除旧的再挂新的。
+     * 仅 0 号执行——后 spawn 的实例会删掉先 spawn 实例的气泡 DOM（多实例 v61.1）。 */
+    if (slot === 0) {
+      try {
+        document.querySelectorAll(".zusage-exc").forEach(function (el) { if (el !== excBubble) el.remove(); });
+      } catch (e) { }
+    }
     /* 文案只进 textContent/静态 innerHTML；会话 ID 是动态数据，一律走 textContent 防注入。
      * 面板语言切换时 rebuildExcBubble() 重建气泡文案。 */
     var excSid, excCopied;
@@ -309,7 +404,7 @@
     }
     function onExcClose() {
       if (stale()) return;
-      state.excGone = true;
+      excGone = true;
       syncExcBubble();
     }
     rebuildExcBubble();
@@ -340,7 +435,7 @@
     applyTheme();
 
     var $ = function (id) { return bar.querySelector(id); };
-    var main = $("#zu-main"), gear = $("#zu-gear");
+    var main = bar.querySelector(".zu-main"), gear = bar.querySelector(".zu-gear");
 
     /* ---------- 渲染 ---------- */
     function fmt(n) {
@@ -402,7 +497,7 @@
             "Generation speed: output tokens ÷ generation time of the latest completed request (first token → completion)\n≥70 t/s green · 40–70 yellow · <40 red"));
       }
       if (state.show.ctx) {
-        var cw = parseInt(state.ctxOv, 10) || state.nativeCtx || d.context_window || 0;
+        var cw = parseInt(state.ctxOv, 10) || d.native_ctx || d.context_window || 0;
         var pct = cw ? sess.ctx / cw * 100 : 0;
         var exc = excActive(sess);
         /* 占比档位分两套：窗口 ≥100 万时同一百分比的绝对 token 量大，40/60 提前预警；其余维持 70/85。 */
@@ -557,36 +652,48 @@
     }
     function render(d) {
       state.data = d;
-      var mine = d.mine;   // 泵按窗口注入：string=本窗口焦点会话（空串=该窗口当前无会话），undefined=泵无该窗口信息
       var pc = null, p = null;
-      if (typeof mine === "string") {
-        pickedSid = mine;
-        window.__zusageWantSid = mine;
-        if (mine) {
-          var rec = d.recent || [];
-          for (var i = 0; i < rec.length; i++) if (rec[i].sid === mine) { p = rec[i]; break; }
-          if (!p) p = stubFor(mine);
-        } else {
-          p = stubFor("");
-        }
+      if (instSid) {
+        /* v61.1 分屏多实例：本条显示哪个会话由 composer 祖先链的 data-session-id 决定
+         * （客户端每个 pane 自带该标记，比窗口级 mine 更准，绝不串 pane）；
+         * 会话不在池里（还没拉取）就显示本会话 0 值 —— 绝不回退到别的会话（v34 原则）。 */
+        pickedSid = instSid;
+        var rec = d.recent || [];
+        for (var i = 0; i < rec.length; i++) if (rec[i].sid === instSid) { p = rec[i]; break; }
+        if (!p) p = stubFor(instSid);
       } else {
-        pc = pickCurrent(d);
-        p = pc ? pc.sess : null;
-        pickedSid = p ? p.sid : "";
-        window.__zusageWantSid = (pc && pc.want) || "";   // 泵读取后让 zusage.py 强制纳入该会话
-        if (!p) p = stubFor((pc && pc.want) || "");
+        var mine = d.mine;   // 泵按窗口注入：string=本窗口焦点会话（空串=该窗口当前无会话），undefined=泵无该窗口信息
+        if (typeof mine === "string") {
+          pickedSid = mine;
+          window.__zusageWantSid = mine;
+          if (mine) {
+            var rec2 = d.recent || [];
+            for (var j = 0; j < rec2.length; j++) if (rec2[j].sid === mine) { p = rec2[j]; break; }
+            if (!p) p = stubFor(mine);
+          } else {
+            p = stubFor("");
+          }
+        } else {
+          pc = pickCurrent(d);
+          p = pc ? pc.sess : null;
+          pickedSid = p ? p.sid : "";
+          window.__zusageWantSid = (pc && pc.want) || "";   // 泵读取后让 zusage.py 强制纳入该会话
+          if (!p) p = stubFor((pc && pc.want) || "");
+        }
       }
-      state.excActive = excActive(p);   // 气泡的显示依据（track 每帧消费）
+      excOn = excActive(p);   // 气泡的显示依据（track 每帧消费）
       var view = {
         session: p, last_turn: p.last_turn || {}, last: p.last || {},
         /* v9：远端会话的「今日合计」用远端机数据，本地 today 只在显示本地会话时使用 */
         today: (p.remote && d.remote_today) ? d.remote_today : d.today,
+        native_ctx: nativeCtxVal,
         context_window: p.context_window, context_auto: p.context_auto,
         code: p.code, ctx_exc: p.ctx_exc, tools: p.tools,
         remote: !!p.remote, remote_host: p.remote_host || "", remote_error: d.remote_error || "",
         sub: p.sub || {requests: 0, total: 0, input: 0, output: 0, cache_read: 0, active: false, list: []},
       };
-      state.lastSub = view.sub;   // 子代理明细面板的数据源（开关面板/数据推送刷新用）
+      lastSub = view.sub;   // 子代理明细面板的数据源（开关面板/数据推送刷新用）
+      refreshWants();
       var h = html(view);
       /* 内容没变就不重建 DOM：泵每 1.5s 推送一次，无条件 innerHTML 会重建条面+重启呼吸灯
        * 动画+触发 tooltip 重画 = 悬停时周期性闪烁（v33 修复）。变化时才重建。 */
@@ -608,7 +715,7 @@
       }
       if (subPanel.classList.contains("open")) buildSubPanel(view.sub);   // 面板开着：随推送实时刷新
     }
-    window.__zusageUpdate = function (d) { if (stale()) return; try { render(d); } catch (e) { FATAL.updateErr = String((e && e.stack) || e); } };
+
 
     /* ---------- 自绘 tooltip：向上弹出（原生 title 方向不可控） ---------- */
     var tipFor = null, lastMoveAt = 0, tipSig = "";
@@ -672,7 +779,7 @@
       lastMoveAt = Date.now();
       var t = e.target;
       if (!t || !t.closest) return;
-      if (t.closest("#zusage-tip")) { mouseInBar = true; cancelTipGrace(); return; }   // 鼠标移入 tooltip：保持
+      if (tip.contains(t)) { mouseInBar = true; cancelTipGrace(); return; }   // 鼠标移入 tooltip：保持
       if (t.closest(".panel")) {
         /* 面板上不保留条面 tooltip（v42）：开设置的路上触发过条目 tooltip 的话，
          * 这分支若不清掉它，鼠标在面板里它就永不消失。 */
@@ -680,7 +787,7 @@
         if (tipFor) hideTip(true, "panel-hover");
         return;
       }
-      if (!t.closest("#zusage-bar")) {
+      if (!bar.contains(t)) {
         /* 空中走廊（v45）：悬空缝是"条外且 tip 外"的真空带，采样事件落在这里会被误判
          * 成"移开"立即熄灭——鼠标在 tooltip 横向范围、底边下方 ~12px 内时视同仍在条上，
          * 穿行去 tooltip 点 tab 的路上不熄灭。 */
@@ -787,7 +894,7 @@
       panel.querySelectorAll("input[type=checkbox]").forEach(function (cb) {
         cb.checked = !!state.show[cb.dataset.k];
       });
-      $("#zu-ctxov").value = state.ctxOv;
+      panel.querySelector(".zu-ctxov").value = state.ctxOv;
     }
     gear.addEventListener("click", function (e) {
       e.stopPropagation();
@@ -806,7 +913,7 @@
         persist();
         buildPanel();   // 面板自身文案随语言重建（含 radio 勾选态）
         rebuildExcBubble();
-        if (state.data) render(state.data);   // 条面单位与 tooltip 文案随语言刷新
+        renderAll(true);   // 条面单位与 tooltip 文案随语言刷新（含各实例面板文案重建）
         return;
       }
       if (t2.type === "checkbox") {
@@ -816,7 +923,7 @@
         state.ctxOv = t2.value.trim();
         persist();
       }
-      if (state.data) render(state.data);
+      renderAll(false);
     });
     document.addEventListener("mousedown", function (e) {
       if (panel.classList.contains("open") && !bar.contains(e.target)) panel.classList.remove("open");
@@ -914,7 +1021,7 @@
       subPanel.classList.toggle("open", opening);
       if (opening) {
         panel.classList.remove("open");   // 与设置面板互斥
-        buildSubPanel(state.lastSub);
+        buildSubPanel(lastSub);
         hideTip(true, "sub-open");
       }
     }
@@ -930,7 +1037,7 @@
       var b = e.target && e.target.closest ? e.target.closest(".ttab") : null;
       if (!b) return;
       subPanelTab = +b.getAttribute("data-i") || 0;
-      buildSubPanel(state.lastSub);   // 面板固定，切页签只换内容
+      buildSubPanel(lastSub);   // 面板固定，切页签只换内容
     });
 
     /* ---------- 输入框查找（穿透 open shadow / 同源 iframe） ---------- */
@@ -969,29 +1076,44 @@
       if (found) deepCache.el = found;
       return found;
     }
-    /* 输入框是否真的露在屏幕上：中心点命中测试。
-     * 设置页等覆盖层不卸载聊天 DOM 也不改几何，只能用 elementFromPoint 判断是否被盖住。 */
+    /* 输入框是否真的露在屏幕上：幽灵子树检测（设置页等 opacity-0/inert 壳，v61）+
+     * 中心点命中测试（真渲染出来的覆盖层，如全屏对话框背景、悬浮菜单）。 */
     /* 自己的浮层（设置面板/超限气泡/悬停 tooltip）展开在条上方、必然覆盖输入区中心：
      * 若算进遮挡判定，会进 隐藏→复显→再隐藏 的循环（v40 离线复现的"打开设置闪烁"根因；
      * v41 补 tooltip——会话/工具的长 tooltip 同样盖住输入框中心，悬停 0.4s 后闪一下且 tooltip 消失）。
      * 只豁免 track 的可见性路径；findComposer 找输入框时不用（ownOK 缺省 false）。 */
     function isOwnOverlay(el) {
-      try { return !!(el && el.closest && el.closest("#zusage-tip,.panel,.zusage-exc")); } catch (e) { return false; }
+      try { return !!(el && el.closest && el.closest(".zusage-tip-root,.panel,.zusage-exc")); } catch (e) { return false; }
     }
-    /* 命中根元素 = 穿透假象（v59）：客户端下拉/模态打开瞬间，滚动锁定（react-remove-scroll
-     * 同款机制）给应用层设 pointer-events:none，elementFromPoint 跳过这些层一路穿到底 ——
-     * 被设置页完全盖住的输入框被误判"未被遮挡"，条错误显示（用户实测：设置里开下拉就冒条）。
-     * 正常情况下输入框中心至少命中卡片/输入框自身的某个元素，不可能落到根元素上。 */
-    function hitIsThroughRoot(hit) {
-      return hit === document.body || hit === document.documentElement;
+    /* 幽灵子树检测（v61，取代 v58/v59 的 coverLock + 穿透特判）：
+     * 客户端 3.11.x 的设置页 = 设置 tab 激活时给工作区主视图套 opacity-0 + inert +
+     * pointer-events-none 的壳（DOM 与几何原样保留，纯视觉隐藏）。输入框落在这类
+     * "保持挂载但视觉已隐藏"的祖先链里就判不可见 —— 直接读计算样式，与
+     * elementFromPoint 无关，天然免疫滚动锁定期的穿透假象。 */
+    function inGhostSubtree(el) {
+      try {
+        for (var p = el; p && p !== document.body; p = p.parentElement) {
+          if (p.inert) return true;
+          var cs = getComputedStyle(p);
+          if (cs.visibility === "hidden" || parseFloat(cs.opacity) < 0.1) return true;
+        }
+      } catch (e) { }
+      return false;
     }
     function reallyVisible(el, ownOK) {
       if (!visible(el)) return false;
+      if (inGhostSubtree(el)) return false;   // 设置页等幽灵壳：视觉已隐藏（v61）
       var r = el.getBoundingClientRect();
       var hit;
       try { hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); } catch (e) { return true; }
       if (!hit) return false;
-      if (hitIsThroughRoot(hit)) return false;   // 穿透假象视同被盖（v59）
+      /* 命中根元素 = 穿透（v61 翻转判定）：Radix 模态层（下拉/对话框/modal 弹层）打开时给
+       * body 设 pointer-events:none，应用树全被跳过、elementFromPoint 一路穿到 <html>。
+       * v58/v59 曾把它当"被盖"（修设置页冒条），但正常聊天里开任何下拉也会中招——
+       * 条被误藏（用户实测）。现改判"可见"：设置页场景由 inGhostSubtree 兜住
+       * （3.11.x 设置壳必带 opacity-0+inert，不依赖命中测试），其余穿透场景
+       * 都是真·未被盖（弹层在别处，输入框露着）。 */
+      if (hit === document.body || hit === document.documentElement) return true;
       if (hit === el || hit.contains(el) || el.contains(hit)) return true;   // 命中自身/祖先/内部装饰层
       if (ownOK && isOwnOverlay(hit)) return true;
       return false;
@@ -1117,10 +1239,26 @@
     }
     function heavy() {
       if (stale()) return;
-      var el = findComposer();
-      if (el && el !== composer) setComposer(el);
-      else if (!el && composer && !composer.isConnected) setComposer(null);
-      if (!composer) collectDiag();   // 一直找不到输入框的窗口：周期性写环境诊断（everMounted 门防覆盖）
+      if (pid === "auto") {
+        /* 兜底模式（主文档找不到带 pane 标记的输入框，shadow/iframe 场景）：沿用原
+         * 单条查找链路（findComposer 含 deepFind 穿透），会话判定走 mine/pickCurrent */
+        var el = findComposer();
+        if (el && el !== composer) setComposer(el);
+        else if (!el && composer && !composer.isConnected) setComposer(null);
+      } else {
+        /* v61.1 多实例：composer 由协调器按 pane 派发（wantedEl），本层只对账——
+         * 元素被 React 重建/pane 关闭时清绑，等下一轮协调器重新派发 */
+        if (wantedEl && wantedEl.isConnected) {
+          if (wantedEl !== composer) setComposer(wantedEl);
+        } else if (composer) {
+          setComposer(null);
+        }
+        if (pendingSid !== instSid) {   // pane 切换了会话：立即按缓存 payload 重渲染
+          instSid = pendingSid;
+          if (state.data) render(state.data);
+        }
+      }
+      if (!composer && slot === 0) collectDiag();   // 一直找不到输入框的窗口：周期性写环境诊断（everMounted 门防覆盖）
       if (composer) {
         if (!cardCache || !cardCache.isConnected) {
           var c = cardOf(composer);
@@ -1128,11 +1266,10 @@
         }
         if (cardCache) {
           ensureCardPad();   // React 重渲染可能重建卡片/重置内联边距，对比后再补
-          state.nativeCtx = readNativeCtx(cardCache);
+          nativeCtxVal = readNativeCtx(cardCache);
         }
-        updateCoverLock();   // 滚动锁定态随 heavy 低频刷新（下拉/模态开合检测，v59）
       }
-      if (state.data) {
+      if (state.data && pid === "auto") {
         var msid = typeof state.data.mine === "string" ? state.data.mine : null;
         var pSid;
         if (msid !== null) pSid = msid;   // mine 模式：泵会在会话切换时推新 payload，这里只需同步 pickedSid
@@ -1151,9 +1288,9 @@
      * exc 解除时复位 excGone，下次再超限会重新弹。display 切换与测量在同一同步块内
      * 完成后才绘制，无首帧闪位。 */
     function syncExcBubble() {
-      var show = state.excActive && !state.excGone && curDisplay === "flex";
+      var show = excOn && !excGone && curDisplay === "flex";
       if (!show) {
-        if (!state.excActive) state.excGone = false;
+        if (!excOn) excGone = false;
         if (excBubble.style.display !== "none") excBubble.style.display = "none";
         return;
       }
@@ -1176,34 +1313,95 @@
       var hit;
       try { hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); } catch (e) { return true; }
       if (!hit) return false;
-      if (hitIsThroughRoot(hit)) return false;   // 穿透假象视同被盖（v59）
       if (hit === el || hit.contains(el) || el.contains(hit)) return true;
       if (cardCache && cardCache.contains(el) && cardCache.contains(hit)) return true;
       if (isOwnOverlay(hit)) return true;   // 自己的面板/气泡盖住输入框中心不算被盖（v40）
       return false;
     }
-    /* 滚动锁定态检测（v59，判据 2）：穿透不一定穿到底 —— 若只有部分层被设
-     * pointer-events:none，elementFromPoint 会停在更下层的正常元素上（如输入框自身），
-     * 上面的根元素特判兜不住。这里低频（heavy 600ms）检测锁定本身：存在可见的、
-     * 覆盖输入框中心的 body 直接子层 pointer-events 为 none = 有模态/下拉开着
-     * （react-remove-scroll 正是锁 body 直接子层），可见性判定直接判否。
-     * fail-closed：锁定态下真露着的输入框也暂时藏条，宁可少显不可错显。 */
-    var coverLock = false;
-    function updateCoverLock() {
-      coverLock = false;
-      if (!composer || !composer.isConnected) return;
+    /* 隐藏态诊断（v61）：条被判定不可见时周期性转储现场 —— body 直接子层的矩形/
+     * pointer-events/透明度、elementFromPoint 命中链、幽灵子树判定与 body 的 pe 状态。
+     * 定位"正常聊天窗口被误藏"类问题用；节流 4s，只写 __zusageDiag.hidden
+     * （泵取回写 diag-<n>.json）。 */
+    var lastHiddenDiagAt = 0;
+    function elDesc(el) {
+      if (!el) return String(el);
+      var cls = el instanceof Element ? (el.getAttribute("class") || "") : "";
+      return el.tagName + (el.id ? "#" + el.id : "") + (cls ? "." + String(cls).slice(0, 60) : "");
+    }
+    function diagHidden(r) {
+      var now = Date.now();
+      if (now - lastHiddenDiagAt < 4000) return;
+      lastHiddenDiagAt = now;
+      var cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+      var hit = null, chain = [], bodyPE = "";
       try {
-        var r = composer.getBoundingClientRect();
-        var cx = r.left + r.width / 2, cy = r.top + r.height / 2;
-        var kids = document.body.children;
-        for (var i = 0; i < kids.length; i++) {
-          var el = kids[i];
-          var kr = el.getBoundingClientRect();
-          if (kr.width < 4 || kr.height < 4) continue;                     // 不可见的层不构成遮挡
-          if (cx < kr.left || cx > kr.right || cy < kr.top || cy > kr.bottom) continue;
-          if (getComputedStyle(el).pointerEvents === "none") { coverLock = true; return; }
+        hit = document.elementFromPoint(cx, cy);
+        chain = (document.elementsFromPoint(cx, cy) || []).slice(0, 8).map(elDesc);
+        bodyPE = getComputedStyle(document.body).pointerEvents;
+      } catch (e) { }
+      var kids = [];
+      try {
+        var cs = document.body.children;
+        for (var i = 0; i < cs.length; i++) {
+          var el = cs[i], kr = el.getBoundingClientRect(), st = getComputedStyle(el);
+          kids.push({
+            el: elDesc(el),
+            rect: [Math.round(kr.left), Math.round(kr.top), Math.round(kr.width), Math.round(kr.height)],
+            pe: st.pointerEvents, op: st.opacity, vis: st.visibility, disp: st.display,
+            covers: (kr.width >= 4 && kr.height >= 4 && cx >= kr.left && cx <= kr.right && cy >= kr.top && cy <= kr.bottom) ? 1 : 0,
+          });
         }
       } catch (e) { }
+      FATAL.hidden = {
+        time: new Date().toISOString(),
+        ghost: inGhostSubtree(composer),
+        bodyPE: bodyPE,
+        hit: elDesc(hit),
+        chain: chain,
+        composerCenter: [Math.round(cx), Math.round(cy)],
+        composerRect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
+        bodyKids: kids,
+      };
+    }
+    /* 分屏现场诊断（v61）：转储全部可见 textarea 的祖先链（含 data-* 属性）、全页
+     * iframe 的矩形与 src、pane/layout 相关 localStorage 键——用于确认"pane → 工作区/
+     * 会话"能否从 DOM 映射（多实例状态条的数据源设计依据）。随 mount 诊断每 5s 刷新。 */
+    function diagPanes() {
+      try {
+        var composers = [];
+        document.querySelectorAll(COMPOSER_SEL + ",textarea").forEach(function (ta) {
+          if (!visible(ta)) return;
+          var r = ta.getBoundingClientRect();
+          if (r.top < innerHeight * 0.4) return;
+          var sess = null, pane = null, tag = elDesc(ta);
+          for (var p = ta; p && p !== document.body; p = p.parentElement) {
+            if (sess === null && p.hasAttribute && p.hasAttribute("data-session-id")) sess = p.getAttribute("data-session-id");
+            if (pane === null && p.hasAttribute && p.hasAttribute("data-pane-id")) pane = p.getAttribute("data-pane-id");
+          }
+          composers.push({ tag: tag, rect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)], pane: pane, sess: sess });
+        });
+        var webviews = [];
+        document.querySelectorAll("webview,iframe").forEach(function (fr) {
+          var r = fr.getBoundingClientRect();
+          webviews.push({ tag: fr.tagName, rect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)], src: String(fr.src || "").slice(0, 130) });
+        });
+        var attrHits = [];
+        document.querySelectorAll("[data-session],[data-session-id],[data-workspace],[data-workspace-path],[data-pane],[data-pane-id],[data-task-id]").forEach(function (el) {
+          var parts = [el.tagName];
+          for (var i = 0; i < el.attributes.length; i++) {
+            var a = el.attributes[i];
+            if (/^data-(session|workspace|pane|task)/i.test(a.name)) parts.push(a.name + "=" + String(a.value).slice(0, 60));
+          }
+          attrHits.push(parts.join(" "));
+        });
+        var lsPane = [];
+        try {
+          Object.keys(localStorage).forEach(function (k) {
+            if (/pane|split|layout|last-session/i.test(k)) lsPane.push(k + " = " + String(localStorage.getItem(k)).slice(0, 160));
+          });
+        } catch (e) { }
+        FATAL.panes = { time: new Date().toISOString(), composers: composers, webviews: webviews.slice(0, 10), attrHits: attrHits.slice(0, 30), lsPane: lsPane.slice(0, 20) };
+      } catch (e) { FATAL.panes = { err: String((e && e.stack) || e) }; }
     }
 
     function track() {
@@ -1214,9 +1412,10 @@
         if (cardCache && cardCache.style.marginBottom !== CARD_MARGIN) ensureCardPad();   // 流式期间 React 重置内联边距时立刻补回
         var r = composer.getBoundingClientRect();
         var on = r.width > 60 && r.height > 14 && r.bottom > 0 && r.top < innerHeight &&
-          !coverLock &&   // 滚动锁定穿透（设置页/模态开着）时命中结果不可信，直接判被盖（v59）
+          !inGhostSubtree(composer) &&   // 设置页等幽灵壳（opacity-0/inert）：视觉已隐藏（v61）
           (reallyVisible(composer, true) || coverOK(composer));
         if (!on) {
+          if (slot === 0) diagHidden(r);   // 隐藏现场周期转储（v61，节流 4s；仅 0 号实例写，槽位共享）
           // 迟滞：连续 400ms 判定不可见才隐藏，瞬时失败（流式装饰层等）不闪
           if (!hideSince) hideSince = Date.now();
           if (Date.now() - hideSince > 400) { hideBar(); }
@@ -1239,12 +1438,13 @@
         var maxW = Math.max(60, Math.round(ar.width - 24));
         if (bar.style.maxWidth !== maxW + "px") bar.style.maxWidth = maxW + "px";
         everMounted = true;
-        if (Date.now() - lastMountDiagAt > 5000) {
+        if (slot === 0 && Date.now() - lastMountDiagAt > 5000) {
           lastMountDiagAt = Date.now();
           var br = bar.getBoundingClientRect(), bh = null;
           try { bh = document.elementFromPoint(br.left + br.width / 2, br.top + br.height / 2); } catch (e) { }
           FATAL.mount = {
-            version: VERSION, mode: "below-card",
+            version: VERSION, mode: "below-card", bodyPE: (function () { try { return getComputedStyle(document.body).pointerEvents; } catch (e) { return ""; } })(),
+            panes: diagPanes(),
             theme: themeDark ? "dark" : "light",
             tip: (function () { return { stats: tipStats, disp: tip.style.display, barRect: (function () { var b = bar.getBoundingClientRect(); return [Math.round(b.left), Math.round(b.top), Math.round(b.width), Math.round(b.height)]; })() }; })(),
             composerRect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
@@ -1253,9 +1453,9 @@
             /* 条中心命中元素：若被应用层盖住（z 序问题）此处直接暴露 */
             barHit: bh ? bh.tagName + "." + String(bh.className).slice(0, 40) : String(bh),
             bottomGap: Math.round(innerHeight - ar.bottom),
-            nativeCtx: state.nativeCtx,
+            nativeCtx: nativeCtxVal,
             picked: pickedSid,
-            exc: state.excActive ? (state.excGone ? "on-gone" : "on") : 0,
+            exc: excOn ? (excGone ? "on-gone" : "on") : 0,
             href: String(location.href).slice(0, 120),
             lsVals: (function () {
               try {
@@ -1297,6 +1497,22 @@
     requestAnimationFrame(track);
 
     syncPanel();
-    render({ session: {}, last_turn: {}, today: {}, context_window: 0 });
+    if (state.data) render(state.data);   // 已有共享数据（后 spawn 的实例）直接渲染，不用零值覆盖
+    else render({ session: {}, last_turn: {}, today: {}, context_window: 0 });
+
+    var api = {
+      pid: pid, slot: slot,
+      attach: function (el, sid) {   // 协调器派发：pane 最靠下的可见输入框 + 其 data-session-id
+        wantedEl = el;
+        pendingSid = sid || "";
+        heavy();   // 立即对账（composer 重建/pane 关闭的最快收敛路径）
+      },
+      render: render,
+      rebuild: function () { buildPanel(); rebuildExcBubble(); syncPanel(); },
+      getSid: function () { return pickedSid || ""; },
+    };
+    instances.push(api);
+    refreshWants();
+    return api;
   }
 })();

@@ -156,7 +156,7 @@ function handlePayload(payload) {
             try {
               const obj = JSON.parse(s);
               obj.pump = {
-                version: 8,
+                version: 10,
                 resident: !!pyRes,
                 activeMap: Array.from(activeSid.entries()).slice(0, 12),
                 wants: lastWants,
@@ -293,17 +293,20 @@ function maybeSpawn() {
    * mine 模式下 WantSid 已非主数据源，省掉活跃期每 1.5s × N 窗口的页面求值。 */
   const wcs = webContents.getAllWebContents().filter((wc) => isMainWindowState(wc) && !wc.isDestroyed());
   if (!wcs.length) return;
-  const needsFallback = wcs.some((wc) => !activeSid.has(wc.id));
   const withTimeout = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r(""), ms))]);
-  Promise.all(needsFallback
-    ? wcs.map((wc) => withTimeout(wc.executeJavaScript("(window.__zusageWantSid||'')", true).catch(() => ""), 1000))
-    : wcs.map(() => ""))
+  /* 各窗口的 pane 会话 id（v10，__zusageWantSids 数组，分屏多实例状态条用）+ 旧单值兜底。
+   * v8 曾在 mine 模式跳过页面求值；分屏后每 pane 有自己的会话，必须读回数组才能全部纳入快照。 */
+  const readWantsJs = "(function(){var a=window.__zusageWantSids;if(!a||!a.length){a=window.__zusageWantSid?[window.__zusageWantSid]:[]}return JSON.stringify(a)})()";
+  Promise.all(wcs.map((wc) => withTimeout(wc.executeJavaScript(readWantsJs, true).catch(() => "[]"), 1000)))
     .then((vals) => {
-      /* 汇总全部窗口的会话（去重）：每个窗口都要能在共享快照里找到自己的会话 */
+      /* 汇总全部窗口的全部 pane 会话（去重）：mine（窗口焦点会话）优先，pane 会话随后 */
       const wants = [];
+      const push = (sid) => { if (sid && /^[A-Za-z0-9_-]{1,80}$/.test(sid) && !wants.includes(sid)) wants.push(sid); };
       wcs.forEach((wc, i) => {
-        const sid = activeSid.has(wc.id) ? (activeSid.get(wc.id) || "") : (vals[i] || "");
-        if (sid && !wants.includes(sid)) wants.push(sid);
+        if (activeSid.has(wc.id)) push(activeSid.get(wc.id) || "");
+        let arr = [];
+        try { arr = JSON.parse(vals[i] || "[]"); } catch (e) { }
+        if (Array.isArray(arr)) arr.forEach(push);
       });
       const key = wants.join(",");
       /* v9：聚焦 SSH 远程会话时本地 db 不写入（st 恒定），短路径放行、改按 remote 轮询间隔 */
@@ -382,4 +385,4 @@ const hook = (wc) => {
 app.on("web-contents-created", (e, wc) => hook(wc));
 for (const wc of webContents.getAllWebContents()) hook(wc);
 
-LOG("injected v9, resident query mode + remote SSH datasource (per-window active session via IPC, fs.watch db dir, remote poll_ms while remote session focused, zusage serve + one-shot fallback, activity_min_ms/heartbeat_ms, query timeout 15s)");
+LOG("injected v10 (per-pane wants array), resident query mode + remote SSH datasource (per-window active session via IPC, fs.watch db dir, remote poll_ms while remote session focused, zusage serve + one-shot fallback, activity_min_ms/heartbeat_ms, query timeout 15s)");
