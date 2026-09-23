@@ -1206,17 +1206,19 @@
     }
     /* 读原生 UI 的上下文总量（输入框工具行按钮的文本/aria-label，如"…总量 1,000,000"）。
      * 服务端下发、自动跟随模型，优先级高于 catalog 查表和 config fallback。 */
-    var nativeCtx = { val: 0, at: 0 };
+    var nativeCtx = { val: 0, at: 0, card: null };
     function readNativeCtx(card) {
-      if (Date.now() - nativeCtx.at < 5000) return nativeCtx.val;
+      if (card === nativeCtx.card && Date.now() - nativeCtx.at < 5000) return nativeCtx.val;
       nativeCtx.at = Date.now();
+      nativeCtx.card = card;
+      nativeCtx.val = 0;
       var els = card.querySelectorAll("button, [aria-label], [title]");
       for (var i = 0; i < els.length; i++) {
         var el = els[i];
         var t = el.getAttribute("aria-label") || el.getAttribute("title") || el.textContent || "";
         var m = t.match(/总量\s*([\d,，]+)/);
         if (m) {
-          nativeCtx.val = parseInt(m[1].replace(/[,,]/g, ""), 10);
+          nativeCtx.val = parseInt(m[1].replace(/[,，]/g, ""), 10) || 0;
           return nativeCtx.val;
         }
       }
@@ -1229,6 +1231,8 @@
 
     function setComposer(el) {
       releasePads();   // 旧卡片的让位边距先还原，新卡片马上重新加
+      nativeCtx = { val: 0, at: 0, card: null };
+      nativeCtxVal = 0;
       composer = el;
       cardCache = null;
       if (composer) {
@@ -1239,6 +1243,8 @@
     }
     function heavy() {
       if (stale()) return;
+      var previousCtx = nativeCtxVal;
+      var contextChanged = false;
       if (pid === "auto") {
         /* 兜底模式（主文档找不到带 pane 标记的输入框，shadow/iframe 场景）：沿用原
          * 单条查找链路（findComposer 含 deepFind 穿透），会话判定走 mine/pickCurrent */
@@ -1255,7 +1261,9 @@
         }
         if (pendingSid !== instSid) {   // pane 切换了会话：立即按缓存 payload 重渲染
           instSid = pendingSid;
-          if (state.data) render(state.data);
+          nativeCtx = { val: 0, at: 0, card: null };
+          nativeCtxVal = 0;
+          contextChanged = true;
         }
       }
       if (!composer && slot === 0) collectDiag();   // 一直找不到输入框的窗口：周期性写环境诊断（everMounted 门防覆盖）
@@ -1266,7 +1274,9 @@
         }
         if (cardCache) {
           ensureCardPad();   // React 重渲染可能重建卡片/重置内联边距，对比后再补
-          nativeCtxVal = readNativeCtx(cardCache);
+          var nextCtx = readNativeCtx(cardCache);
+          contextChanged = contextChanged || nextCtx !== nativeCtxVal;
+          nativeCtxVal = nextCtx;
         }
       }
       if (state.data && pid === "auto") {
@@ -1277,8 +1287,9 @@
           var pc = pickCurrent(state.data);
           pSid = pc ? (pc.sess ? pc.sess.sid : pc.want) : "";
         }
-        if (pSid !== pickedSid) render(state.data);   // 切换了会话：立即按缓存 payload 重渲染
+        if (pSid !== pickedSid) contextChanged = true;
       }
+      if (state.data && (contextChanged || previousCtx !== nativeCtxVal)) render(state.data);
     }
     function hideBar() {
       if (curDisplay !== "none") { bar.style.display = "none"; curDisplay = "none"; }

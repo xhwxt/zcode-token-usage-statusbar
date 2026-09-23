@@ -78,6 +78,21 @@ def L(zh, en):
     return en if _LANG == "en" else zh
 
 
+class UsageArgumentError(ValueError):
+    """Invalid user-supplied CLI or MCP argument."""
+
+
+def positive_int(value, label):
+    """查询范围和刷新间隔必须是正整数。"""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = 0
+    if number <= 0:
+        raise UsageArgumentError(L(f"{label} 必须是正整数", f"{label} must be a positive integer"))
+    return number
+
+
 def fmt(n):
     n = n or 0
     if n >= 1_000_000_000:
@@ -148,7 +163,7 @@ def range_usage(con, start_ms, end_ms):
                   coalesce(sum(cache_read_input_tokens),0), coalesce(sum(computed_total_tokens),0),
                   coalesce(sum(duration_ms),0), coalesce(sum(reasoning_tokens),0),
                   coalesce(sum(retry_count),0), coalesce(sum(cache_creation_input_tokens),0)
-           from model_usage where status='completed' and completed_at between ? and ?""",
+           from model_usage where status='completed' and completed_at >= ? and completed_at < ?""",
         (start_ms, end_ms),
     ).fetchone()
 
@@ -414,31 +429,62 @@ def render_workspace(con, pattern, top=15):
 
 # ---------- 机器可读快照（悬浮条数据源） ----------
 
-CATALOG_PATH = Path(r"D:\ZCode\resources\model-providers\models_catalog_china_llm_zcode_2026-06-03.json")
-
-
+_CONTEXT_CONFIG_PATHS = (Path.home() / ".zcode/v2/config.json", Path.home() / ".zcode/cli/config.json")
 _CTX_WINDOW_CACHE = {}
+_CTX_SOURCE_STAMP = None
 
 
-def lookup_context_window(model_id):
-    """按模型 id 在客户端自带模型目录里查 contextWindow；查不到返回 None。带缓存。"""
+def lookup_context_window(model_id, provider_id=None):
+    """读取本机模型配置；旧版目录按安装路径定位。缓存随配置文件变化失效。"""
+    global _CTX_SOURCE_STAMP
     want = (model_id or "").strip().lower()
     if not want:
         return None
-    if want in _CTX_WINDOW_CACHE:
-        return _CTX_WINDOW_CACHE[want]
+    sources = list(_CONTEXT_CONFIG_PATHS)
+    asar = load_config().get("asar_path")
+    if asar:
+        sources.extend(sorted((Path(asar).parent / "model-providers").glob("models_catalog*.json"), reverse=True))
+    stamp = []
+    for path in sources:
+        try:
+            stat = path.stat()
+            stamp.append((path, stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            pass
+    stamp = tuple(stamp)
+    if stamp != _CTX_SOURCE_STAMP:
+        _CTX_WINDOW_CACHE.clear()
+        _CTX_SOURCE_STAMP = stamp
+    key = (provider_id, want)
+    if key in _CTX_WINDOW_CACHE:
+        return _CTX_WINDOW_CACHE[key]
     result = None
-    try:
-        cat = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    for p in cat.get("providers", []):
-        for m in p.get("models", []):
-            if str(m.get("id", "")).lower() == want:
-                cw = m.get("contextWindow")
-                result = int(cw) if cw else None
+    for path, _, _ in stamp:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            hits = set()
+            if "provider" in data:
+                for pid, provider in data["provider"].items():
+                    if provider_id is not None and pid != provider_id:
+                        continue
+                    for mid, model in provider.get("models", {}).items():
+                        if mid.lower() == want:
+                            value = int(model.get("limit", {}).get("context") or 0)
+                            if value > 0:
+                                hits.add(value)
+            else:
+                for provider in data.get("providers", []):
+                    for model in provider.get("models", []):
+                        if str(model.get("id", "")).lower() == want:
+                            value = int(model.get("contextWindow") or 0)
+                            if value > 0:
+                                hits.add(value)
+            if hits:
+                result = next(iter(hits)) if len(hits) == 1 else None
                 break
-    _CTX_WINDOW_CACHE[want] = result
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+    _CTX_WINDOW_CACHE[key] = result
     return result
 
 
@@ -507,14 +553,23 @@ def _sub_agent_tasks(con, sid):
 
 def render_session_detail(con, prefix):
     """session:<id前缀>：会话总量 + 按模型 + 子代理明细（任务名与状态条"子智能体目录"同源）。"""
-    rows = con.execute("select id from session where id like ?", (prefix + "%",)).fetchall()
+    prefix = prefix.strip()
+    if not prefix:
+        raise UsageArgumentError(L("请提供会话 id 前缀", "Please provide a session ID prefix"))
+    pattern = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    rows = con.execute("select id from session where id=?", (prefix,)).fetchall()
+    if not rows:
+        rows = con.execute("select id from session where id like ? escape '\\' limit 2", (pattern,)).fetchall()
     if not rows:
         rows = con.execute(
-            "select distinct session_id from model_usage where session_id like ?",
-            (prefix + "%",)).fetchall()
+            "select distinct session_id from model_usage where session_id like ? escape '\\' limit 2",
+            (pattern,)).fetchall()
     if not rows:
         return L(f"未找到 id 前缀为 {prefix!r} 的会话",
                  f"No session found with id prefix {prefix!r}")
+    if len(rows) > 1:
+        raise UsageArgumentError(L("会话前缀匹配到多个结果，请提供更长的前缀或完整 id",
+                                   "Session prefix matches multiple sessions; provide a longer prefix or full ID"))
     sid = rows[0][0]
     sess = con.execute("select * from session where id=?", (sid,)).fetchone()
     u = session_usage(con, sid)
@@ -615,7 +670,7 @@ def _session_snapshot(con, sid, cfg):
     u = session_usage(con, sid)
     last = con.execute(
         """select duration_ms, coalesce(time_to_first_token_ms,0), completed_at, turn_id, model_id,
-                  output_tokens, first_token_at
+                  output_tokens, first_token_at, provider_id
            from model_usage where session_id=? and status='completed'
            order by completed_at desc limit 1""",
         (sid,),
@@ -655,7 +710,7 @@ def _session_snapshot(con, sid, cfg):
                   "cache_write": r[7], "total": r[3], "duration_ms": r[4], "ttft_ms": 0}
     lr = con.execute("select max(completed_at) from model_usage where session_id=?", (sid,)).fetchone()
     active = bool(lr and lr[0] and int(time.time() * 1000) - lr[0] < SESSION_TIMEOUT_MS)
-    ctx_auto = lookup_context_window(last["model_id"]) if last else None
+    ctx_auto = lookup_context_window(last["model_id"], last["provider_id"]) if last else None
     # 生成速度：输出 token ÷ 生成耗时（首 token 之后到完成；无 first_token_at 时退化为总耗时）
     tps = 0
     if last and last["output_tokens"]:
@@ -1027,17 +1082,17 @@ def main(argv):
     elif cmd == "today":
         print(render_today(con))
     elif cmd == "days":
-        print(render_days(con, int(argv[1]) if len(argv) > 1 else 7))
+        print(render_days(con, positive_int(argv[1], "days") if len(argv) > 1 else 7))
     elif cmd == "sessions":
-        print(render_sessions(con, int(argv[1]) if len(argv) > 1 else 10))
+        print(render_sessions(con, positive_int(argv[1], "sessions") if len(argv) > 1 else 10))
     elif cmd == "models":
-        print(render_models(con, int(argv[1]) if len(argv) > 1 else 7))
+        print(render_models(con, positive_int(argv[1], "models") if len(argv) > 1 else 7))
     elif cmd == "workspace":
         print(render_workspace(con, argv[1] if len(argv) > 1 else ""))
     elif cmd == "session":
         print(render_session_detail(con, argv[1] if len(argv) > 1 else ""))
     elif cmd == "watch":
-        sec = int(argv[1]) if len(argv) > 1 else 5
+        sec = positive_int(argv[1], "watch") if len(argv) > 1 else 5
         while True:
             print("\x1b[2J\x1b[H", end="")
             print(render_current(con), flush=True)
@@ -1059,4 +1114,8 @@ def render_today(con):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    try:
+        main(sys.argv[1:])
+    except UsageArgumentError as e:
+        print(e, file=sys.stderr)
+        sys.exit(2)
