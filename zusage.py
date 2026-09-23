@@ -78,6 +78,21 @@ def L(zh, en):
     return en if _LANG == "en" else zh
 
 
+class UsageArgumentError(ValueError):
+    """Invalid user-supplied CLI or MCP argument."""
+
+
+def positive_int(value, label):
+    """查询范围和刷新间隔必须是正整数。"""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = 0
+    if number <= 0:
+        raise UsageArgumentError(L(f"{label} 必须是正整数", f"{label} must be a positive integer"))
+    return number
+
+
 def fmt(n):
     n = n or 0
     if n >= 1_000_000_000:
@@ -507,6 +522,9 @@ def _sub_agent_tasks(con, sid):
 
 def render_session_detail(con, prefix):
     """session:<id前缀>：会话总量 + 按模型 + 子代理明细（任务名与状态条"子智能体目录"同源）。"""
+    prefix = prefix.strip()
+    if not prefix:
+        raise UsageArgumentError(L("请提供会话 id 前缀", "Please provide a session ID prefix"))
     rows = con.execute("select id from session where id like ?", (prefix + "%",)).fetchall()
     if not rows:
         rows = con.execute(
@@ -1027,17 +1045,17 @@ def main(argv):
     elif cmd == "today":
         print(render_today(con))
     elif cmd == "days":
-        print(render_days(con, int(argv[1]) if len(argv) > 1 else 7))
+        print(render_days(con, positive_int(argv[1], "days") if len(argv) > 1 else 7))
     elif cmd == "sessions":
-        print(render_sessions(con, int(argv[1]) if len(argv) > 1 else 10))
+        print(render_sessions(con, positive_int(argv[1], "sessions") if len(argv) > 1 else 10))
     elif cmd == "models":
-        print(render_models(con, int(argv[1]) if len(argv) > 1 else 7))
+        print(render_models(con, positive_int(argv[1], "models") if len(argv) > 1 else 7))
     elif cmd == "workspace":
         print(render_workspace(con, argv[1] if len(argv) > 1 else ""))
     elif cmd == "session":
         print(render_session_detail(con, argv[1] if len(argv) > 1 else ""))
     elif cmd == "watch":
-        sec = int(argv[1]) if len(argv) > 1 else 5
+        sec = positive_int(argv[1], "watch") if len(argv) > 1 else 5
         while True:
             print("\x1b[2J\x1b[H", end="")
             print(render_current(con), flush=True)
@@ -1059,4 +1077,8 @@ def render_today(con):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    try:
+        main(sys.argv[1:])
+    except UsageArgumentError as e:
+        print(e, file=sys.stderr)
+        sys.exit(2)

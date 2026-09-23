@@ -24,14 +24,14 @@ def tool_token_usage(scope: str = "current") -> str:
         if scope == "today":
             return zusage.render_today(con)
         if scope.startswith("days:"):
-            return zusage.render_days(con, int(scope.split(":", 1)[1]))
+            return zusage.render_days(con, zusage.positive_int(scope.split(":", 1)[1], "days"))
         if scope == "week":
             return zusage.render_days(con, 7)
         if scope.startswith("sessions"):
-            n = int(scope.split(":", 1)[1]) if ":" in scope else 10
+            n = zusage.positive_int(scope.split(":", 1)[1], "sessions") if ":" in scope else 10
             return zusage.render_sessions(con, n)
         if scope.startswith("models"):
-            d = int(scope.split(":", 1)[1]) if ":" in scope else 7
+            d = zusage.positive_int(scope.split(":", 1)[1], "models") if ":" in scope else 7
             return zusage.render_models(con, d)
         if scope.startswith("session:"):
             return zusage.render_session_detail(con, scope.split(":", 1)[1].strip())
@@ -99,6 +99,11 @@ def main():
             reply(req_id, {"tools": TOOLS})
         elif method == "tools/call":
             params = msg.get("params", {})
+            if params.get("name") != "token_usage":
+                print(json.dumps({"jsonrpc": "2.0", "id": req_id,
+                                  "error": {"code": -32602,
+                                            "message": f"unknown tool: {params.get('name')!r}"}}), flush=True)
+                continue
             args = params.get("arguments") or {}
             try:
                 text = tool_token_usage(**args)
