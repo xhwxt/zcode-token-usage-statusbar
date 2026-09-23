@@ -2,7 +2,7 @@
 """ZCode token 用量 MCP server（stdio, 零依赖；注册名 zcode-token-usage-statusbar）。
 
 提供工具 token_usage(scope)：current(默认)/today/days:N/sessions[:N]/models[:days]/session:<id前缀>/workspace:<目录关键词>。
-协议仅实现 initialize / tools/list / tools/call；调试信息只走 stderr。
+协议实现 initialize / ping / tools/list / tools/call；调试信息只走 stderr。
 """
 import json
 import sys
@@ -17,6 +17,14 @@ L = zusage.L   # 输出语言与 CLI 同源（config.json 的 "lang"）
 
 
 def tool_token_usage(scope: str = "current") -> str:
+    if not isinstance(scope, str):
+        raise zusage.UsageArgumentError(L("scope 必须是字符串", "scope must be a string"))
+    scope = scope.strip()
+    if scope not in ("current", "now", "today", "week", "sessions", "models") and not scope.startswith(
+            ("days:", "sessions:", "models:", "session:", "workspace:")):
+        choices = "current | today | week | days:N | sessions[:N] | models[:days] | session:<id> | workspace:<keyword>"
+        raise zusage.UsageArgumentError(L(f"未知 scope: {scope!r}。可用: {choices}",
+                                         f"Unknown scope: {scope!r}. Available: {choices}"))
     con = zusage.connect()
     try:
         if scope in ("current", "now"):
@@ -27,18 +35,16 @@ def tool_token_usage(scope: str = "current") -> str:
             return zusage.render_days(con, zusage.positive_int(scope.split(":", 1)[1], "days"))
         if scope == "week":
             return zusage.render_days(con, 7)
-        if scope.startswith("sessions"):
+        if scope == "sessions" or scope.startswith("sessions:"):
             n = zusage.positive_int(scope.split(":", 1)[1], "sessions") if ":" in scope else 10
             return zusage.render_sessions(con, n)
-        if scope.startswith("models"):
+        if scope == "models" or scope.startswith("models:"):
             d = zusage.positive_int(scope.split(":", 1)[1], "models") if ":" in scope else 7
             return zusage.render_models(con, d)
         if scope.startswith("session:"):
             return zusage.render_session_detail(con, scope.split(":", 1)[1].strip())
         if scope.startswith("workspace:"):
             return zusage.render_workspace(con, scope.split(":", 1)[1].strip())
-        return L(f"未知 scope: {scope!r}。可用: current | today | week | days:N | sessions[:N] | models[:days] | session:<id前缀> | workspace:<目录关键词>",
-                 f"Unknown scope: {scope!r}. Available: current | today | week | days:N | sessions[:N] | models[:days] | session:<id prefix> | workspace:<dir keyword>")
     finally:
         con.close()
 
@@ -73,6 +79,11 @@ def reply(req_id, result):
     print(json.dumps({"jsonrpc": "2.0", "id": req_id, "result": result}), flush=True)
 
 
+def error_reply(req_id, code, message):
+    print(json.dumps({"jsonrpc": "2.0", "id": req_id,
+                      "error": {"code": code, "message": message}}), flush=True)
+
+
 def main():
     for raw in sys.stdin:
         raw = raw.strip()
@@ -81,14 +92,27 @@ def main():
         try:
             msg = json.loads(raw)
         except json.JSONDecodeError:
+            error_reply(None, -32700, "Parse error")
             continue
-        method = msg.get("method", "")
+        if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0" or not isinstance(msg.get("method"), str):
+            error_reply(None, -32600, "Invalid request")
+            continue
+        method = msg["method"]
         req_id = msg.get("id")
+        if "id" not in msg:  # Notifications have no response and must not run queries.
+            continue
+        if req_id is not None and (isinstance(req_id, bool) or not isinstance(req_id, (str, int))):
+            error_reply(None, -32600, "Invalid request id")
+            continue
+        params = msg.get("params", {})
+        if not isinstance(params, dict):
+            error_reply(req_id, -32602, "params must be an object")
+            continue
         if method == "initialize":
             reply(
                 req_id,
                 {
-                    "protocolVersion": msg.get("params", {}).get(
+                    "protocolVersion": params.get(
                         "protocolVersion", PROTOCOL_VERSION
                     ),
                     "capabilities": {"tools": {}},
@@ -97,14 +121,16 @@ def main():
             )
         elif method == "tools/list":
             reply(req_id, {"tools": TOOLS})
+        elif method == "ping":
+            reply(req_id, {})
         elif method == "tools/call":
-            params = msg.get("params", {})
             if params.get("name") != "token_usage":
-                print(json.dumps({"jsonrpc": "2.0", "id": req_id,
-                                  "error": {"code": -32602,
-                                            "message": f"unknown tool: {params.get('name')!r}"}}), flush=True)
+                error_reply(req_id, -32602, f"unknown tool: {params.get('name')!r}")
                 continue
-            args = params.get("arguments") or {}
+            args = params.get("arguments", {})
+            if not isinstance(args, dict) or set(args) - {"scope"}:
+                error_reply(req_id, -32602, "arguments must be an object containing only scope")
+                continue
             try:
                 text = tool_token_usage(**args)
                 reply(req_id, {"content": [{"type": "text", "text": text}], "isError": False})
@@ -116,17 +142,8 @@ def main():
                         "isError": True,
                     },
                 )
-        elif req_id is not None:
-            print(
-                json.dumps(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": req_id,
-                        "error": {"code": -32601, "message": f"unknown method {method}"},
-                    }
-                ),
-                flush=True,
-            )
+        else:
+            error_reply(req_id, -32601, f"unknown method {method}")
 
 
 if __name__ == "__main__":

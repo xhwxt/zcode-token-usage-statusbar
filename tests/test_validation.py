@@ -51,7 +51,7 @@ class UsageValidationTests(unittest.TestCase):
         requests = [
             {"jsonrpc": "2.0", "id": index, "method": "tools/call",
              "params": {"name": "token_usage", "arguments": {"scope": scope}}}
-            for index, scope in enumerate(("days:abc", "sessions:0", "models:-3", "session:"), 1)
+            for index, scope in enumerate(("days:abc", "sessions:0", "models:-3", "session:", "nonsense", "sessions_typo:1", None, []), 1)
         ]
         output = io.StringIO()
         connection = Mock()
@@ -63,6 +63,30 @@ class UsageValidationTests(unittest.TestCase):
         self.assertEqual(len(results), len(requests))
         self.assertTrue(all(result["result"]["isError"] for result in results))
         connection.execute.assert_not_called()
+
+
+    def test_mcp_recovers_after_malformed_requests(self):
+        malformed = [None, [], {"jsonrpc": "2.0", "id": 1},
+                     {"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": None},
+                     {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                      "params": {"name": "token_usage", "arguments": []}}]
+        raw = "bad json\n" + "\n".join(map(json.dumps, malformed))
+        raw += '\n{"jsonrpc":"2.0","method":"notifications/initialized"}'
+        raw += '\n{"jsonrpc":"2.0","id":9,"method":"tools/list"}\n'
+        output = io.StringIO()
+        with patch.object(sys, "stdin", io.StringIO(raw)), patch.object(sys, "stdout", output):
+            usage_mcp.main()
+        results = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual([r["error"]["code"] for r in results[:-1]],
+                         [-32700, -32600, -32600, -32600, -32602, -32602])
+        self.assertEqual(results[-1]["result"]["tools"][0]["name"], "token_usage")
+
+    def test_unknown_scope_does_not_open_database(self):
+        with patch.object(zusage, "connect") as connect:
+            for scope in ("oops", "sessions_typo:1", "models_typo", None, []):
+                with self.assertRaises(zusage.UsageArgumentError):
+                    usage_mcp.tool_token_usage(scope)
+            connect.assert_not_called()
 
 
 if __name__ == "__main__":
