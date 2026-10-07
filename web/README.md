@@ -5,6 +5,11 @@ direct web UI shipped by the ZCode server and the official remote-control page.
 
 English | [简体中文](README.zh-CN.md)
 
+> ⚠️ **This is the WEB edition, not the desktop one.**
+> **Do not run `install.py` from the repository root** — that script looks for an Electron
+> client's `app.asar`; on a server it does nothing at all (and does not error either).
+> For the desktop edition, go back to the [root README](../README.md).
+
 > The Electron desktop edition lives at the repository root (`install.py`).
 > This is the **web edition**: same data pipeline (the same `zusage.py`),
 > completely different injection route.

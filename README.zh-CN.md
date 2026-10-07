@@ -6,8 +6,20 @@
 
 平台：Windows、macOS ｜ 许可：[MIT](LICENSE)
 
-> **自托管部署的网页版**：同一套数据、同一个 `zusage.py`，但走 nginx 注入 + 只读旁挂服务，
-> 直连页与远控页都能用 —— 见 [`web/`](web/README.zh-CN.md)。桌面版与网页版互不依赖，可分别安装。
+## 先选版本：你是哪一种用户？
+
+本仓库有**两个互不依赖的版本**，装错了不会报错，只会「什么都没发生」——所以先对一下：
+
+| 你的情况 | 装哪个 | 入口 | 装法 |
+|---|---|---|---|
+| 用 **ZCode 桌面客户端**（Windows / macOS 的 Electron 应用） | **桌面版** | `install.py` | 根目录 `python install.py` |
+| 用**自托管 ZCode 的网页**（自己跑的 server + nginx，浏览器/手机访问） | **网页版** | [`web/`](web/README.zh-CN.md) | 见 web/ 的 README，**不要**跑 `install.py` |
+| 两个都用 | 两个都装 | — | 互不干扰，可共存 |
+
+**一句话判断**：你打开 ZCode 是用一个**装好的应用程序**，还是在**浏览器里输网址**？
+
+- 桌面版往 `app.asar` 注入一行 loader，**只对 Electron 客户端有效**；在服务器上跑它不会有任何效果。
+- 网页版靠 nginx 注入 + 一个只读旁挂服务，**只对你自己伺服的网页有效**；官方云端的页面没有注入点。
 
 > 文档与界面统一使用中文名「ZCode Token 用量状态栏」；仓库与 MCP 注册名为 `zcode-token-usage-statusbar`（全称的英文写法），代码内部标识符为 `zusage`。
 
@@ -110,7 +122,11 @@ ZCode 的插件机制（`plugin.json`）只能提供 MCP / skills / commands / h
 
 **数据目录 `~/.zcode/zcode-token-usage-statusbar/`** 是标准安装的运行目录：运行时副本（`inject-main.cjs`/`overlay.js`/`zusage.py`/`usage_mcp.py`）、`config.json`、诊断产物 `diag-<n>.json`（每窗口一份，主进程定期回写）都在这里。本仓库只是源码，**clone 目录可以随意搬走或删除，不影响已安装的实例**。
 
-## 安装
+## 安装（桌面版）
+
+> ⚠️ **这一节是桌面版（Windows / macOS 客户端）。** 如果你要装的是自托管网页版，
+> 请看 [`web/README.zh-CN.md`](web/README.zh-CN.md) —— 在服务器上跑下面的 `install.py` **不会有效果**，
+> 它找的是 Electron 客户端的 `app.asar`。
 
 前提：Windows 或 macOS；Python 3.8+（零第三方依赖）；fuses `EmbeddedAsarIntegrityValidation=0`（ZCode 当前版本实测为 0）。
 

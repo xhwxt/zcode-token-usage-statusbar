@@ -32,13 +32,18 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.ZUSAGE_PORT || 3033);
 const HOST = process.env.ZUSAGE_HOST || '127.0.0.1';
 /** 与 ZCode server 同一个 token（zcode-web.service 的 ZCODE_SERVER_TOKEN）。
- *  优先取进程环境；没有则读 token 文件（默认 /opt/zcode-data/.zcode-token，权限 600，
- *  是 ZCode 自己已有的那份）——这样 systemd unit 里不必再抄一份密钥。 */
+ *  优先取进程环境；没有则读数据目录下的 .zcode-token（ZCode 自己已有的那份，权限 600）
+ *  ——这样 systemd unit 里不必再抄一份密钥。 */
+/** ZCode 数据目录：优先用 ZCode 自己的环境变量派生，避免把部署路径写死。
+ *  ZCODE_DATA_BASE_DIR 是 ZCode server 自己就在用的变量（zcode-web.service 里设的那个）。 */
+const DATA_DIR =
+  (process.env.ZCODE_DATA_BASE_DIR || process.env.ZUSAGE_DATA_DIR || '/opt/zcode-data').trim();
+
 const TOKEN = resolveToken();
 function resolveToken() {
   const env = (process.env.ZCODE_SERVER_TOKEN || process.env.ZUSAGE_TOKEN || '').trim();
   if (env) return env;
-  const file = process.env.ZUSAGE_TOKEN_FILE || '/opt/zcode-data/.zcode-token';
+  const file = process.env.ZUSAGE_TOKEN_FILE || join(DATA_DIR, '.zcode-token');
   try {
     return readFileSync(file, 'utf8').trim();
   } catch {
@@ -57,9 +62,10 @@ function resolvePluginDir() {
 }
 const PY = process.env.ZUSAGE_PYTHON || 'python3';
 /** ZCode 的模型目录：contextWindow 的唯一正确来源（不是插件兜底的 128000） */
+
 const PROVIDER_CONFIGS = (
   process.env.ZUSAGE_PROVIDER_CONFIGS ||
-  '/opt/zcode-data/.zcode/provider_config.json,/opt/zcode-data/.zcode/v2/provider_config.json'
+  [join(DATA_DIR, '.zcode/provider_config.json'), join(DATA_DIR, '.zcode/v2/provider_config.json')].join(',')
 )
   .split(',')
   .map((s) => s.trim())
@@ -329,8 +335,9 @@ async function getSnapshot(sids, mine) {
  * 为什么必须重写而不只是换 session 字段：zusage.py 的 snapshot() 顶层
  * session / last / last_turn / tools / code / ctx_exc / context_window **永远是最新会话的**
  * （`base = _session_snapshot(con, latest_sid, cfg)`，force_sids 只被插进 recent 池）。
- * 实测：sess_8bd0b118 自己最后一次请求是 duration_ms=1986/ttft 空，而顶层 last 给的是
- * 最新会话的 11574/8052 —— 只换 session 会让「速度/本轮」显示别的会话的数字。
+ * 实测（本机两个会话对照）：A 会话自己最后一次请求是 duration_ms=1986 / ttft 空，
+ * 而顶层 last 给的是 B（最新）会话的 11574 / 8052 —— 只换 session 字段，
+ * 会让「速度 / 本轮」显示成别的会话的数字。
  *
  * 插件原版 overlay 的做法（overlay.js:665-694）就是：一切取自池里匹配 mine 的那条，
  * 顶层字段一概不用；池里没有就用零值壳，绝不回退到别的会话。这里对齐同一语义，

@@ -86,7 +86,29 @@ Click ⚙ to toggle any bar item, override the context window size, or switch th
 - **CLI**: `python zusage.py [now|today|json|days N|sessions [N]|models [days]|workspace <dir keyword>|session <id prefix>|watch]`.
 - **/usage command** in the chat input.
 
-## Installation
+## Which edition do you want?
+
+This repository ships **two independent editions**. Installing the wrong one does not error —
+it simply does nothing — so check first:
+
+| Your setup | Edition | Entry point | How to install |
+|---|---|---|---|
+| **ZCode desktop client** (the Electron app on Windows / macOS) | **Desktop** | `install.py` | `python install.py` at the repo root |
+| **Self-hosted ZCode web** (your own server + nginx, opened in a browser or on a phone) | **Web** | [`web/`](web/README.md) | see `web/README.md` — do **not** run `install.py` |
+| Both | Both | — | they are independent and can coexist |
+
+**One-line test**: do you open ZCode as an **installed application**, or by typing a **URL in a browser**?
+
+- The desktop edition injects a loader line into `app.asar`; it only affects the Electron client.
+  Running it on a server has no effect at all.
+- The web edition uses nginx injection plus a read-only sidecar; it only affects a web UI **you
+  serve yourself**. There is no injection point on the official cloud pages.
+
+## Installation (desktop edition)
+
+> ⚠️ **This section is for the desktop edition (Windows / macOS client).** If you want the
+> self-hosted **web** edition, see [`web/README.md`](web/README.md) — running `install.py`
+> on a server does nothing, because it looks for an Electron client's `app.asar`.
 
 Requirements: Windows or macOS; Python 3.8+ (zero third-party dependencies).
 
