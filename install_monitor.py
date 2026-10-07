@@ -107,7 +107,10 @@ def draw(lines):
 def main():
     epoch = float(sys.argv[1]) if len(sys.argv) > 1 else time.time()
     if os.name == "nt":
-        os.system("title " + L("ZCode Token 用量状态栏 - 安装监控", "ZCode Token Usage Status Bar - Install Monitor"))
+        try:
+            subprocess.run(["cmd", "/c", "title", L("ZCode Token 用量状态栏 - 安装监控", "ZCode Token Usage Status Bar - Install Monitor")])
+        except OSError:
+            pass
     pids0 = zcode_pids() or set()   # 启动采集 ≈ 安装时刻的进程集合（install 完成即拉起本窗口）
     t0 = time.time()
     new_since = None
