@@ -1,0 +1,63 @@
+# ZCode Token 用量状态栏 · Web 版接入片段
+#
+# 把下面三处贴进自托管 ZCode 的 nginx server 块即可。全部是「新增」，
+# 不改动任何既有 location 的行为；回退只需删掉这三处再 reload。
+#
+# 前提：zusage-sidecar.service 已在 127.0.0.1:3033 上跑起来。
+
+# ---- ① 旁挂服务 ----
+upstream zusage_sidecar {
+    server 127.0.0.1:3033;
+    keepalive 4;
+}
+
+server {
+    listen 443 ssl;
+    server_name zcode.example.com;          # 换成你自己的域名
+
+    # ---- ② 静态脚本与快照接口 ----
+    # 三个静态脚本 + 一个快照接口。接口自己校验 token：
+    # ZCode 的页面 HTML 本身不受 token 保护（只保护 /ws 与 /api/），
+    # 所以把关必须在本服务，而不是指望 ZCode。
+    location ^~ /zusage/ {
+        proxy_pass http://zusage_sidecar;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header Connection "";
+        proxy_read_timeout 30s;
+    }
+
+    # ---- ③ 往页面里注入一行脚本 ----
+    # 直连页（ZCode server）与远控页（relay）各加三行。
+    # sub_filter 要在未压缩的明文上匹配 </head>，所以先关掉上游压缩；
+    # 出站压缩仍由 nginx 的 gzip 负责，不冲突。
+    # sub_filter 默认只作用于 text/html，所以几 MB 的 JS bundle 不会被扫描。
+
+    location / {                            # 直连页
+        proxy_pass http://127.0.0.1:3030;
+        proxy_set_header Accept-Encoding "";
+        sub_filter_once on;
+        sub_filter '</head>' '<script src="/zusage/boot.js"></script></head>';
+        # …你原有的 proxy_set_header / timeout 等保持不变
+    }
+
+    location ^~ /remote/ {                  # 远控页（官方页面 + 静态资源）
+        proxy_pass http://127.0.0.1:3032;
+        proxy_set_header Accept-Encoding "";
+        sub_filter_once on;
+        sub_filter '</head>' '<script src="/zusage/boot.js"></script></head>';
+    }
+
+    location ^~ /web-remote {               # 远控页入口（视你的 relay 路由而定）
+        proxy_pass http://127.0.0.1:3032;
+        proxy_set_header Accept-Encoding "";
+        sub_filter_once on;
+        sub_filter '</head>' '<script src="/zusage/boot.js"></script></head>';
+    }
+}
+
+# 回退：
+#   1) 删掉上面三处 sub_filter → nginx -t && systemctl reload nginx，页面立即不再注入
+#   2) systemctl disable --now zusage-sidecar → 接口整体关闭
+#   3) 完全恢复：还原备份的 nginx 配置后 reload
+# 任何一步都不需要重启 ZCode 服务本身。

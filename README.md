@@ -6,6 +6,11 @@ A floating status bar for the [ZCode](https://zcode.ai) desktop client (Electron
 
 > This page is a condensed English overview. The in-depth docs in this repo are in Chinese.
 
+> **Web edition for self-hosted deployments**: same data, same `zusage.py`, but delivered via
+> nginx injection plus a read-only sidecar — works on both the direct web UI and the
+> remote-control page. See [`web/`](web/README.md). The desktop and web editions are
+> independent; install either or both.
+
 ![Status bar overview](docs/tour/shots/en/hero.png)
 
 ## Features

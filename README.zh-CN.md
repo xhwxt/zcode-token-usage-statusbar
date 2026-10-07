@@ -6,11 +6,17 @@
 
 平台：Windows、macOS ｜ 许可：[MIT](LICENSE)
 
+> **自托管部署的网页版**：同一套数据、同一个 `zusage.py`，但走 nginx 注入 + 只读旁挂服务，
+> 直连页与远控页都能用 —— 见 [`web/`](web/README.zh-CN.md)。桌面版与网页版互不依赖，可分别安装。
+
 > 文档与界面统一使用中文名「ZCode Token 用量状态栏」；仓库与 MCP 注册名为 `zcode-token-usage-statusbar`（全称的英文写法），代码内部标识符为 `zusage`。
 
 ## 为什么是注入而不是插件？
 
 ZCode 的插件机制（`plugin.json`）只能提供 MCP / skills / commands / hooks，**没有客户端 UI 能力**；状态条要画进主窗口，唯一路线是往 `app.asar` 主入口注入一行 loader。MCP 查询部分则是标准的插件级能力，一键安装会自动注册。
+
+（网页版的处境一样：插件清单只能贡献 agent/command/skill/hook/mcp 五种组件，官方
+`CONTEXT.md` 写明、协议层也是封闭枚举。区别是网页版没有 asar，所以改在 nginx 层注入。）
 
 ## 功能
 

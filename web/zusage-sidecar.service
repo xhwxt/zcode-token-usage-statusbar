@@ -1,0 +1,38 @@
+[Unit]
+# ZCode Token 用量状态栏 · Web 旁挂服务（只读）
+# 只服务自托管 ZCode 的直连页与远控页，不参与 ZCode 进程本身。
+Description=ZCode Token Usage Status Bar - web sidecar (read-only)
+After=network.target
+# 不依赖 zcode 服务：本服务只读 SQLite 文件，不与其通信；ZCode 重启期间本服务保持可用
+Wants=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/zcode-token-usage-statusbar/web
+Environment=ZUSAGE_PORT=3033
+Environment=ZUSAGE_HOST=127.0.0.1
+# zusage.py 所在目录（默认会在 ../ 与 ../zcode-token-usage-statusbar 之间自定位，通常不用设）
+# 不设则自动在 web/ 的上一级找 zusage.py（仓库内布局与并列布局都能自定位）
+#Environment=ZUSAGE_PLUGIN_DIR=/opt/zcode-token-usage-statusbar
+# token 来源：ZCode 自己那份（一行文本）。该 token 只用于给 /zusage/snapshot 把关，不写入任何文件。
+# 不设则用内置默认 /opt/zcode-data/.zcode-token；也可以直接给 ZCODE_SERVER_TOKEN 环境变量。
+#Environment=ZUSAGE_TOKEN_FILE=/path/to/zcode-data/.zcode-token
+# ZCode 的模型目录：contextWindow 的正确来源。
+# 插件内置的模型目录查表指向一个硬编码的 Windows 路径（zusage.py:417），在 Linux 上必然落空，
+# 会退到 config 默认的 128000 —— 对本机 1M 窗口的模型会把用量显示成 8 倍。这里读服务端真正的目录。
+# 不设则用内置默认（同上目录）。
+#Environment=ZUSAGE_PROVIDER_CONFIGS=/path/to/zcode-data/.zcode/provider_config.json,/path/to/zcode-data/.zcode/v2/provider_config.json
+ExecStart=/usr/bin/node /opt/zcode-token-usage-statusbar/web/zusage-sidecar.mjs
+Restart=always
+RestartSec=3
+# SQLite 通常在 /root 下（700），与 ZCode 服务同样以 root 运行
+User=root
+NoNewPrivileges=true
+ProtectSystem=full
+# 额外一道保险：即使代码有 bug 也无法写 ZCode 数据目录
+ProtectHome=read-only
+PrivateTmp=true
+ReadOnlyPaths=/opt/zcode-data /opt/zcode-token-usage-statusbar
+
+[Install]
+WantedBy=multi-user.target
