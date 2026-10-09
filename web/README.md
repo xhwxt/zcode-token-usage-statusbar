@@ -45,13 +45,15 @@ survives ZCode upgrades, because the injection lives in nginx, not in build outp
 ⚡ 127 t/s   ▬ 0.0%   🗄 94%   💬 39.1K 1t   📅 48.32M
 ```
 
-**Wide (≥768px)** — a capsule bar; hover any group for details:
+**Wide (≥768px)** — **item-for-item the same bar as the desktop client**
+(monospace 14px / glass capsule / hairline separators / 46×5 context micro-bar /
+self-tuned three-tier colors); hover a group for details, click to pin:
 
 ```
-⚡127 t/s │ ▬0.0% │ 🗄94% │ 💬39.1K 1t │ 🔧1 ✕2 │ 📅48.32M │ ⑂236.4K ● │ ⚙
+⚡127 t/s │ ▬0.0% │ ⟳67.8K 94% 5r ⇅7.5s ▮3.6s │ 💬39.1K 94% 1t 3r │ 🔧1 ✕2 │ 📅48.32M │ ⑂236.4K ● │ ⚙
 ```
 
-Both widths share one item builder but keep **separate visible-item settings**
+Narrow and wide build their items separately and keep **separate visible-item settings**
 (five items already fill a phone row; desktop has 800px+). Toggle them in the
 sheet / popover; changes apply immediately and are remembered.
 

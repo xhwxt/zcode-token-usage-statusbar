@@ -5,9 +5,11 @@
  *     ⚡ 86 t/s        ◔ 31.7%        Σ 1.45M
  *     点整条 → 底部抽屉看全量
  *
- *   宽屏 ≥768px（桌面）
- *     ⚡86 t/s │ ◔31.7% │ ⧗18.4s 1.4s │ 💬1.45M 86% 23轮 │ 🔧142 ② │ ☀3.42M │ ⑂236.4K ● │ ⚙
- *     悬停/点某一组 → 条上方弹该组明细
+ *   宽屏 ≥768px（桌面）—— 与 ZCode 桌面客户端插件条（插件仓库 overlay.js v61）同款：
+ *     ⚡86 t/s │ ▬31.7% │ ⟳67.8K 90% 7次 ⇅18.4s ▮1.4s │ 💬1.45M 90% 23轮 187次 │ 🔧142 ⓘ2 │ 📅3.42M │ ⑂236.4K ● ⚙
+ *     等宽字 14px / 玻璃胶囊 / 发丝分隔 / 46×5 上下文微条 / 三档自调色（#3ecf8e·#f5b944·#ff6b57）
+ *     悬停某一组 → 条上方浮出该组明细（弹层是条的子树，鼠标可直接移进去）
+ *     点某一组 → 钉住该明细（再点一次 / 点条外 / Esc 收起）
  *
  * 数据来自 boot.js 推送的 window.__zusageUpdate(payload)（沿用插件原版契约）。
  *
@@ -29,7 +31,8 @@
   function stale() { return MY_GEN !== window.__zusageGen; }
 
   var NARROW_Q = '(max-width: 767.5px)';   // 与 useIsNarrowViewport.ts:3 同值
-  var H_NARROW = 22, H_WIDE = 28, GAP = 4;
+  // H_WIDE = 客户端插件条实测高度（14px × 1.3 行高 + 2px 内边距 + 1px 边框 + 17px ⚙ 撑高）
+  var H_NARROW = 22, H_WIDE = 32, GAP = 4, BREATH = 4;   // BREATH：条下方到"卡片正下方内容"的最小缝
 
   /* ---------- 语言 ----------
    * 不能用 <html lang>：两个页面都是 lang="en"，但界面实际是中文（实测）。
@@ -56,7 +59,8 @@
   var SHOW_KEY = 'zusage.web.show2';
   var DEFAULT_SHOW = {
     n: { speed: 1, ctx: 1, cache: 1, session: 1, today: 1, tools: 0, sub: 0, turn: 0 },
-    w: { speed: 1, ctx: 1, cache: 1, turn: 0, session: 1, tools: 1, today: 1, sub: 1 },
+    /* 宽屏默认与客户端插件条条面一致：生成速度 / 上下文 / 本轮 / 会话累计 / 工具 / 今日 / 子代理 */
+    w: { speed: 1, ctx: 1, cache: 1, turn: 1, session: 1, tools: 1, today: 1, sub: 1 },
   };
   var show = JSON.parse(JSON.stringify(DEFAULT_SHOW));
   try {
@@ -73,25 +77,33 @@
   function persistShow() { try { localStorage.setItem(SHOW_KEY, JSON.stringify(show)); } catch (e) {} }
 
   /* ---------- 数字 ---------- */
+  /* ---------- 数字（与插件同款口径） ---------- */
   function fmt(n) {
     n = Number(n) || 0;
     if (n < 0) n = 0;
-    if (n < 1000) return String(Math.round(n));
-    if (n < 1e6) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
-    if (n < 1e9) return (n / 1e6).toFixed(2).replace(/\.?0+$/, '') + 'M';
-    return (n / 1e9).toFixed(2) + 'B';
+    if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+    if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    return String(Math.round(n));
   }
-  function secs(ms) { return ((Number(ms) || 0) / 1000).toFixed(1) + 's'; }
+  /* 客户端 sec()：无值显示 –，不显示 0.0s */
+  function secs(ms) { return ms ? ((Number(ms) || 0) / 1000).toFixed(1) + 's' : '–'; }
   function pct(used, size) {
     if (!size || size <= 0) return null;
     return Math.min(999, Math.max(0, (used / size) * 100));
   }
+  /* 客户端条面直接打印 last.tps 原值（86 而不是 86.0） */
   function tpsText(v) {
     if (v == null || !isFinite(v)) return '–';
-    return v >= 100 ? String(Math.round(v)) : v.toFixed(1);
+    var n = Number(v);
+    return Number.isInteger(n) ? String(n) : n.toFixed(1);
   }
 
-  /* ---------- 主题色（客户端语义变量 + 字面兜底） ---------- */
+  /* ---------- 主题色 ----------
+   * 窄屏沿用客户端语义变量（var + 字面兜底）；
+   * 宽屏走客户端插件条的自调三档（.zu-ok/.zu-warm/.zu-hot）——插件里刻意不用
+   * 客户端调色板变量（terminal-bright-* 是语法高亮色板，绿档在条面小字号下发白，
+   * 见插件 overlay.js 第 186-192 行注释），web 端照抄同值以保证与客户端一致。 */
   var TONE = {
     ok: 'var(--color-green-500,#3ba272)',
     warn: 'var(--color-amber-500,#d99a2b)',
@@ -101,12 +113,30 @@
     text: 'var(--color-foreground,#e8eaed)',
     bg: 'var(--color-background,#161616)',
     border: 'var(--color-border,rgba(255,255,255,.12))',
+    hover: 'var(--color-hover,rgba(255,255,255,.06))',
   };
   var FONT = '-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif';
   var MONO = 'ui-monospace,SFMono-Regular,Menlo,Consolas,"Cascadia Mono",monospace';
+  // 客户端插件条的字体栈（插件 overlay.js:167 原样）
+  var MONO_C = "Consolas,'Cascadia Mono',Menlo,'Microsoft YaHei UI','Microsoft YaHei',monospace";
 
   function speedTone(v) { return v == null ? TONE.mute : v >= 70 ? TONE.ok : v >= 40 ? TONE.warn : TONE.bad; }
-  function ctxTone(p, exc) { return exc ? TONE.bad : p == null ? TONE.mute : p >= 85 ? TONE.bad : p >= 70 ? TONE.warn : TONE.ok; }
+  /* 上下文三档：窗口 ≥100 万时同一百分比的绝对量更大 → 40/60 提前预警，其余 70/85
+   * （插件 overlay.js:526-532 同款口径）。size 缺省视为小窗口，保持窄屏原口径。 */
+  function ctxTone(p, exc, size) {
+    if (exc) return TONE.bad;
+    if (p == null) return TONE.mute;
+    var big = (Number(size) || 0) >= 1000000;
+    var hi = big ? 60 : 85, mid = big ? 40 : 70;
+    return p >= hi ? TONE.bad : p >= mid ? TONE.warn : TONE.ok;
+  }
+  /* 宽屏用类名着色（CSS 里三档值 + 浅色加深版），与客户端条同源 */
+  function speedClass(v) { return v == null ? 'zu-k' : v >= 70 ? 'zu-ok' : v >= 40 ? 'zu-warm' : 'zu-hot'; }
+  function ctxClass(p, exc, size) {
+    if (exc) return 'zu-hot';
+    var big = (Number(size) || 0) >= 1000000;
+    return p >= (big ? 60 : 85) ? 'zu-hot' : p >= (big ? 40 : 70) ? 'zu-warm' : 'zu-ok';
+  }
   function hitRate(s) {
     var denom = (s.input || 0);
     if (!denom) return null;
@@ -123,35 +153,58 @@
     '.zu-bar.n{justify-content:space-between;gap:6px;height:' + H_NARROW + 'px;cursor:pointer}',
     '.zu-bar.n .zu-g{flex:0 1 auto;min-width:0}',
     '.zu-bar.n{font-size:11px}',
-    /* 宽屏：胶囊底 + 发丝分隔 */
-    '.zu-bar.w{height:' + H_WIDE + 'px;gap:0;padding:0 8px;border-radius:9px;',
-    'background:color-mix(in srgb,' + TONE.bg + ' 78%,transparent);',
-    'border:1px solid ' + TONE.border + ';backdrop-filter:blur(8px);',
-    '-webkit-backdrop-filter:blur(8px)}',
+    /* 宽屏：与 ZCode 桌面客户端插件条同款 —— 玻璃胶囊 + 发丝分隔 + 等宽字 */
+    '.zu-bar.w{gap:2px;padding:2px 6px;border-radius:9px;',
+    'font:14px/1.3 ' + MONO_C + ';color:var(--color-foreground-subtle,#8791a3);',
+    'background:rgba(15,18,25,.86);background:color-mix(in srgb,' + TONE.bg + ' 86%,transparent);',
+    'backdrop-filter:blur(14px) saturate(1.3);-webkit-backdrop-filter:blur(14px) saturate(1.3);',
+    'border:1px solid ' + TONE.border + ';',
+    'box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 4px 14px rgba(0,0,0,.38),0 1px 3px rgba(0,0,0,.28)}',
     '.zu-g{display:inline-flex;align-items:center;gap:4px;min-width:0;white-space:nowrap;',
     'overflow:hidden;text-overflow:ellipsis}',
-    '.zu-bar.w .zu-g{padding:0 8px;height:100%;border-radius:7px;cursor:default;transition:background .12s}',
-    '.zu-bar.w .zu-g:hover,.zu-bar.w .zu-g.zu-open{background:color-mix(in srgb,' + TONE.text + ' 10%,transparent)}',
-    '.zu-bar.w .zu-g+.zu-g{box-shadow:inset 1px 0 color-mix(in srgb,' + TONE.text + ' 12%,transparent)}',
+    '.zu-bar.w .zu-g{padding:2px 6px;border-radius:6px;cursor:default;transition:background-color .12s ease-out}',
+    '.zu-bar.w .zu-g:hover,.zu-bar.w .zu-g.zu-open{background:' + TONE.hover + '}',
+    /* 发丝分隔：独立元素，不用 box-shadow，才与客户端的"条目之间的短线"一致 */
+    '.zu-sep{width:1px;height:15px;background:var(--color-border,rgba(255,255,255,.09));flex:0 0 auto;margin:0 1px}',
+    '.zu-k{color:#7e8899}',
+    '.zu-v{color:var(--color-foreground,#e9edf4);font-weight:600}',
+    '.zu-pct{font-weight:700}',
+    '.zu-ico{width:12px;height:12px;flex:0 0 auto;opacity:.85}',
+    '.zu-cbar{display:inline-block;width:46px;height:5px;border-radius:999px;',
+    'background:var(--color-hover,rgba(255,255,255,.1));overflow:hidden;flex:0 0 auto}',
+    '.zu-cbar>i{display:block;height:100%;border-radius:999px;background:currentColor;transition:width .3s}',
+    '.zu-gear{flex:0 0 auto;font-size:17px;border-radius:6px}',
+    '.zu-eb{background:color-mix(in srgb,var(--color-destructive,#ff6b57) 14%,transparent);',
+    'color:var(--color-destructive,#ff8a73);border-radius:999px;padding:0 6px;line-height:16px;',
+    'font-weight:600;display:inline-flex;align-items:center;gap:2px}',
+    '.zu-ok{color:#3ecf8e}.zu-warm{color:#f5b944}.zu-hot{color:#ff6b57}',
+    /* 浅色主题：只兜"程度差"（阴影减重）与三档加深版，其余颜色走客户端变量自动翻转 */
+    '.zu-bar.w.zu-light{box-shadow:inset 0 1px 0 rgba(255,255,255,.85),0 4px 14px rgba(15,23,42,.12),0 1px 3px rgba(15,23,42,.08)}',
+    '.zu-bar.w.zu-light .zu-ok{color:#0f9d6c}.zu-bar.w.zu-light .zu-warm{color:#b6791a}.zu-bar.w.zu-light .zu-hot{color:#d8482f}',
     '.zu-n{font-weight:600}',
     '.zu-u{opacity:.6;font-size:10.5px}',
-    '.zu-grow{flex:1 1 auto}',
     '.zu-mini{width:22px;height:2.5px;border-radius:2px;background:color-mix(in srgb,' + TONE.text + ' 16%,transparent);overflow:hidden;flex:none}',
     '.zu-mini>i{display:block;height:100%;border-radius:2px;transition:width .3s}',
     '@keyframes zu-pulse{0%,100%{opacity:1}50%{opacity:.35}}',
     '.zu-exc{animation:zu-pulse 1s ease-in-out infinite}',
-    /* 明细弹层（宽屏）：条上方 */
-    '.zu-pop{position:fixed;z-index:21;min-width:190px;max-width:340px;',
-    'background:' + TONE.bg + ';border:1px solid ' + TONE.border + ';border-radius:10px;',
-    'padding:10px 12px;font:12px/1.6 ' + FONT + ';color:' + TONE.text + ';',
-    'box-shadow:0 10px 30px rgba(0,0,0,.42);display:none}',
+    '.zu-dot{animation:zu-pulse 1.6s ease-in-out infinite;font-size:14px;line-height:1}',
+    /* 明细弹层（宽屏）：条的子元素，绝对定位在条上方 —— 鼠标从条面移进弹层不触发条的
+       mouseleave（弹层是后代节点），因此不再需要"空中走廊/宽限定时器"那套补丁。
+       注：条的 backdrop-filter 会让 fixed 后代以条为包含块，所以这里必须是 absolute。 */
+    '.zu-pop{position:absolute;left:0;bottom:calc(100% + 8px);z-index:1;min-width:190px;max-width:420px;',
+    'background:rgba(19,22,30,.97);background:color-mix(in srgb,' + TONE.bg + ' 96%,transparent);',
+    'backdrop-filter:blur(18px) saturate(1.3);-webkit-backdrop-filter:blur(18px) saturate(1.3);',
+    'border:1px solid var(--color-border,rgba(255,255,255,.09));border-radius:12px;padding:10px 14px;',
+    'font:13px/1.6 ' + MONO_C + ';color:var(--color-foreground,#c6cdd9);',
+    'box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 12px 32px rgba(0,0,0,.5),0 2px 8px rgba(0,0,0,.35);',
+    'display:none;white-space:normal;max-height:60vh;overflow:auto;scrollbar-width:thin}',
     '.zu-pop.on{display:block}',
-    '.zu-pop h5{margin:0 0 6px;font-size:11px;font-weight:600;color:' + TONE.faint + ';letter-spacing:.3px}',
+    '.zu-pop h5{margin:0 0 6px;font-size:12px;font-weight:700;letter-spacing:.06em;color:var(--color-foreground,#eef2f8)}',
     '.zu-r{display:flex;justify-content:space-between;gap:14px}',
-    '.zu-r>span:first-child{color:' + TONE.mute + '}',
+    '.zu-r>span:first-child{color:var(--color-foreground-subtle,#8791a3)}',
     '.zu-r>span:last-child{font-weight:600;font-variant-numeric:tabular-nums}',
-    '.zu-set{display:flex;align-items:center;gap:8px;padding:2px 0;cursor:pointer;user-select:none}',
-    '.zu-set input{margin:0;cursor:pointer}',
+    '.zu-set{display:flex;align-items:center;gap:8px;padding:3px 0;cursor:pointer;user-select:none}',
+    '.zu-set input{margin:0;cursor:pointer;accent-color:var(--color-brand,#57c7ff)}',
     /* 抽屉（窄屏） */
     /* 关闭态必须彻底让位：opacity:0 的 fixed 全屏层照样吃掉整页点击
        （实测：抽屉没开时连侧栏里的任务条目都点不动）。pointer-events + visibility 双保险。 */
@@ -197,8 +250,25 @@
     tool: svg('<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z"/>'),
     cal: svg('<path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/>'),
     sub: svg('<path d="M15 6a9 9 0 0 0-9 9V3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>'),
-    gear: svg('<path d="M14 17H5"/><path d="M19 7h-9"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>'),
     turn: svg('<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>'),
+  };
+
+  /* ---------- 宽屏图标：客户端插件条 ico() 原样 ----------
+   * 12px / stroke-width 1.8 / 路径逐条抄自插件 overlay.js:481-560，保证与客户端同形。 */
+  function svgC(inner) {
+    return '<svg class="zu-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" ' +
+      'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + inner + '</svg>';
+  }
+  var IC = {
+    bolt: svgC('<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>'),
+    turn: svgC('<path d="M23 4v6h-6"/><path d="M20.49 15A9 9 0 1 1 18.36 5.64L23 10"/>'),
+    swap: svgC('<path d="M6 3h12M6 21h12M8 3v3.5L12 11l4-4.5V3M8 21v-3.5L12 13l4 4.5V21"/>'),
+    bars: svgC('<path d="M5 20v-5M12 20v-9M19 20V5"/>'),
+    chat: svgC('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>'),
+    tool: svgC('<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>'),
+    warn: svgC('<circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>'),
+    cal: svgC('<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>'),
+    sub: svgC('<path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>'),
   };
 
   /* ---------- 运行状态 ---------- */
@@ -209,7 +279,9 @@
   var padKind = 0;        // 0=未标定 1=下方锚定（pad 会顶起卡片） 2=普通流（pad 只在下方腾空间）
   var padPreBottom = 0;   // 施加 pad 前的卡片底边，供下一帧标定布局类型
   var lastVh = 0, lastVw = 0;
-  var popKey = '';
+  var popKey = '', popPinned = false;
+  var hWideNow = H_WIDE;  // 宽屏条实测高度（字体/条目撑出来的，用于让位与夹取）
+  var nextGapCache = { at: 0, v: -1 };   // 卡片正下方内容的间距，缓存 300ms
 
   function isNarrow() {
     try { return window.matchMedia(NARROW_Q).matches; } catch (e) { return innerWidth <= 767.5; }
@@ -224,13 +296,23 @@
       document.body.appendChild(bar);
       bar.addEventListener('click', onBarClick);
       bar.addEventListener('mouseover', onGroupHover);
-      bar.addEventListener('mouseleave', function () { setTimeout(hidePop, 120); });
+      /* 弹层是条的后代节点：鼠标从条面移进弹层不算离开条（mouseleave 只在离开整棵子树时触发），
+         所以这里直接收起即可，不需要宽限定时器。 */
+      bar.addEventListener('mouseleave', function () { if (!popPinned) hidePop(); });
       pop = document.createElement('div');
       pop.className = 'zu-pop';
       pop.setAttribute('role', 'tooltip');
-      /* 必须挂在 body 而不是 bar 里：renderWide/renderNarrow 每次都 bar.innerHTML=…，
-         挂在 bar 内的弹层会被一起销毁（实测：悬停永远打不开）。 */
-      document.body.appendChild(pop);
+      /* 挂在条内部（而不是 body）：① 鼠标可直达，不必跨越 8px 真空带；
+         ② 条的 backdrop-filter 使其成为 fixed 后代的包含块，所以 CSS 用 absolute。 */
+      bar.appendChild(pop);
+      pop.addEventListener('click', function (e) { e.stopPropagation(); });
+      /* 钉住后的关闭路径：点条外 / Esc（否则钉住的弹层无从收起） */
+      document.addEventListener('click', function (e) {
+        if (popPinned && bar && !bar.contains(e.target)) unpinPop();
+      }, true);
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && popPinned) unpinPop();
+      }, true);
     }
     if (!sheet) {
       back = document.createElement('div');
@@ -288,10 +370,52 @@
     return last;
   }
 
+  function isOwnEl(el) {
+    try { return !!(el.closest && el.closest('[data-zusage],.zu-pop,.zu-sheet,.zu-back')); } catch (e) { return false; }
+  }
+
+  /**
+   * 卡片正下方"下一个内容块"到卡片下沿的间距（没有则返回 -1）。
+   *
+   * 为什么必须看它：让位若只按"到视口底还剩多少"算，卡片下沿到下一个兄弟内容之间的
+   * 空档就不在账上。线上实测（2026-10-09，新任务落地页）：卡片下沿到建议 chips 只隔
+   * 一个 mt-6 = 24px，而条要 36px（高 32 + 顶缝 4）→ 条压住 chips 8px。
+   * 客户端插件条是固定 24px 让位带（插件 overlay.js:1180），不存在这个问题。
+   * 做法：沿祖先链逐层看后继兄弟，取最近的一个 —— 覆盖"内容不在卡片同级 DOM"的情况
+   * （ZCode 里卡片在 FORM 内、chips 行是 FORM 的后继兄弟）。纯装饰层与自己的浮层跳过。
+   */
+  function gapToNextBelow(card) {
+    try {
+      var now = Date.now();
+      if (now - nextGapCache.at < 300) return nextGapCache.v;
+      nextGapCache.at = now;
+      var cr = card.getBoundingClientRect();
+      var best = -1, p = card, lvl = 0;
+      for (; p && p !== document.body && lvl < 8; p = p.parentElement, lvl++) {
+        for (var s = p.nextElementSibling; s; s = s.nextElementSibling) {
+          var r;
+          try { r = s.getBoundingClientRect(); } catch (e) { continue; }
+          if (r.height < 4 || r.width < 8) continue;                     // 空壳 / 0 高装饰层
+          if (r.bottom <= cr.bottom + 2) continue;                       // 在卡片上方或齐平
+          if (r.top >= innerHeight) continue;                            // 视口外
+          if (r.right < cr.left + 8 || r.left > cr.right - 8) continue;  // 与卡片不横向重叠
+          if (isOwnEl(s)) continue;
+          var cs = getComputedStyle(s);
+          if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) < 0.05) continue;
+          if (best < 0 || r.top < best) best = r.top;
+        }
+      }
+      nextGapCache.v = best < 0 ? -1 : Math.max(0, Math.round(best - cr.bottom));
+      return nextGapCache.v;
+    } catch (e) { return -1; }
+  }
+
   /**
    * 让位量自适应：够放就不占位，不够才补差额。
-   * cardBottom0 剥掉我们自己加的量 → 无论移动布局把底部留白做成 0 / 34px(安全区) / 其它，
-   * 结果都不会叠加成大缝，也不会压住内容。
+   * 两个约束取更紧的一个：
+   *   ① 卡片下沿 → 视口底还剩多少（够就不占位）
+   *   ② 卡片下沿 → 正下方内容块还剩多少（不够就把它推下去）
+   * 两者都按"剥掉我们自己已施加的量"来算基线，才不会 加了撤、撤了加 地震荡。
    */
   function ensurePad() {
     if (!cardCache) return;
@@ -302,7 +426,7 @@
         padKind = 0; padPreBottom = 0;
       }
       var ar = cardCache.getBoundingClientRect();
-      var need = (mode === 'n' ? H_NARROW : H_WIDE) + GAP;
+      var need = (mode === 'n' ? H_NARROW : hWideNow) + GAP;
 
       /* 一次标定：加 margin-bottom 对两种定位方式效果相反 ——
        *   下方锚定（如 position:fixed;bottom:0）→ 卡片被顶起来，卡片底边上移
@@ -315,12 +439,18 @@
         padPreBottom = 0;
       }
 
-      // R = 卡片下方的「自然」余量，已剥掉我们自己造成的位移
+      // ① 视口余量（锚定布局下卡片被顶起 appliedPad，要剥掉）
       var R = padKind === 1 ? innerHeight - ar.bottom - appliedPad : innerHeight - ar.bottom;
-      var target = Math.max(0, need - R);
+      // ② 正下方内容余量：两种布局下该内容与卡片的间距都被我们撑大了 appliedPad
+      var gn = gapToNextBelow(cardCache);
+      var hasNext = gn >= 0;
+      if (hasNext) R = Math.min(R, Math.max(0, gn - appliedPad));
+
+      var target = Math.max(0, need + (hasNext ? BREATH : 0) - R);
       if (Math.abs(target - appliedPad) > 2) {
         if (appliedPad === 0) padPreBottom = ar.bottom;   // 记录施加前的底边，供下一帧标定
         appliedPad = target;
+        nextGapCache.at = 0;                              // 让位变了 → 间距基线必须重测
         cardCache.style.marginBottom = (basePad + target) + 'px';
       }
     } catch (e) {}
@@ -349,7 +479,14 @@
     if (stale()) return;
     try {
       var want = isNarrow() ? 'n' : 'w';
-      if (want !== mode) { mode = want; bar.className = 'zu-bar ' + mode; lastPos = [0, 0]; hidePop(); }
+      if (want !== mode) {
+        mode = want;
+        bar.className = 'zu-bar ' + mode;   // 整体换类名 → 主题的 .zu-light 要补回
+        applyTheme();
+        bar.style.width = '';               // 窄屏设过定宽，切回宽屏必须清掉
+        lastPos = [0, 0];
+        hidePop();
+      }
       // 视口变化（旋转 / 软键盘）会改变底部留白与让位效果 → 重新标定布局类型
       if (innerHeight !== lastVh || innerWidth !== lastVw) {
         lastVh = innerHeight; lastVw = innerWidth; padKind = 0; padPreBottom = 0;
@@ -379,14 +516,27 @@
 
       var anchor = cardCache || composer;
       var ar = anchor.getBoundingClientRect();
+      // 条高实测（客户端同款 CSS 下由 14px 字号 + 17px ⚙ 撑出 ~32px）；首帧回退到常量
+      if (mode === 'w') {
+        var oh = Math.round(bar.offsetHeight);
+        if (oh >= 16) hWideNow = oh;
+      }
+      var hBar = mode === 'n' ? H_NARROW : hWideNow;
       var left = Math.round(ar.left) + (mode === 'w' ? 0 : 2);
-      var top = Math.max(4, Math.min(Math.round(ar.bottom + GAP), innerHeight - (mode === 'n' ? H_NARROW : H_WIDE) - 2));
+      // 底部夹取留 2px：会话页卡片下沿只剩 ~36px，条 32 + 顶缝 4 正好用满，
+      // 不给窗口底边留缝会贴死在边沿（客户端注释的口径也是"条下留一点"）。
+      var top = Math.max(4, Math.min(Math.round(ar.bottom + GAP), innerHeight - hBar - 2));
       if (left !== lastPos[0] || top !== lastPos[1]) {
         bar.style.left = left + 'px';
         bar.style.top = top + 'px';
         lastPos = [left, top];
       }
-      var maxW = Math.max(80, Math.round(ar.width - (mode === 'n' ? 8 : 0)));
+      /* 宽度上限：窄屏仍按卡片宽（手机一行定宽均分）；宽屏改按视口 —— 客户端条是按内容
+       * 撑开的、不受输入框限制，而对齐后条目变多（加了"本轮"），再按卡片宽夹会把数值
+       * 挤成省略号（同数据实测：卡片 840 / 内容 940 时 "1.4s"→"1"、"187次"→"187"）。 */
+      var maxW = mode === 'n'
+        ? Math.max(80, Math.round(ar.width - 8))
+        : Math.max(160, Math.round(innerWidth - Math.round(ar.left) - 4));
       if (bar.style.maxWidth !== maxW + 'px') bar.style.maxWidth = maxW + 'px';
       if (mode === 'n' && bar.style.width !== maxW + 'px') bar.style.width = maxW + 'px';
     } catch (e) {
@@ -453,14 +603,23 @@
     return nativeCache;
   }
 
-  /* ---------- 渲染：窄屏与宽屏共用同一份条目清单 ---------- *
-   * 用户反馈（2026-10-07 真机）：
-   *   1) 不要再画环 —— 输入框工具栏本来就有原生的上下文环，重复；
-   *   2) 一行有这么大空间，多显示点内容。
-   * 所以窄屏与宽屏用同一份条目构建，只是呈现疏密不同。 */
+  /* ---------- 渲染 ----------
+   * 窄屏：① 极简一行（用户 2026-10-07 真机选定：不要环 —— 输入框工具栏已有原生上下文环，
+   *       重复；一行有空间就多显示点内容）。
+   * 宽屏：与 ZCode 桌面客户端插件条同款 —— 条目构成、顺序、图标、数字口径全部照抄插件
+   *       overlay.js html()（生成速度 / 上下文 / 本轮 / 会话累计 / 工具调用 / 今日合计 /
+   *       子代理 / ⚙），组间用独立发丝分隔元素。 */
+
+  /** 只替换条的"条目区"：弹层现在是条的子元素，整体 bar.innerHTML=… 会把它一起销毁。 */
+  function setGroups(html) {
+    var olds = bar.querySelectorAll(':scope > .zu-g, :scope > .zu-sep');
+    for (var i = 0; i < olds.length; i++) olds[i].parentNode.removeChild(olds[i]);
+    if (html) bar.insertAdjacentHTML('afterbegin', html);
+  }
+
   function buildItems(v) {
     var s = v.s, p = v.p, out = [], hr;
-    var cTone = ctxTone(v.cp, v.exc);
+    var cTone = ctxTone(v.cp, v.exc, v.size);
     var pTxt = v.cp == null ? '–' : (v.cp >= 100 ? '100' : v.cp.toFixed(1)) + '%';
     var SH = cfg();
     if (SH.speed) {
@@ -515,24 +674,64 @@
         (it.err ? '<span class="zu-n" style="color:' + TONE.bad + '">✕' + it.err + '</span>' : '') +
         (it.dot ? '<span style="color:' + TONE.ok + '">●</span>' : '') + '</span>');
     }
-    bar.innerHTML = g.join('');
+    setGroups(g.join(''));
     bar.title = L('点击查看明细与显示项', 'Tap for details');
   }
 
+  /* 插件同款：token 后跟缓存命中率（无输入则不出） */
+  function cachePct(cache, input) {
+    return input > 0 ? '<span class="zu-k">' + Math.round(cache / input * 100) + '%</span>' : '';
+  }
+
   function renderWide(v) {
-    var items = buildItems(v), g = [];
-    for (var i = 0; i < items.length; i++) {
-      var it = items[i];
-      g.push('<span class="zu-g' + (it.exc ? ' zu-exc' : '') + '" data-g="' + it.k + '">' +
-        (it.bar != null ? miniBar(it.bar, it.bc) : (it.ic || '')) +
-        '<span class="zu-n" style="color:' + it.c + '">' + it.v + '</span>' +
-        (it.u ? '<span class="zu-u">' + it.u + '</span>' : '') +
-        (it.err ? '<span class="zu-n" style="color:' + TONE.bad + '">✕' + it.err + '</span>' : '') +
-        (it.dot ? '<span style="color:' + TONE.ok + '">●</span>' : '') + '</span>');
+    var s = v.s, p = v.p, SH = cfg(), g = [];
+    var lt = (s && s.last_turn) || null, last = p.last || {};
+    if (SH.speed && v.tps != null) {
+      g.push('<span class="zu-g" data-g="speed">' + IC.bolt +
+        '<span class="' + speedClass(v.tps) + '">' + tpsText(v.tps) + '</span>' +
+        '<span class="zu-k">t/s</span></span>');
     }
-    g.push('<span class="zu-grow"></span>');
-    g.push('<span class="zu-g" data-g="settings" style="cursor:pointer">' + I.gear + '</span>');
-    bar.innerHTML = g.join('');
+    if (SH.ctx) {
+      var cc = ctxClass(v.cp, v.exc, v.size);
+      g.push('<span class="zu-g" data-g="ctx">' + (v.size
+        ? '<span class="zu-cbar"><i class="' + cc + '" style="width:' +
+          Math.min(100, v.cp || 0).toFixed(1) + '%"></i></span>' +
+          '<span class="zu-pct ' + cc + '">' + (v.cp == null ? '–' : v.cp.toFixed(1) + '%') + '</span>'
+        : '<span class="zu-v">' + fmt(v.used) + '</span>') + '</span>');
+    }
+    if (SH.turn && lt) {
+      g.push('<span class="zu-g" data-g="turn">' + IC.turn +
+        '<span class="zu-v">' + fmt(lt.total) + '</span>' +
+        (SH.cache ? cachePct(lt.cache_read, lt.input) : '') +
+        '<span class="zu-k">' + (lt.requests || 0) + L('次', ' req') + '</span>' +
+        IC.swap + '<span class="zu-k">' + secs(last.duration_ms) + '</span>' +
+        IC.bars + '<span class="zu-k">' + secs(last.ttft_ms) + '</span></span>');
+    }
+    if (SH.session && s) {
+      g.push('<span class="zu-g" data-g="session">' + IC.chat +
+        '<span class="zu-v">' + fmt(s.total) + '</span>' +
+        (SH.cache ? cachePct(s.cache_read, s.input) : '') +
+        '<span class="zu-k">' + (s.turns || 0) + L('轮 ', ' turns · ') + (s.requests || 0) + L('次', ' req') + '</span></span>');
+    }
+    if (SH.tools && s && s.tools && s.tools.total) {
+      g.push('<span class="zu-g" data-g="tools">' + IC.tool +
+        '<span class="zu-v">' + s.tools.total + '</span>' +
+        (s.tools.errors ? '<span class="zu-eb">' + IC.warn + s.tools.errors + '</span>' : '') + '</span>');
+    }
+    if (SH.today && p.today) {
+      g.push('<span class="zu-g" data-g="today">' + IC.cal +
+        '<span class="zu-v">' + fmt(p.today.total) + '</span></span>');
+    }
+    if (SH.sub && s && s.sub && (s.sub.total || s.sub.requests)) {
+      g.push('<span class="zu-g" data-g="sub">' + IC.sub +
+        '<span class="zu-v">' + fmt(s.sub.total) + '</span>' +
+        (s.sub.active ? '<span class="zu-ok zu-dot">●</span>' : '') + '</span>');
+    }
+    /* ⚙ 紧跟条目之后（客户端同款，没有弹性空隙把它推到最右） */
+    g.push('<span class="zu-g zu-gear" data-g="settings">⚙</span>');
+    setGroups(g.join('<span class="zu-sep"></span>'));
+    /* setGroups 会重建条目节点，把悬停/钉住的高亮带回来 */
+    if (popKey) markOpen(bar.querySelector('[data-g="' + popKey + '"]'));
     if (pop && popKey) renderPop(popKey);
   }
 
@@ -578,7 +777,7 @@
       h += row(L('已用', 'Used'), fmt(v.used));
       h += row(L('窗口总量', 'Window'), v.size ? fmt(v.size) : '–');
       h += row(L('占比', 'Usage'), v.cp == null ? '–' : v.cp.toFixed(1) + '%');
-      h += '<div class="zu-bar2"><div class="zu-fill" style="width:' + Math.min(100, v.cp || 0) + '%;background:' + ctxTone(v.cp, v.exc) + '"></div></div>';
+      h += '<div class="zu-bar2"><div class="zu-fill" style="width:' + Math.min(100, v.cp || 0) + '%;background:' + ctxTone(v.cp, v.exc, v.size) + '"></div></div>';
       h += '<div class="zu-note">' + L('窗口来源：', 'Window source: ') +
         (v.src === 'native' ? L('客户端原生下发', 'client (native)') : v.src === 'catalog' ? L('模型目录', 'model catalog') : L('未知', 'unknown')) + '</div>';
       if (v.exc) h += '<div class="zu-note" style="color:' + TONE.bad + '">' +
@@ -632,22 +831,25 @@
     }
     pop.innerHTML = h;
     popKey = key;
-    /* 先以 visibility:hidden 量出尺寸，再定位，避免出现一帧跳位 */
+    /* 先以 visibility:hidden 量出尺寸，再定位，避免出现一帧跳位。
+     * 弹层是条的 absolute 后代（条的 backdrop-filter 使其成为包含块），所以 left 用
+     * "相对条左缘"的偏移、纵向由 CSS 的 bottom:calc(100% + 8px) 固定；横向仍需夹进视口。 */
     pop.style.visibility = 'hidden';
     pop.classList.add('on');
     try {
       var br = bar.getBoundingClientRect();
       var t = bar.querySelector('[data-g="' + key + '"]');
       var tr = t ? t.getBoundingClientRect() : br;
-      var pw = pop.offsetWidth, ph = pop.offsetHeight;
-      var left = Math.max(4, Math.min(Math.round(tr.left), innerWidth - pw - 4));
-      var top = Math.max(4, Math.round(br.top - ph - 8));
-      pop.style.left = left + 'px';
-      pop.style.top = top + 'px';
+      var pw = pop.offsetWidth;
+      var rel = Math.round(tr.left - br.left);
+      var lo = Math.round(-br.left) + 4, hi = Math.round(innerWidth - br.left - pw - 4);
+      pop.style.left = Math.max(lo, Math.min(rel, Math.max(lo, hi))) + 'px';
     } catch (e) {}
     pop.style.visibility = '';
   }
-  function hidePop() { if (pop) { pop.classList.remove('on'); popKey = ''; } }
+  function hidePop() { if (pop) { pop.classList.remove('on'); popKey = ''; popPinned = false; } }
+  /** 取消钉住（点条外 / Esc / 条被隐藏时走这里） */
+  function unpinPop() { hidePop(); }
 
   var v_cur = null;
   function render(payload) {
@@ -674,10 +876,10 @@
       return;
     }
     out += '<div class="zu-h"><span>' + L('上下文', 'Context') + '</span><span style="font-weight:600;color:' +
-      ctxTone(v.cp, v.exc) + '">' + (v.cp == null ? '–' : v.cp.toFixed(1) + '%') + '</span></div>' +
+      ctxTone(v.cp, v.exc, v.size) + '">' + (v.cp == null ? '–' : v.cp.toFixed(1) + '%') + '</span></div>' +
       row(L('已用', 'Used'), fmt(v.used)) + row(L('窗口总量', 'Window'), v.size ? fmt(v.size) : '–') +
       '<div class="zu-bar2"><div class="zu-fill" style="width:' + Math.min(100, v.cp || 0) +
-      '%;background:' + ctxTone(v.cp, v.exc) + '"></div></div>';
+      '%;background:' + ctxTone(v.cp, v.exc, v.size) + '"></div></div>';
     if (v.exc) out += '<div class="zu-note" style="color:' + TONE.bad + '">' +
       L('上一次请求因超出上下文窗口被拒绝，建议回滚上一轮或换更大窗口的模型。',
         'Last request exceeded the context window.') + '</div>';
@@ -738,23 +940,34 @@
     sheet.querySelector('.zu-body').innerHTML = out;
   }
 
-  /* ---------- 交互 ---------- */
+  /* ---------- 交互 ----------
+   * 宽屏：悬停 = 临时看明细；点击 = 钉住（弹层是条的子树，鼠标可直接移进去点复选框）；
+   *       再点同一组 / 点条外 / Esc = 收起。钉住后悬停其他组不改内容（与客户端"面板
+   *       开着时条面不弹 tooltip"一致）。 */
+  function markOpen(g) {
+    var ns = bar.querySelectorAll('.zu-open');
+    for (var i = 0; i < ns.length; i++) ns[i].classList.remove('zu-open');
+    if (g) g.classList.add('zu-open');
+  }
   function onBarClick(e) {
     if (mode === 'n') return openSheet();
     var g = e.target.closest('[data-g]');
     if (!g) return;
     var key = g.getAttribute('data-g');
-    if (popKey === key) hidePop();
-    else { renderPop(key); g.classList.add('zu-open'); }
+    /* 只有"已钉住且是同一组"才收起；悬停打开后再点同一组应当是「钉住」而不是关掉
+     * （旧实现按 popKey 判断 → 悬停已开，一点就关，这就是"用起来怪"的来源之一）。 */
+    if (popPinned && popKey === key) { hidePop(); markOpen(null); return; }
+    markOpen(g);
+    renderPop(key);
+    popPinned = true;
   }
   function onGroupHover(e) {
-    if (mode !== 'w') return;
+    if (mode !== 'w' || popPinned) return;
     var g = e.target.closest('[data-g]');
     if (!g) return;
     var key = g.getAttribute('data-g');
     if (key && key !== popKey) {
-      bar.querySelectorAll('.zu-open').forEach(function (n) { n.classList.remove('zu-open'); });
-      g.classList.add('zu-open');
+      markOpen(g);
       renderPop(key);
     }
   }
@@ -779,15 +992,28 @@
   }
 
   /* ---------- 启动 ---------- */
+  /* 主题跟随（与客户端插件同源）：客户端主题切换时往 <html> 挂/摘 .dark，宽屏条的
+   * 三档自调色与阴影按明暗切一套（其余颜色引用客户端变量，级联自动翻转）。
+   * 观察类属性而不是 matchMedia：信号源与变量翻转同源，不会出现"变量已翻、档位没翻"。 */
+  function applyTheme() {
+    try {
+      if (bar) bar.classList.toggle('zu-light', !document.documentElement.classList.contains('dark'));
+    } catch (e) {}
+  }
   function boot() {
     ensureDom();
+    applyTheme();
+    try {
+      new MutationObserver(applyTheme).observe(document.documentElement, {
+        attributes: true, attributeFilter: ['class'],
+      });
+    } catch (e) {}
     pop.addEventListener('change', onPopChange);
     sheet.addEventListener('change', onPopChange);
-    pop.addEventListener('click', function (e) { e.stopPropagation(); });
     (function loop() {
       if (stale()) return;
       track();
-      // 条一旦移出视口就收掉弹层，避免悬空
+      // 条一旦移出视口/隐藏就收掉弹层，避免悬空
       if (popKey && !bar.classList.contains('on')) hidePop();
       requestAnimationFrame(loop);
     })();
