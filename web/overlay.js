@@ -277,11 +277,13 @@
   var composer = null, cardCache = null, hideSince = 0, lastPos = [0, 0];
   var appliedPad = 0, basePad = 0, baseCaptured = false;
   var padKind = 0;        // 0=未标定 1=下方锚定（pad 会顶起卡片） 2=普通流（pad 只在下方腾空间）
-  var padPreBottom = 0;   // 施加 pad 前的卡片底边，供下一帧标定布局类型
+  var padPreBottom = 0;   // 上一次改动让位前的卡片底边（每次改动都记）
+  var padDelta = 0;       // 上一次改动的量（带符号），供下一帧判定布局类型
   var lastVh = 0, lastVw = 0;
   var popKey = '', popPinned = false;
   var hWideNow = H_WIDE;  // 宽屏条实测高度（字体/条目撑出来的，用于让位与夹取）
   var nextGapCache = { at: 0, v: -1 };   // 卡片正下方内容的间距，缓存 300ms
+  var nextEl = null;      // 记忆中的“卡片正下方内容”（见 gapToNextBelow：自我遮挡闭环）
 
   function isNarrow() {
     try { return window.matchMedia(NARROW_Q).matches; } catch (e) { return innerWidth <= 767.5; }
@@ -390,7 +392,20 @@
       if (now - nextGapCache.at < 300) return nextGapCache.v;
       nextGapCache.at = now;
       var cr = card.getBoundingClientRect();
-      var best = -1, p = card, lvl = 0;
+      /* 先看上一帧选中的那个元素：只要还连着、还在卡片下方、还横向重叠，就继续用它。
+       * 为什么必须“记住”：让位一旦把它顶出视口，下面的视口判据就会把它当成“不存在”
+       * → 撤让位 → 它又回到视口里 → 再判存在 …… 让位逐帧来回、输入卡和条一起抖
+       * （用户实测“输入框和状态栏疯狂闪烁、刷新才好”，2026-10-10）。 */
+      if (nextEl && nextEl.isConnected) {
+        var nr = nextEl.getBoundingClientRect();
+        if (nr.height >= 4 && nr.width >= 8 && nr.bottom > cr.bottom + 2 &&
+            !(nr.right < cr.left + 8 || nr.left > cr.right - 8) && !isOwnEl(nextEl)) {
+          nextGapCache.v = Math.max(0, Math.round(nr.top - cr.bottom));
+          return nextGapCache.v;
+        }
+        nextEl = null;
+      }
+      var best = -1, bestEl = null, p = card, lvl = 0;
       for (; p && p !== document.body && lvl < 8; p = p.parentElement, lvl++) {
         for (var s = p.nextElementSibling; s; s = s.nextElementSibling) {
           var r;
@@ -402,9 +417,10 @@
           if (isOwnEl(s)) continue;
           var cs = getComputedStyle(s);
           if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) < 0.05) continue;
-          if (best < 0 || r.top < best) best = r.top;
+          if (best < 0 || r.top < best) { best = r.top; bestEl = s; }
         }
       }
+      nextEl = bestEl;
       nextGapCache.v = best < 0 ? -1 : Math.max(0, Math.round(best - cr.bottom));
       return nextGapCache.v;
     } catch (e) { return -1; }
@@ -423,19 +439,26 @@
       if (!baseCaptured) {
         basePad = parseFloat(getComputedStyle(cardCache).marginBottom) || 0;
         baseCaptured = true;
-        padKind = 0; padPreBottom = 0;
+        padKind = 0; padPreBottom = 0; padDelta = 0;
       }
       var ar = cardCache.getBoundingClientRect();
       var need = (mode === 'n' ? H_NARROW : hWideNow) + GAP;
 
-      /* 一次标定：加 margin-bottom 对两种定位方式效果相反 ——
-       *   下方锚定（如 position:fixed;bottom:0）→ 卡片被顶起来，卡片底边上移
-       *   普通流（ZCode 真实的 composer 卡片）→ 卡片本身不动，只在它下方腾出空间
-       * 用同一个基线去算就会「够了就撤、撤了又不够」来回震荡（隔离测试实测到）。
-       * 所以先在 0 → 非 0 的那一帧记下卡片底，下一帧看它有没有跟着动，定下类型。 */
-      if (padKind === 0 && appliedPad > 0 && padPreBottom) {
+      /* 布局类型：每次改动让位后都重判一次（旧版只在 0→非0 那一帧判一次）。
+       * 加 margin-bottom 对两种定位方式效果相反 ——
+       *   下方锚定（如 position:sticky;bottom:0 被内容撑住）→ 卡片被顶起来，底边上移
+       *   普通流（ZCode 的落地页 composer）→ 卡片本身不动，只在它下方腾出空间
+       * 一次标定会在布局翻转后变成错的结论：落地页标成普通流，会话内容长到把 dock 顶成
+       * sticky 锚定后公式就反了 —— 按“卡片不动”去扣已施加的量，目标值在 3↔16 之间
+       * 逐帧来回，输入卡和条一起每帧抖（2026-10-10 用户实测“疯狂闪烁、刷新才好”）。
+       * 而且旧版一旦让位没回到 0 就永远不再标定，误判会被振荡本身锁死到刷新为止。
+       * 判据：改动量 d，卡片底边跟着动 ≈d → 锚定；几乎没动 → 普通流；
+       * 两者都不像（被流式重排/滚动/软键盘污染）→ 这次判不出来，保留上次结论。 */
+      if (padDelta && padPreBottom) {
         var moved = padPreBottom - ar.bottom;
-        padKind = Math.abs(moved - appliedPad) < 3 ? 1 : 2;
+        if (Math.abs(moved - padDelta) <= 2) padKind = 1;
+        else if (Math.abs(moved) <= 2) padKind = 2;
+        padDelta = 0;
         padPreBottom = 0;
       }
 
@@ -448,7 +471,8 @@
 
       var target = Math.max(0, need + (hasNext ? BREATH : 0) - R);
       if (Math.abs(target - appliedPad) > 2) {
-        if (appliedPad === 0) padPreBottom = ar.bottom;   // 记录施加前的底边，供下一帧标定
+        padPreBottom = ar.bottom;            // 每次改动前都记（旧版只在 appliedPad===0 时记，
+        padDelta = target - appliedPad;      // 让位没回到 0 就再也不标定，误判被锁死）
         appliedPad = target;
         nextGapCache.at = 0;                              // 让位变了 → 间距基线必须重测
         cardCache.style.marginBottom = (basePad + target) + 'px';
@@ -459,7 +483,7 @@
     if (cardCache && baseCaptured) {
       try { cardCache.style.marginBottom = basePad ? basePad + 'px' : ''; } catch (e) {}
     }
-    appliedPad = 0; baseCaptured = false; padKind = 0; padPreBottom = 0;
+    appliedPad = 0; baseCaptured = false; padKind = 0; padPreBottom = 0; padDelta = 0; nextEl = null;
   }
 
   /** 是否在设置界面。
@@ -489,7 +513,7 @@
       }
       // 视口变化（旋转 / 软键盘）会改变底部留白与让位效果 → 重新标定布局类型
       if (innerHeight !== lastVh || innerWidth !== lastVw) {
-        lastVh = innerHeight; lastVw = innerWidth; padKind = 0; padPreBottom = 0;
+        lastVh = innerHeight; lastVw = innerWidth; padKind = 0; padPreBottom = 0; padDelta = 0;
       }
 
       if (!composer || !composer.isConnected) {
