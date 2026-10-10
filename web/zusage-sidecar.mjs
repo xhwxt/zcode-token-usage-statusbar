@@ -74,7 +74,12 @@ const PROVIDER_CONFIGS = (
 const SNAPSHOT_TTL_MS = Number(process.env.ZUSAGE_SNAPSHOT_TTL_MS || 700);
 const PY_TIMEOUT_MS = Number(process.env.ZUSAGE_PY_TIMEOUT_MS || 8000);
 
+
+
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
+
+
+
 
 /* ---------- 模型目录 → contextWindow 查表 ---------- */
 let ctxCatalog = new Map(); // modelId -> contextWindow
@@ -386,13 +391,29 @@ function send(res, code, body, headers = {}) {
   res.end(body);
 }
 
-function tokenOk(url) {
+function tokenOk(url, req) {
   if (!TOKEN) return true;
-  const t = url.searchParams.get('token') || '';
-  if (t.length !== TOKEN.length) return false;
-  let diff = 0;
-  for (let i = 0; i < t.length; i++) diff |= t.charCodeAt(i) ^ TOKEN.charCodeAt(i);
-  return diff === 0;
+  // 凭证三选一：URL ?token=（旧恢复通道）→ Cookie（配对后的日常通道）→ Header
+  const readLiteTokenCookie = (header) => {
+    for (const part of String(header || '').split(';')) {
+      const eq = part.indexOf('=');
+      if (eq <= 0) continue;
+      if (part.slice(0, eq).trim() === 'zcode_lite_token') return part.slice(eq + 1).trim();
+    }
+    return '';
+  };
+  const candidates = [
+    url.searchParams.get('token') || '',
+    readLiteTokenCookie(req?.headers?.cookie),
+    String(req?.headers?.['x-zcode-lite-token'] || ''),
+  ];
+  for (const t of candidates) {
+    if (!t || t.length !== TOKEN.length) continue;
+    let diff = 0;
+    for (let i = 0; i < t.length; i++) diff |= t.charCodeAt(i) ^ TOKEN.charCodeAt(i);
+    if (diff === 0) return true;
+  }
+  return false;
 }
 
 /** 静态文件白名单：只允许这几个路径，杜绝任意读文件。
@@ -410,7 +431,7 @@ const server = http.createServer(async (req, res) => {
   /* /zusage/health 经 nginx 是公网可达的，所以公开分支只回一个 ok；
    * 详情（含插件目录绝对路径）必须带 token 才给。 */
   if (path === '/zusage/health') {
-    if (!tokenOk(url)) return send(res, 200, JSON.stringify({ ok: true }), { 'Content-Type': MIME['.json'] });
+    if (!tokenOk(url, req)) return send(res, 200, JSON.stringify({ ok: true }), { 'Content-Type': MIME['.json'] });
     return send(res, 200, JSON.stringify({
       ok: true,
       resident: !!child,
@@ -435,7 +456,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (path === '/zusage/snapshot') {
-    if (!tokenOk(url)) return send(res, 401, JSON.stringify({ error: 'unauthorized' }), { 'Content-Type': MIME['.json'] });
+    if (!tokenOk(url, req)) return send(res, 401, JSON.stringify({ error: 'unauthorized' }), { 'Content-Type': MIME['.json'] });
     const sids = (url.searchParams.get('sids') || '').slice(0, 600);
     const mine = (url.searchParams.get('mine') || '').slice(0, 200);
     try {
@@ -454,7 +475,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, HOST, () => {
   log(`zusage 旁挂服务 http://${HOST}:${PORT}`);
-  log('插件目录:', PLUGIN_DIR, '| token 校验:', TOKEN ? '开' : '关');
+  log('插件目录:', PLUGIN_DIR, '| token 校验:', TOKEN ? '开' : '关',);
   loadContextCatalog();
   log('模型目录载入:', ctxCatalog.size, '条');
   child = startChild();
