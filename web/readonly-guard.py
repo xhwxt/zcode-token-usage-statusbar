@@ -30,7 +30,13 @@ def _guarded_connect(database, *args, **kwargs):
         if isinstance(s, bytes):
             s = s.decode()
         if "mode=ro" not in s and "mode=rw" not in s:
-            s = "file:{}?mode=ro".format(s)
+            # immutable=1：声明库文件在连接期间不变，SQLite 不再尝试创建
+            # -wal/-shm 伴生文件。为什么必须有：服务跑在 ProtectHome=read-only
+            # 的沙箱里，ZCode 写库期间（WAL 活跃）只读连接会尝试 O_CREAT
+            # db.sqlite-wal → EROFS → "unable to open database file"（2026-10-10
+            # 实录：zcode-web 重启后 WAL 活跃，状态栏连续 500）。代价是读不到
+            # 未 checkpoint 的 WAL 数据——状态栏本来就是近似展示，可接受。
+            s = "file:{}?mode=ro&immutable=1".format(s)
             kwargs["uri"] = True
         database = s
     con = _orig_connect(database, *args, **kwargs)
