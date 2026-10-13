@@ -1,6 +1,7 @@
 /* ZCode token 用量状态条 v58（渲染进程注入，自包含 IIFE）。
  * 形态：输入框视觉卡片正下方的悬浮胶囊条 —— 给卡片加 margin-bottom 上移让位，
- *       条 fixed 悬浮在卡片边框外、窗口底边上的空带里，rAF 每帧跟随，左缘与卡片对齐。
+ *       条 fixed 悬浮在卡片边框外、窗口底边上的空带里，rAF 每帧跟随，
+ *       左右两缘都与卡片对齐（min-width=卡片宽；内容更宽时随内容、上限按视口）。
  *       （条不能放在输入框中心点所在矩形内：命中检测自遮挡 = 周期性闪烁，v12-v14 实测。）
  * 视觉（v28）：半透明胶囊底 + 组间 │ 分隔 + 上下文微进度条（三档色）+ 子代理呼吸灯；
  *       条面只放主数值，明细进 hover title。
@@ -10,6 +11,10 @@
  * 主题（v58）：配色全量跟随客户端主题 —— 颜色一律 var(--color-*, 兜底值) 引用客户端语义
  *       变量（<html> 的 .dark 类翻转整套值，zai-light/zai-dark 特殊主题同样适配），
  *       MutationObserver 观察该类同步 .zu-light（仅剩阴影/光晕程度性差异）。
+ * 字体（v64）：字族/字号跟随客户端 —— font-family 一律 var(--font-mono, 旧硬编码栈兜底)
+ *       （客户端 ：root 上的等宽令牌，macOS 解析为 SF Mono，含中文回退）；字号一律
+ *       var(--ui-font-size, 14px) 按应用 text-ui 档位加减偏移（设置页「界面字号」
+ *       运行时写 <html> 内联 --ui-font-size，改动实时联动），不再硬编码 px。
  * 数据：主进程泵推 window.__zusageUpdate；显示项可在 ⚙ 面板配置（localStorage 持久化）。
  * 分屏（v61.1）：协调器每 600ms 扫描可见输入框，按 pane（data-pane-id）派发实例——
  *       一个 pane 一条，各自显示 composer 祖先链 data-session-id 指向的会话；
@@ -147,7 +152,7 @@
   /* ---------- 实例工厂（v61.1）：一个 pane 一套 条/面板/气泡/tooltip/定位循环。
    * slot 0 保留 #zusage-bar/#zusage-tip 兼容 id（泵热更新按它清理），其余实例仅类名。 */
   function spawnInstance(pid, slot) {
-    var VERSION = "v62";   // v62：模态弹窗（模型配置等）打开时整体收起 + 弹窗内编辑框不再被当输入框（issue #9）；零值会话的来源提示（issue #14）   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
+    var VERSION = "v65";   // v65：悬浮气泡豁免 —— 非模态浮层部分盖住输入框中心不再判"被盖"（「剩余额度」hover 卡悬停时整条消失），整体罩住仍收起   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
     /* ---------- 状态（实例级） ---------- */
     var excOn = false,    // 本 pane 会话处于"上下文超限被拒"状态（render 时按 picked 会话计算）
       excGone = false,    // 用户点 ✕ 关闭了本次气泡；超限解除后自动复位
@@ -165,7 +170,9 @@
        * var(--color-*, 旧值兜底) 引用客户端语义变量（<html> 的 .dark 类翻转整套值，
        * zai-light/zai-dark 特殊主题同样自动适配）；color-mix 处加同值前置声明，
        * 不支持 color-mix 的旧引擎落到实色行不至于透明。 */
-      ".zusage-root{position:fixed;font:14px/1.3 Consolas,'Cascadia Mono',Menlo,'Microsoft YaHei UI','Microsoft YaHei',monospace;" +
+      ".zusage-root{position:fixed;box-sizing:border-box;" +
+      "font-family:var(--font-mono,Consolas,'Cascadia Mono',Menlo,'Microsoft YaHei UI','Microsoft YaHei',monospace);" +
+      "font-size:var(--ui-font-size,14px);line-height:1.3;" +
       "font-variant-numeric:tabular-nums;color:var(--color-foreground-subtle,#8791a3);" +
       "background:rgba(15,18,25,.86);background:color-mix(in srgb,var(--color-background,#0f1219) 86%,transparent);" +
       "backdrop-filter:blur(14px) saturate(1.3);-webkit-backdrop-filter:blur(14px) saturate(1.3);" +
@@ -175,7 +182,7 @@
       /* 条不能 overflow:hidden：设置面板是条的子元素、展开在条外上方，裁剪会吞掉面板（v15"点设置看不到窗口"根因）。
        * 超宽截断由 #zu-main 自己负责。 */
       "z-index:50}" +
-      ".zu-main{overflow:hidden;min-width:0;flex:0 1 auto;display:flex;align-items:center;gap:1px}" +
+      ".zu-main{overflow:hidden;min-width:0;flex:1 1 auto;display:flex;align-items:center;gap:1px;justify-content:space-between}" +
       /* zu-main 不得带 .it class：querySelectorAll('.it') 收集 tooltip 时会把它算进第 0 位，
        * tips 全部错位一位且末项为 null —— v31"悬停只有空胶囊/内容错位"的根因 */
       ".it{display:flex;align-items:center;gap:4px;padding:2px 6px;border-radius:6px;" +
@@ -195,7 +202,7 @@
       "transition:background-color .12s ease-out,color .12s ease-out}" +
       ".btn:hover{color:var(--color-foreground,#e9edf4);background:var(--color-hover,rgba(255,255,255,.07))}" +
       ".btn:active{transform:scale(.96)}" +
-      ".zu-gear{flex:0 0 auto;font-size:17px;border-radius:6px}" +
+      ".zu-gear{flex:0 0 auto;font-size:calc(var(--ui-font-size,14px) + 3px);border-radius:6px}" +
       /* 行内 SVG 线性图标（v54）：currentColor 跟随文字色，一处定义全局换色 */
       ".ico{width:12px;height:12px;flex:0 0 auto;color:var(--color-foreground-subtle,#7e8899);opacity:.85}" +
       /* 工具错误数徽标 */
@@ -210,12 +217,14 @@
       ".cbar>i{display:block;height:100%;border-radius:999px;background:currentColor}" +
       /* 子代理运行中呼吸灯 */
       "@keyframes zupulse{0%,100%{opacity:1}50%{opacity:.2}}" +
-      ".dot{animation:zupulse 1.6s ease-in-out infinite;font-size:14px;line-height:1}" +
+      ".dot{animation:zupulse 1.6s ease-in-out infinite;font-size:var(--ui-font-size,14px);line-height:1}" +
       ".panel{position:absolute;bottom:calc(100% + 10px);left:0;background:rgba(19,22,30,.97);" +
       "background:color-mix(in srgb,var(--color-card,#13161e) 96%,transparent);" +
       "backdrop-filter:blur(18px) saturate(1.3);-webkit-backdrop-filter:blur(18px) saturate(1.3);" +
       "border:1px solid var(--color-border,rgba(255,255,255,.09));border-radius:12px;padding:12px 14px;display:none;" +
-      "flex-direction:column;gap:4px;font:13px/1.6 Consolas,Menlo,'Microsoft YaHei UI',monospace;color:var(--color-foreground,#c6cdd9);" +
+      "flex-direction:column;gap:4px;" +
+      "font-family:var(--font-mono,Consolas,Menlo,'Microsoft YaHei UI',monospace);" +
+      "font-size:calc(var(--ui-font-size,14px) - 1px);line-height:1.6;color:var(--color-foreground,#c6cdd9);" +
       "box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 12px 32px rgba(0,0,0,.5),0 2px 8px rgba(0,0,0,.35);" +
       "min-width:280px;max-width:480px;max-height:72vh;overflow:auto;white-space:normal;z-index:2147483647;" +
       "scrollbar-width:thin;scrollbar-color:var(--color-border,rgba(255,255,255,.14)) transparent}" +
@@ -228,9 +237,9 @@
       "color:var(--color-foreground,#e9edf4);border-radius:6px;padding:2px 7px;font:inherit;outline:none}" +
       ".panel input[type=text]:focus{border-color:var(--color-brand,#57c7ff);box-shadow:0 0 0 2px rgba(87,199,255,.15)}" +
       ".panel .hr{border-top:1px solid var(--color-border,rgba(255,255,255,.08));margin:5px 0}" +
-      ".panel .cap{color:var(--color-foreground-subtlest,#6b7484);margin:4px 0 2px;font-size:12px;letter-spacing:.08em}" +
-      ".panel .phead{font-weight:700;color:var(--color-foreground,#eef2f8);font-size:16px;margin-bottom:5px;display:flex;align-items:center;gap:8px}" +
-      ".panel .pver{color:var(--color-brand,#57c7ff);font-weight:400;font-size:12px;background:rgba(87,199,255,.12);background:color-mix(in srgb,var(--color-brand,#57c7ff) 12%,transparent);border-radius:999px;padding:1px 8px}" +
+      ".panel .cap{color:var(--color-foreground-subtlest,#6b7484);margin:4px 0 2px;font-size:calc(var(--ui-font-size,14px) - 2px);letter-spacing:.08em}" +
+      ".panel .phead{font-weight:700;color:var(--color-foreground,#eef2f8);font-size:calc(var(--ui-font-size,14px) + 2px);margin-bottom:5px;display:flex;align-items:center;gap:8px}" +
+      ".panel .pver{color:var(--color-brand,#57c7ff);font-weight:400;font-size:calc(var(--ui-font-size,14px) - 2px);background:rgba(87,199,255,.12);background:color-mix(in srgb,var(--color-brand,#57c7ff) 12%,transparent);border-radius:999px;padding:1px 8px}" +
       ".panel label em{font-style:normal;color:var(--color-foreground-subtle,#6f7989);display:block}" +
       ".panel input[type=checkbox]{accent-color:var(--color-brand,#57c7ff);margin-top:3px}" +
       ".panel .pnote{line-height:1.6;color:var(--color-foreground-subtle,#6f7989);margin-top:3px}" +
@@ -240,9 +249,9 @@
       ".zu-sub:hover .v{color:var(--color-foreground,#fff)}" +
       ".panel.subp{width:420px;max-width:60vw;gap:8px}" +
       ".subrow{padding:8px 10px;background:var(--color-surface,rgba(255,255,255,.03));border:1px solid var(--color-border,rgba(255,255,255,.06));border-radius:8px}" +
-      ".subname{font-weight:600;color:var(--color-foreground,#e9edf4);font-size:14px;overflow-wrap:anywhere}" +
+      ".subname{font-weight:600;color:var(--color-foreground,#e9edf4);font-size:var(--ui-font-size,14px);overflow-wrap:anywhere}" +
       ".substat{color:var(--color-foreground-subtle,#8791a3);margin-top:2px}" +
-      ".sublive{color:#3ecf8e;font-size:12px;font-weight:400;background:rgba(62,207,142,.12);border-radius:999px;padding:0 7px;margin-left:7px}" +
+      ".sublive{color:#3ecf8e;font-size:calc(var(--ui-font-size,14px) - 2px);font-weight:400;background:rgba(62,207,142,.12);border-radius:999px;padding:0 7px;margin-left:7px}" +
       /* 自绘 tooltip（v31）：向上弹出（原生 title 方向不可控且会被窗口下缘遮挡），
        * 支持多 tab；white-space:pre-line 保留数据里的 \n 换行。
        * v32：fixed 挂 body —— 原 absolute 挂 bar，被页面消息流的层叠上下文盖住
@@ -250,12 +259,13 @@
       ".tip{position:fixed;background:rgba(19,22,30,.98);background:color-mix(in srgb,var(--color-background,#13161e) 98%,transparent);" +
       "backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);" +
       "border:1px solid var(--color-border,rgba(255,255,255,.1));border-radius:10px;padding:8px 12px;" +
-      "font:13px/1.6 Consolas,'Microsoft YaHei UI',monospace;color:var(--color-foreground,#c6cdd9);" +
+      "font-family:var(--font-mono,Consolas,'Microsoft YaHei UI',monospace);" +
+      "font-size:calc(var(--ui-font-size,14px) - 1px);line-height:1.6;color:var(--color-foreground,#c6cdd9);" +
       "box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 10px 28px rgba(0,0,0,.5),0 2px 6px rgba(0,0,0,.3);" +
       "white-space:pre-line;z-index:2147483646;max-width:560px;display:none;scrollbar-width:thin}" +
       ".ttabs{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:7px}" +
       ".ttab{cursor:pointer;padding:2px 10px;border-radius:999px;background:var(--color-hover,rgba(255,255,255,.06));" +
-      "color:var(--color-foreground-subtle,#8791a3);white-space:nowrap;font-size:13px;" +
+      "color:var(--color-foreground-subtle,#8791a3);white-space:nowrap;font-size:calc(var(--ui-font-size,14px) - 1px);" +
       "transition:background-color .12s ease-out,color .12s ease-out}" +
       ".ttab:hover{color:var(--color-foreground,#e9edf4);background:rgba(255,255,255,.1);background:color-mix(in srgb,var(--color-foreground,#fff) 10%,transparent)}" +
       ".ttab.on{background:rgba(87,199,255,.16);background:color-mix(in srgb,var(--color-brand,#5ac8ff) 16%,transparent);color:var(--color-brand,#5ac8ff)}" +
@@ -270,13 +280,14 @@
       "background:linear-gradient(180deg,color-mix(in srgb,var(--color-destructive,#ff2d55) 10%,var(--color-background,#1b0e10)),color-mix(in srgb,var(--color-destructive,#ff2d55) 5%,var(--color-background,#1b0e10)));" +
       "border:1px solid rgba(255,45,85,.4);border-color:color-mix(in srgb,var(--color-destructive,#ff2d55) 40%,transparent);" +
       "border-radius:12px;padding:12px 15px;" +
-      "font:13px/1.7 Consolas,'Microsoft YaHei UI',monospace;color:var(--color-foreground,#e9edf4);" +
+      "font-family:var(--font-mono,Consolas,'Microsoft YaHei UI',monospace);" +
+      "font-size:calc(var(--ui-font-size,14px) - 1px);line-height:1.7;color:var(--color-foreground,#e9edf4);" +
       "box-shadow:0 12px 32px rgba(0,0,0,.5),0 4px 18px rgba(255,45,85,.12);white-space:normal;z-index:2147483647;" +
       "user-select:text;display:none}" +
       ".zusage-exc .xb-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}" +
       ".zusage-exc .xb-title{font-weight:700;color:var(--color-destructive,#ff5c77)}" +
       ".zusage-exc .xb-step{color:var(--color-foreground-subtle,#c6cdd9)}" +
-      ".zusage-exc .xb-close{cursor:pointer;color:var(--color-foreground-subtlest,#8791a5);padding:2px 5px;border-radius:6px;font-size:16px;line-height:1}" +
+      ".zusage-exc .xb-close{cursor:pointer;color:var(--color-foreground-subtlest,#8791a5);padding:2px 5px;border-radius:6px;font-size:calc(var(--ui-font-size,14px) + 2px);line-height:1}" +
       ".zusage-exc .xb-close:hover{color:var(--color-foreground,#fff);background:var(--color-hover,rgba(255,255,255,.08))}" +
       ".zusage-exc .xb-sid{color:var(--color-brand,#57c7ff);cursor:pointer;text-decoration:underline dotted}" +
       ".zusage-exc .xb-sid:hover{text-decoration-style:solid}" +
@@ -296,7 +307,8 @@
       "@media (prefers-reduced-motion:reduce){.exc,.dot{animation:none}" +
       ".it,.btn,.ttab,.panel label{transition:none}}";
 
-    /* 结构：文字项 + ⚙ 紧跟其后（无弹性空隙，不再推到最右）；面板绝对定位向上展开 */
+    /* 结构：条撑满卡片宽后 .zu-main 占满剩余宽、条目+分隔线 space-between 均匀分布，
+     * ⚙ 落在最右缘（内容超宽时无剩余空间，自动退回紧凑排列并裁剪）；面板绝对定位向上展开 */
     var bar = document.createElement("div");
     bar.className = "zusage-root";
     if (slot === 0) bar.id = "zusage-bar";
@@ -1164,6 +1176,13 @@
        * 都是真·未被盖（弹层在别处，输入框露着）。 */
       if (hit === document.body || hit === document.documentElement) return true;
       if (hit === el || hit.contains(el) || el.contains(hit)) return true;   // 命中自身/祖先/内部装饰层
+      /* 悬浮气泡豁免（v65）：非模态浮层（「剩余额度」hover 卡、下拉/选择器弹层——body
+       * 直挂、无遮罩）会压住输入框中心点，按旧判定悬停一超 400ms 迟滞整条就消失
+       * （用户实测）。但条挂在输入框正下方，上方浮层与条并无几何冲突：命中元素只是
+       * 部分遮挡（未把输入框矩形整体罩住）时仍判可见。整体罩住才维持"被盖"——模态
+       * 全屏遮罩等真接管行为不变，模态弹窗/设置页另有 modalOpen/inGhostSubtree 收口。 */
+      var hr = hit.getBoundingClientRect();
+      if (hr.left > r.left || hr.top > r.top || hr.right < r.right || hr.bottom < r.bottom) return true;
       if (ownOK && isOwnOverlay(hit)) return true;
       return false;
     }
@@ -1487,7 +1506,14 @@
           bar.style.left = left + "px"; bar.style.top = top + "px";
           lastPos = [left, top];
         }
-        var maxW = Math.max(60, Math.round(ar.width - 24));
+        /* 宽度与卡片一致（v63）：min-width = 卡片宽（border-box，外缘含边框正好压在
+         * 卡片两缘上）—— 内容窄于卡片时条撑满卡片，右缘不再悬空短一截（v62 实测
+         * 764 vs 864 用户观感"宽度不一致"）。内容超卡片时条仍随内容走，上限改按
+         * 视口剩余宽：web 版实测过按卡片宽硬夹会把数值挤没（"1.4s"→"1"）；
+         * 被上限夹住时由 .zu-main overflow:hidden 裁剪。 */
+        var minW = Math.max(60, Math.round(ar.width));
+        var maxW = Math.max(minW, Math.round(innerWidth - left - 8));
+        if (bar.style.minWidth !== minW + "px") bar.style.minWidth = minW + "px";
         if (bar.style.maxWidth !== maxW + "px") bar.style.maxWidth = maxW + "px";
         everMounted = true;
         if (slot === 0 && Date.now() - lastMountDiagAt > 5000) {
@@ -1498,6 +1524,15 @@
             version: VERSION, mode: "below-card", bodyPE: (function () { try { return getComputedStyle(document.body).pointerEvents; } catch (e) { return ""; } })(),
             panes: diagPanes(),
             theme: themeDark ? "dark" : "light",
+            /* 字体跟随（v64）实测：条面计算字体 + 客户端两个字体变量的原值（验证 var 命中） */
+            font: (function () {
+              try {
+                var rs = getComputedStyle(document.documentElement), cs = getComputedStyle(bar);
+                return { fam: String(cs.fontFamily).slice(0, 90), size: cs.fontSize,
+                  mono: String(rs.getPropertyValue("--font-mono")).slice(0, 80).trim(),
+                  ui: String(rs.getPropertyValue("--ui-font-size")).trim() };
+              } catch (e) { return "ERR:" + e; }
+            })(),
             tip: (function () { return { stats: tipStats, disp: tip.style.display, barRect: (function () { var b = bar.getBoundingClientRect(); return [Math.round(b.left), Math.round(b.top), Math.round(b.width), Math.round(b.height)]; })() }; })(),
             composerRect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
             anchorRect: [Math.round(ar.left), Math.round(ar.top), Math.round(ar.width), Math.round(ar.height)],
