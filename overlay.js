@@ -1,6 +1,7 @@
 /* ZCode token 用量状态条 v58（渲染进程注入，自包含 IIFE）。
  * 形态：输入框视觉卡片正下方的悬浮胶囊条 —— 给卡片加 margin-bottom 上移让位，
- *       条 fixed 悬浮在卡片边框外、窗口底边上的空带里，rAF 每帧跟随，左缘与卡片对齐。
+ *       条 fixed 悬浮在卡片边框外、窗口底边上的空带里，rAF 每帧跟随，
+ *       左右两缘都与卡片对齐（min-width=卡片宽；内容更宽时随内容、上限按视口）。
  *       （条不能放在输入框中心点所在矩形内：命中检测自遮挡 = 周期性闪烁，v12-v14 实测。）
  * 视觉（v28）：半透明胶囊底 + 组间 │ 分隔 + 上下文微进度条（三档色）+ 子代理呼吸灯；
  *       条面只放主数值，明细进 hover title。
@@ -147,7 +148,7 @@
   /* ---------- 实例工厂（v61.1）：一个 pane 一套 条/面板/气泡/tooltip/定位循环。
    * slot 0 保留 #zusage-bar/#zusage-tip 兼容 id（泵热更新按它清理），其余实例仅类名。 */
   function spawnInstance(pid, slot) {
-    var VERSION = "v62";   // v62：模态弹窗（模型配置等）打开时整体收起 + 弹窗内编辑框不再被当输入框（issue #9）；零值会话的来源提示（issue #14）   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
+    var VERSION = "v63";   // v63：条宽与卡片一致（min-width=卡片宽，box-sizing:border-box；内容更宽仍随内容、上限按视口）+ 条目均匀分布撑满、⚙ 靠最右   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
     /* ---------- 状态（实例级） ---------- */
     var excOn = false,    // 本 pane 会话处于"上下文超限被拒"状态（render 时按 picked 会话计算）
       excGone = false,    // 用户点 ✕ 关闭了本次气泡；超限解除后自动复位
@@ -165,7 +166,7 @@
        * var(--color-*, 旧值兜底) 引用客户端语义变量（<html> 的 .dark 类翻转整套值，
        * zai-light/zai-dark 特殊主题同样自动适配）；color-mix 处加同值前置声明，
        * 不支持 color-mix 的旧引擎落到实色行不至于透明。 */
-      ".zusage-root{position:fixed;font:14px/1.3 Consolas,'Cascadia Mono',Menlo,'Microsoft YaHei UI','Microsoft YaHei',monospace;" +
+      ".zusage-root{position:fixed;box-sizing:border-box;font:14px/1.3 Consolas,'Cascadia Mono',Menlo,'Microsoft YaHei UI','Microsoft YaHei',monospace;" +
       "font-variant-numeric:tabular-nums;color:var(--color-foreground-subtle,#8791a3);" +
       "background:rgba(15,18,25,.86);background:color-mix(in srgb,var(--color-background,#0f1219) 86%,transparent);" +
       "backdrop-filter:blur(14px) saturate(1.3);-webkit-backdrop-filter:blur(14px) saturate(1.3);" +
@@ -175,7 +176,7 @@
       /* 条不能 overflow:hidden：设置面板是条的子元素、展开在条外上方，裁剪会吞掉面板（v15"点设置看不到窗口"根因）。
        * 超宽截断由 #zu-main 自己负责。 */
       "z-index:50}" +
-      ".zu-main{overflow:hidden;min-width:0;flex:0 1 auto;display:flex;align-items:center;gap:1px}" +
+      ".zu-main{overflow:hidden;min-width:0;flex:1 1 auto;display:flex;align-items:center;gap:1px;justify-content:space-between}" +
       /* zu-main 不得带 .it class：querySelectorAll('.it') 收集 tooltip 时会把它算进第 0 位，
        * tips 全部错位一位且末项为 null —— v31"悬停只有空胶囊/内容错位"的根因 */
       ".it{display:flex;align-items:center;gap:4px;padding:2px 6px;border-radius:6px;" +
@@ -296,7 +297,8 @@
       "@media (prefers-reduced-motion:reduce){.exc,.dot{animation:none}" +
       ".it,.btn,.ttab,.panel label{transition:none}}";
 
-    /* 结构：文字项 + ⚙ 紧跟其后（无弹性空隙，不再推到最右）；面板绝对定位向上展开 */
+    /* 结构：条撑满卡片宽后 .zu-main 占满剩余宽、条目+分隔线 space-between 均匀分布，
+     * ⚙ 落在最右缘（内容超宽时无剩余空间，自动退回紧凑排列并裁剪）；面板绝对定位向上展开 */
     var bar = document.createElement("div");
     bar.className = "zusage-root";
     if (slot === 0) bar.id = "zusage-bar";
@@ -1487,7 +1489,14 @@
           bar.style.left = left + "px"; bar.style.top = top + "px";
           lastPos = [left, top];
         }
-        var maxW = Math.max(60, Math.round(ar.width - 24));
+        /* 宽度与卡片一致（v63）：min-width = 卡片宽（border-box，外缘含边框正好压在
+         * 卡片两缘上）—— 内容窄于卡片时条撑满卡片，右缘不再悬空短一截（v62 实测
+         * 764 vs 864 用户观感"宽度不一致"）。内容超卡片时条仍随内容走，上限改按
+         * 视口剩余宽：web 版实测过按卡片宽硬夹会把数值挤没（"1.4s"→"1"）；
+         * 被上限夹住时由 .zu-main overflow:hidden 裁剪。 */
+        var minW = Math.max(60, Math.round(ar.width));
+        var maxW = Math.max(minW, Math.round(innerWidth - left - 8));
+        if (bar.style.minWidth !== minW + "px") bar.style.minWidth = minW + "px";
         if (bar.style.maxWidth !== maxW + "px") bar.style.maxWidth = maxW + "px";
         everMounted = true;
         if (slot === 0 && Date.now() - lastMountDiagAt > 5000) {
