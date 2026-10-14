@@ -615,7 +615,7 @@ def _session_snapshot(con, sid, cfg):
     u = session_usage(con, sid)
     last = con.execute(
         """select duration_ms, coalesce(time_to_first_token_ms,0), completed_at, turn_id, model_id,
-                  output_tokens, first_token_at
+                  output_tokens, first_token_at, started_at, reasoning_tokens
            from model_usage where session_id=? and status='completed'
            order by completed_at desc limit 1""",
         (sid,),
@@ -656,12 +656,18 @@ def _session_snapshot(con, sid, cfg):
     lr = con.execute("select max(completed_at) from model_usage where session_id=?", (sid,)).fetchone()
     active = bool(lr and lr[0] and int(time.time() * 1000) - lr[0] < SESSION_TIMEOUT_MS)
     ctx_auto = lookup_context_window(last["model_id"]) if last else None
-    # 生成速度：输出 token ÷ 生成耗时（首 token 之后到完成；无 first_token_at 时退化为总耗时）
+    # 生成速度：输出 token ÷ 生成耗时。口径与逐问速率行（token_rate.py）一致：
+    #   分子 = output_tokens（ZCode 该列已含思考 token，不另加）；
+    #   分母 = completed − first_token（首 token 之后到完成），但思考 token 在
+    #   first_token_at 之前流出（2026-10-14 真库裁决），含思考段的窗口前移到
+    #   started_at，否则思考时长被漏出分母、速率虚高；缺 first_token_at 时退化总耗时。
     tps = 0
     if last and last["output_tokens"]:
         gen_ms = None
         if last["first_token_at"] and last["completed_at"] and last["completed_at"] > last["first_token_at"]:
             gen_ms = last["completed_at"] - last["first_token_at"]
+            if last["reasoning_tokens"] and last["started_at"] and last["completed_at"] > last["started_at"]:
+                gen_ms = last["completed_at"] - last["started_at"]
         elif last["duration_ms"]:
             gen_ms = last["duration_ms"]
         if gen_ms:

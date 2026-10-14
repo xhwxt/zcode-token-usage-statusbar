@@ -1,0 +1,22 @@
+{
+  "name": "zcode-token-usage-statusbar",
+  "version": "1.4.0",
+  "description": "ZCode token usage query (token_usage MCP tool, /usage command, skill) reading the local usage DB; optionally installs the floating usage status bar into the desktop client (requires client restart, off by default); appends a per-answer rate line (tok/s incl. thinking, TTFT, output tokens, generation time, segments/peak, session total) at the end of each reply, guarded by --current so a previous turn's data is never shown as the current one.",
+  "description_i18n": {
+    "en": "ZCode token usage query (token_usage MCP tool, /usage command, skill) reading the local usage DB; optionally installs the floating usage status bar into the desktop client (requires client restart, off by default); appends a per-answer rate line (tok/s incl. thinking, TTFT, output tokens, generation time, segments/peak, session total) at the end of each reply, guarded by --current so a previous turn's data is never shown as the current one.",
+    "zh-CN": "ZCode token 用量查询：token_usage MCP 工具 + /usage 命令 + 技能（只读本地 usage 数据库）；可选为桌面客户端安装悬浮用量状态条（需重启客户端生效，默认不自动安装）；每次回答末尾自动追加逐问速率行（即时 tok/s 含思考、首字延迟、输出 token、生成耗时、段数/峰值与会话累计），--current 守卫保证绝不把上一轮数据当作本问显示。"
+  },
+  "author": {
+    "name": "xhwxt"
+  },
+  "license": "MIT",
+  "keywords": [
+    "token",
+    "usage",
+    "statusbar",
+    "monitor",
+    "zusage"
+  ],
+  "commands": "commands",
+  "skills": "skills"
+}

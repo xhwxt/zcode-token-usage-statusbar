@@ -1,0 +1,26 @@
+{
+  "name": "zusage-marketplace",
+  "description": "zcode-token-usage-statusbar 插件市场：ZCode token 用量查询（MCP / 命令 / 技能）与桌面悬浮状态条安装。",
+  "owner": {
+    "name": "xhwxt"
+  },
+  "plugins": [
+    {
+      "name": "zcode-token-usage-statusbar",
+      "source": "./plugins/zcode-token-usage-statusbar",
+      "description": "ZCode token 用量查询（token_usage MCP 工具 + /usage 命令 + 技能，读本地 usage 数据库）；可选为桌面客户端安装悬浮用量状态条（需重启客户端生效，默认不自动装）；每次回答末尾自动追加逐问速率行（即时 tok/s 含思考、首字延迟、输出 token、生成耗时、段数/峰值与会话累计，--current 守卫防旧数据充数）。",
+      "version": "1.4.0",
+      "author": {
+        "name": "xhwxt"
+      },
+      "category": "monitoring",
+      "keywords": [
+        "token",
+        "usage",
+        "statusbar",
+        "monitor",
+        "zusage"
+      ]
+    }
+  ]
+}

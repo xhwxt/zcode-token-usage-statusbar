@@ -6,6 +6,11 @@ diag-*.json
 .video_agent/
 .research-tmp/
 .worktrees/
-.zcode/
+.zcode/*
+!.zcode/skills/
+.zcode/skills/*
+!.zcode/skills/zcode-github-release/
 config.json
 .update-baseline.json
+
+.idea/

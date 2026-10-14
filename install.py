@@ -93,7 +93,7 @@ ZCODE_CONFIG = real_home() / ".zcode" / "cli" / "config.json"
 COMMANDS_DIR = real_home() / ".zcode" / "commands"
 MCP_NAME = "zcode-token-usage-statusbar"   # MCP server 注册名（与仓库名一致；老安装叫 token-usage/zusage，自动迁移）
 MCP_NAME_OLD = ("token-usage", "zusage")   # 历史注册名
-RUNTIME_FILES = ("inject-main.cjs", "overlay.js", "zusage.py", "usage_mcp.py")
+RUNTIME_FILES = ("inject-main.cjs", "plugin-updater.cjs", "plugin-release.cjs", "plugin-storage.cjs", "release_unpack.py", "runtime_lock.py", "overlay.js", "zusage.py", "usage_mcp.py")
 
 # ZCode 安装位置候选：resources/app.asar 存在即命中（按序探测，按当前平台取组）
 if sys.platform == "darwin":

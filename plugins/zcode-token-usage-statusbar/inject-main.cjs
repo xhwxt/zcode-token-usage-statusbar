@@ -1,0 +1,477 @@
+/* ZCode token 用量注入 loader v2（主进程）。
+ * 由 patch_install.py 在 app.asar 入口尾部追加一行 import 引入。
+ * 职责：1) 向每个窗口注入 overlay.js（mtime 变化热更新，免重启）；
+ *       2) 触发式拉取：fs.watch 监听 db 目录，db.sqlite/-wal 一有写入（去抖 300ms）就
+ *          查询并推送。限频 config.activity_min_ms（默认 1500ms），限频到点
+ *          自动补拉，最后一笔写入不漏；完全空闲时零进程零轮询，仅兜底心跳
+ *          （config.heartbeat_ms，默认 30s）防文件事件丢失（Node 官方文档：fs.watch
+ *          事件不保证送达）。任何失败只打日志，不影响客户端。
+ *       3) 每窗口当前会话（v6）：渲染端 workspace shell 把焦点会话 id 经 IPC
+ *          "zcode:sync-active-task-session" 推给主进程（客户端自带通道，实测见 app bundle），
+ *          这里追加监听记录 webContents.id → 会话 id：查询时把全部窗口的会话强制纳入快照，
+ *          推送时给每个窗口注入 mine 字段 —— 多窗口各自显示自己的会话，不再猜"全局最近活跃"。 *
+ *  v8：查询改常驻 python（zusage.py serve，stdin/stdout 行协议）——省每次 ~60-100ms 的
+ *      解释器启动费；意外退出自动重启（30s 内连续 3 次判不稳定则回退一次性 spawn）；
+ *      zusage.py mtime 变化自动重启（升级生效）；stdin EOF = 泵退出，常驻进程自清理。 */
+"use strict";
+const path = require("path");
+const fs = require("fs");
+const { spawn, execFile } = require("child_process");
+const { createHash } = require("crypto");
+const { app, BrowserWindow, webContents } = require("electron");
+const { fileURLToPath } = require("url");
+
+const HERE = __dirname;   // 本 loader 被 asar 注入行按绝对 file:// URL import，__dirname 即真实目录（克隆到任意路径无需改代码）
+const CONFIG = path.join(HERE, "config.json");
+const OVERLAY = path.join(HERE, "overlay.js");
+const ZUSAGE = path.join(HERE, "zusage.py");
+const LOG = (...a) => console.error("[zusage]", ...a);
+const loadedHashes = { _loadedAt: Date.now() - process.uptime() * 1000 };
+for (const name of ["inject-main.cjs", "plugin-updater.cjs", "plugin-release.cjs", "plugin-storage.cjs", "overlay.js", "zusage.py"]) {
+  try { loadedHashes[name] = createHash("sha256").update(fs.readFileSync(path.join(HERE, name))).digest("hex"); }
+  catch (e) { LOG("startup fingerprint unavailable:", name, e.message); }
+}
+function acknowledgeRestart() {
+  const helper = path.join(HERE, "runtime_lock.py");
+  if (!fs.existsSync(helper)) return;
+  execFile(readCfg().python_path || (process.platform === "win32" ? "python" : "python3"),
+    [helper, "--ack-restart", HERE, JSON.stringify(loadedHashes)],
+    { windowsHide: true, timeout: 15000, maxBuffer: 65536 },
+    (error) => { if (error) LOG("restart acknowledgement failed:", error.message); });
+}
+
+function readCfg() {
+  const c = { python_path: "python", resident: true };
+  try { Object.assign(c, JSON.parse(fs.readFileSync(CONFIG, "utf8"))); } catch (e) { }
+  return c;
+}
+
+/* config.json 内容缓存：热更新定时器每 2s 触发，改为 stat mtime 判变化后才读文件 */
+let cfgMtime = 0;
+let cfgCache = null;
+function readCfgCached() {
+  let m = 0;
+  try { m = fs.statSync(CONFIG).mtimeMs; } catch (e) { }
+  if (!cfgCache || m !== cfgMtime) {
+    cfgMtime = m;
+    cfgCache = readCfg();
+  }
+  return cfgCache;
+}
+
+/* overlay 注入源 + 热更新：mtime 变了就重注入（移除旧条+复位守卫）。
+ * 载入前用 new Function 校验语法，避免把写到一半的文件载入页面。 */
+let overlaySrc = "";
+let overlayMtime = 0;
+try {
+  overlaySrc = fs.readFileSync(OVERLAY, "utf8");
+  overlayMtime = fs.statSync(OVERLAY).mtimeMs;
+} catch (e) { LOG("overlay.js missing:", e.message); }
+
+function hotReloadIfChanged() {
+  let m = 0, src = "";
+  try {
+    m = fs.statSync(OVERLAY).mtimeMs;
+    src = fs.readFileSync(OVERLAY, "utf8");
+  } catch (e) { return; }
+  if (m === overlayMtime) return;
+  try { new Function(src); } catch (e) { LOG("overlay.js syntax not ready, skip:", e.message); return; }
+  overlayMtime = m;
+  overlaySrc = src;
+  LOG("overlay.js changed, hot-reloading");
+  for (const wc of webContents.getAllWebContents()) {
+    if (!isMainWindowState(wc) || wc.isDestroyed()) continue;
+    wc.executeJavaScript(
+      '(function(){var b=document.getElementById("zusage-bar");if(b)b.remove();var t=document.getElementById("zusage-tip");if(t)t.remove();window.__zusageOverlay=false;})()', true
+    ).catch(() => { });
+    injectOverlay(wc);
+  }
+}
+
+function isMainWindowState(wc) {
+  try { return wc.getType() === "window"; } catch (e) { return false; }
+}
+
+function pushOnce(wc, payload) {
+  if (!isMainWindowState(wc) || wc.isDestroyed() || !payload || typeof payload !== "object") return;
+  /* 按窗口注入 mine（本窗口焦点会话 id，可为空串 = 该窗口当前无会话）：
+   * overlay 收到 mine 字段就优先显示它，不再多窗口共享同一个猜测。
+   * 必须对象合并后序列化，禁止对 JSON 字符串做括号手术——v34 首版 slice 掐尾少补一个
+   * 右括号，生成语法错误代码且失败只进静默 catch，全部窗口停在初始零值（实测翻车）。 */
+  const obj = activeSid.has(wc.id) ? Object.assign({}, payload, { mine: activeSid.get(wc.id) || "" }) : payload;
+  /* U+2028/2029 转义：JSON.stringify 会输出裸字符，放进 executeJavaScript 字符串字面量
+   * 有语法风险（zusage.py 侧 ensure_ascii 的同款考量；会话标题可能含任意文本） */
+  const js = `window.__zusageUpdate && window.__zusageUpdate(${JSON.stringify(obj).replace(/[\u2028\u2029]/g, (c) => c === "\u2028" ? "\\u2028" : "\\u2029")})`;
+  wc.executeJavaScript(js, true).catch(() => { });
+}
+
+/* 每窗口焦点会话：客户端渲染端把 activeTaskId 经此通道同步给主进程（CUA PiP 所用通道），
+ * 追加监听器不影响原有处理。值为 "" = 窗口已同步但当前无会话（新空会话/非任务页）；
+ * 不在表里 = 该窗口从未同步（辅助窗口），推送时不带 mine，overlay 走本地键启发式。 */
+const IPC_ACTIVE_SID = "zcode:sync-active-task-session";
+const activeSid = new Map();   // webContents.id → 会话 id 或 ""
+try {
+  const { ipcMain } = require("electron");
+  ipcMain.on(IPC_ACTIVE_SID, (e, sid) => {
+    if (!e || !e.sender || e.sender.isDestroyed()) return;
+    const s = typeof sid === "string" ? sid.trim() : "";
+    const val = s && s.length <= 255 && /^[A-Za-z0-9_-]+$/.test(s) ? s : "";
+    const prev = activeSid.get(e.sender.id);
+    activeSid.set(e.sender.id, val);
+    if (prev !== val) scheduleRetry(800);   // 会话切换/窗口就绪：尽快按新会话拉一次（限频器仍生效）
+  });
+} catch (e) { LOG("ipc hook failed:", e.message); }
+
+/* db 活动戳：db.sqlite / -wal / -shm 的最新 mtime。WAL 模式下写入主要落在 -wal。 */
+let DB_DIR = null;
+function dbDir() {
+  if (!DB_DIR) DB_DIR = path.join(app.getPath("home"), ".zcode", "cli", "db");
+  return DB_DIR;
+}
+function dbStamp() {
+  let m = 0;
+  const dir = dbDir();
+  for (const f of ["db.sqlite", "db.sqlite-wal", "db.sqlite-shm"]) {
+    try { m = Math.max(m, fs.statSync(path.join(dir, f)).mtimeMs); } catch (e) { }
+  }
+  return m;
+}
+
+/* v9 远程数据源：payload.recent 里带 remote 标记的会话 = zusage.py 经 SSH 从远端机取得。
+ * 本地 fs.watch 对远端库写入无感，聚焦远端会话期间由泵按 remote.poll_ms 主动轮询
+ * （默认 3s），切回本地会话即恢复纯事件触发、零进程零轮询。 */
+const remoteSids = new Set();
+let lastHadRemote = false;
+function remotePollMs() {
+  const r = readCfgCached().remote;
+  return Math.max(1000, (r && r.poll_ms | 0) || 3000);
+}
+
+let busy = false;
+let pushCount = 0;
+let lastSpawn = 0;    // 上次发起查询时刻（activity_min_ms 限频用）
+let lastStamp = 0;    // 上次拉取时的 db mtime（去重：无新写入不拉）
+let lastWants = "";   // 上次查询用的会话 id 集合（变化即拉，防"会话切了但 db 没写入"滞留旧数据）
+
+function handlePayload(payload) {
+  if (!payload || typeof payload !== "object") return;
+  remoteSids.clear();
+  for (const r of (payload.recent || [])) if (r && r.remote && r.sid) remoteSids.add(r.sid);
+  for (const wc of webContents.getAllWebContents()) pushOnce(wc, payload);
+  // 定位诊断：每 ~15 次拉取收集每个窗口各自的 __zusageDiag，附加泵侧证据后写 diag-<n>.json（多窗口互不覆盖）
+  if (++pushCount % 15 === 1) {
+    let idx = 0;
+    for (const wc of webContents.getAllWebContents()) {
+      if (!isMainWindowState(wc) || wc.isDestroyed()) continue;
+      const file = path.join(HERE, "diag-" + idx + ".json");
+      idx++;
+      wc.executeJavaScript("JSON.stringify(window.__zusageDiag||null)", true)
+        .then((s) => {
+          if (s && s !== "null") {
+            try {
+              const obj = JSON.parse(s);
+              obj.pump = {
+                version: 10,
+                resident: !!pyRes,
+                activeMap: Array.from(activeSid.entries()).slice(0, 12),
+                wants: lastWants,
+              };
+              fs.writeFileSync(file, JSON.stringify(obj));
+            } catch (e2) {
+              try { fs.writeFileSync(file, s); } catch (e) { }
+            }
+          }
+        })
+        .catch(() => { });
+    }
+  }
+}
+
+/* ---------- 常驻查询进程（v8）：zusage.py serve，stdin 请求行 / stdout 响应行 ---------- */
+let pyRes = null;        // { proc, buf, waiters: [fn], born }
+let pyFail = 0;          // 启动 30s 内退出次数（>=3 判不稳定，回退一次性 spawn）
+let pyBackoff = 1000;
+let pyRestarting = false;   // 主动 kill（升级/超时）标记，close 时不计失败
+
+function startResident() {
+  if (pyRes) return;
+  const proc = spawn(readCfg().python_path, [path.join(HERE, "zusage.py"), "serve"], { windowsHide: true });
+  const state = { proc, buf: "", waiters: [], born: Date.now() };
+  pyRes = state;
+  LOG("resident python starting");
+  proc.stdout.on("data", (d) => {
+    state.buf += d.toString("utf8");
+    let i;
+    while ((i = state.buf.indexOf("\n")) >= 0) {
+      const line = state.buf.slice(0, i);
+      state.buf = state.buf.slice(i + 1);
+      const w = state.waiters.shift();
+      if (!w) continue;
+      let payload = null;
+      try { payload = JSON.parse(line); } catch (e) { }
+      w(payload);
+    }
+  });
+  proc.stderr.on("data", () => { });
+  proc.on("close", () => {
+    if (pyRes === state) pyRes = null;
+    const pending = state.waiters;
+    state.waiters = [];
+    pending.forEach((w) => w(null));   // 挂起请求失败收场，泵侧等下一笔写入/心跳补拉
+    if (pyRestarting) { pyRestarting = false; startResident(); return; }
+    if (Date.now() - state.born < 30000) {   // 早期崩溃：退避重启，3 次判不稳定
+      pyFail++;
+      if (pyFail >= 3) { LOG("resident unstable (3 early exits), fallback to one-shot spawn"); return; }
+      setTimeout(startResident, pyBackoff);
+      pyBackoff = Math.min(pyBackoff * 2, 30000);
+    } else {   // 长跑后退出（升级/外部误杀）：立即重启，不计失败
+      pyFail = 0;
+      pyBackoff = 1000;
+      startResident();
+    }
+  });
+}
+
+function killResidentForUpgrade() {
+  if (!pyRes) return;
+  pyRestarting = true;
+  try { pyRes.proc.kill(); } catch (e) { }
+}
+
+/* 统一查询入口：resident 可用走行协议，否则一次性 spawn（config.resident=false 或判不稳定） */
+function runQuery(wants) {
+  busy = true;
+  const done = (payload) => {
+    busy = false;
+    if (payload) handlePayload(payload);
+    if (lastHadRemote) scheduleRetry(remotePollMs());   // 远端会话聚焦期间维持轮询链
+    // 失败不原地重试：下一笔 db 写入/心跳会再拉，最多滞后一个心跳
+  };
+  if (readCfgCached().resident !== false && pyFail < 3) {
+    if (!pyRes) startResident();
+    if (pyRes && pyRes.proc.stdin.writable) {
+      const state = pyRes;
+      const timer = setTimeout(() => {
+        LOG("resident query timeout, restarting it");
+        pyRestarting = true;
+        try { state.proc.kill(); } catch (e) { }
+        done(null);
+      }, 15000);
+      state.waiters.push((payload) => { clearTimeout(timer); done(payload); });
+      try { state.proc.stdin.write((wants || "") + "\n"); } catch (e) { }
+      return;
+    }
+  }
+  legacySpawn(wants);
+}
+
+/* 回退路径（一次性 spawn）：常驻不可用时走 */
+function legacySpawn(wants) {
+  /* wants：各窗口当前会话 id（逗号分隔）。全部强制纳入快照，共享池里包含每个窗口
+   * 自己的会话；zusage.py 逐个白名单校验。泵侧整体格式白名单防注入。 */
+  const args = [path.join(HERE, "zusage.py"), "json"];
+  if (wants && /^[A-Za-z0-9_,-]{1,600}$/.test(wants)) args.push(wants);
+  const py = spawn(readCfg().python_path, args, { windowsHide: true });
+  let out = "";
+  /* 兜底：查询进程 15 秒不退出按挂死杀掉，close 事件照常触发，busy 不会永久卡住 */
+  const killTimer = setTimeout(() => { LOG("query timeout, killing"); try { py.kill(); } catch (e) { } }, 15000);
+  py.stdout.on("data", (d) => { out += d; });
+  py.on("error", (e) => { busy = false; LOG("spawn failed:", e.message); });
+  py.on("close", () => {
+    clearTimeout(killTimer);
+    busy = false;
+    if (lastHadRemote) scheduleRetry(remotePollMs());
+    if (out.trim()) {
+      let payload;
+      try { payload = JSON.parse(out); } catch (e) { payload = null; }
+      if (payload) handlePayload(payload);
+    }
+  });
+}
+
+/* 触发式拉取：db 有新写入（mtime 变化）才 spawn 查询；限频不满足时安排补拉，
+ * 保证限频窗口结束后最后一笔写入的数据一定被取到。 */
+let retryTimer = 0;
+function scheduleRetry(ms) {
+  clearTimeout(retryTimer);
+  retryTimer = setTimeout(maybeSpawn, ms);
+}
+function maybeSpawn() {
+  if (busy) { scheduleRetry(300); return; }
+  const st = dbStamp();
+  const cfg = readCfgCached();
+  const wait = Math.max(300, cfg.activity_min_ms | 0 || 1500);
+  /* 先取各窗口的"当前会话 id"：主进程 IPC 映射（应用自己上报的焦点会话，v6）优先，
+   * overlay 从 localStorage 键读出的 __zusageWantSid 兜底；无窗口时直接短路（空闲零进程的
+   * 设计意图）；executeJavaScript 挂 1s 超时，防渲染进程卡死导致泵永不 settle。
+   * v8：全部窗口都已在 IPC 映射表里（含"已同步但无会话"的空串）时跳过整轮 eval ——
+   * mine 模式下 WantSid 已非主数据源，省掉活跃期每 1.5s × N 窗口的页面求值。 */
+  const wcs = webContents.getAllWebContents().filter((wc) => isMainWindowState(wc) && !wc.isDestroyed());
+  if (!wcs.length) return;
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r(""), ms))]);
+  /* 各窗口的 pane 会话 id（v10，__zusageWantSids 数组，分屏多实例状态条用）+ 旧单值兜底。
+   * v8 曾在 mine 模式跳过页面求值；分屏后每 pane 有自己的会话，必须读回数组才能全部纳入快照。 */
+  const readWantsJs = "(function(){var a=window.__zusageWantSids;if(!a||!a.length){a=window.__zusageWantSid?[window.__zusageWantSid]:[]}return JSON.stringify(a)})()";
+  Promise.all(wcs.map((wc) => withTimeout(wc.executeJavaScript(readWantsJs, true).catch(() => "[]"), 1000)))
+    .then((vals) => {
+      /* 汇总全部窗口的全部 pane 会话（去重）：mine（窗口焦点会话）优先，pane 会话随后 */
+      const wants = [];
+      const push = (sid) => { if (sid && /^[A-Za-z0-9_-]{1,80}$/.test(sid) && !wants.includes(sid)) wants.push(sid); };
+      wcs.forEach((wc, i) => {
+        if (activeSid.has(wc.id)) push(activeSid.get(wc.id) || "");
+        let arr = [];
+        try { arr = JSON.parse(vals[i] || "[]"); } catch (e) { }
+        if (Array.isArray(arr)) arr.forEach(push);
+      });
+      const key = wants.join(",");
+      /* v9：聚焦 SSH 远程会话时本地 db 不写入（st 恒定），短路径放行、改按 remote 轮询间隔 */
+      const remoteActive = wants.some((s) => remoteSids.has(s));
+      if (key === lastWants && st && st === lastStamp && !remoteActive) return;   // 会话与数据都没变：零进程
+      const now = Date.now();
+      const effWait = remoteActive ? remotePollMs() : wait;
+      if (now - lastSpawn < effWait) { scheduleRetry(effWait - (now - lastSpawn) + 50); return; }
+      lastWants = key;
+      lastHadRemote = remoteActive;
+      if (st) lastStamp = st;
+      lastSpawn = now;
+      runQuery(key);
+    })
+    .catch(() => { });
+}
+
+/* 监听 db 目录：WAL/主库一有写入立刻（去抖 300ms）触发拉取；完全空闲时零进程零轮询 */
+let debounceTimer = 0;
+let dbWatcher = null;
+function watchDb() {
+  if (dbWatcher) return;
+  try {
+    dbWatcher = fs.watch(dbDir(), (ev, f) => {
+      if (f && !/db\.sqlite/.test(f)) return;
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(maybeSpawn, 300);
+    });
+    dbWatcher.on("error", () => {
+      LOG("db watcher error, re-arm in 5s");
+      try { dbWatcher.close(); } catch (e) { }
+      dbWatcher = null;
+      setTimeout(watchDb, 5000);
+    });
+    LOG("watching", dbDir());
+  } catch (e) {
+    LOG("fs.watch failed, retry in 5s:", e.message);
+    setTimeout(watchDb, 5000);
+  }
+}
+
+/* overlay / zusage.py 热更新检查（stat mtime，开销可忽略）；config.hot_reload=false 可关闭
+ * （发布/稳定形态：改文件需重启 ZCode 才生效），开关改动随下次心跳生效。
+ * zusage.py 变化时重启常驻进程（serve 进程驻内存的是旧代码）；顺带 stat config mtime。 */
+let overlayMtimeKnown = false;
+let zusageMtime = 0;
+setInterval(() => {
+  const cfg = readCfgCached();
+  if (cfg.hot_reload === false) return;
+  hotReloadIfChanged();
+  try {
+    const m = fs.statSync(ZUSAGE).mtimeMs;
+    if (overlayMtimeKnown && m !== zusageMtime && pyRes) {
+      LOG("zusage.py changed, restarting resident python");
+      killResidentForUpgrade();
+    }
+    zusageMtime = m;
+    overlayMtimeKnown = true;
+  } catch (e) { }
+}, 2000);
+setInterval(maybeSpawn, Math.max(10000, readCfg().heartbeat_ms | 0 || 30000));   // 兜底心跳：防文件事件丢失
+watchDb();
+maybeSpawn();   // 启动先拉一次
+
+let pluginUpdater = null;
+let pluginRequestBusy = false;
+function pushPluginState(wc, state) {
+  if (!isMainWindowState(wc) || wc.isDestroyed()) return;
+  /* rateLine 随插件状态一起推送：⚙ 面板「逐问速率行」勾选态的真值来自 config.json */
+  const payload = { ...state, rateLine: readCfgCached().answer_rate_line !== false };
+  wc.executeJavaScript(`window.__zusagePluginUpdate && window.__zusagePluginUpdate(${JSON.stringify(payload)})`, true).catch(() => { });
+}
+try {
+  const { createUpdater } = require("./plugin-updater.cjs");
+  pluginUpdater = createUpdater({ runtime: HERE, home: app.getPath("home"),
+    resourcesPath: process.resourcesPath, executable: process.execPath,
+    notify: (state) => webContents.getAllWebContents().forEach((wc) => pushPluginState(wc, state)) });
+} catch (e) {
+  delete loadedHashes["plugin-updater.cjs"];
+  delete loadedHashes["plugin-release.cjs"];
+  delete loadedHashes["plugin-storage.cjs"];
+  LOG("plugin updater unavailable:", e.message);
+}
+acknowledgeRestart();
+/* 逐问速率行开关（⚙ 面板）：原子写运行时 config.json 的 answer_rate_line（缺省=开启）。
+   prompt-submit hook 每次提问时读同一文件——开关下一问即生效，无需重启客户端。 */
+function broadcastPluginState() {
+  const base = pluginUpdater ? pluginUpdater.status() : {};
+  webContents.getAllWebContents().forEach((wc) => pushPluginState(wc, base));
+}
+function setAnswerRateLine(enabled) {
+  try {
+    let raw = {};
+    try { raw = JSON.parse(fs.readFileSync(CONFIG, "utf8")); } catch (e) { if (e.code !== "ENOENT") throw e; }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("config.json 不是对象");
+    raw.answer_rate_line = !!enabled;
+    const tmp = CONFIG + "." + process.pid + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(raw, null, 2) + "\n");
+    fs.renameSync(tmp, CONFIG);
+    cfgCache = null;   // 写后置空，下一次 readCfgCached 立即重读（mtime 判变的双保险）
+    broadcastPluginState();
+  } catch (e) { LOG("answer_rate_line toggle failed:", e.message); }
+}
+async function pollPluginRequests() {
+  if (pluginRequestBusy) return;
+  pluginRequestBusy = true;
+  try {
+    for (const wc of webContents.getAllWebContents()) {
+      if (!isMainWindowState(wc) || wc.isDestroyed()) continue;
+      // 仅在宿主本地窗口读取固定动作；外部网页不能触发插件更新或配置写入。
+      const url = wc.getURL();
+      if (!url.startsWith("file:")) continue;
+      const local = fileURLToPath(url);
+      const relative = path.relative(process.resourcesPath, local);
+      if (relative.startsWith("..") || path.isAbsolute(relative)) continue;
+      const requests = await Promise.race([
+        wc.executeJavaScript('(function(){var q=window.__zusagePluginRequests;return Array.isArray(q)?q.splice(0,8):[]})()', true),
+        new Promise((resolve) => setTimeout(() => resolve([]), 1000)),
+      ]);
+      if (!Array.isArray(requests)) continue;
+      for (const req of requests) {
+        if (req && ["auto", "check", "update"].includes(req.action)) {
+          if (pluginUpdater) pluginUpdater.request(req).catch((e) => LOG("plugin update action failed:", e.message));
+        } else if (req && req.action === "rate-line" && typeof req.enabled === "boolean") {
+          setAnswerRateLine(req.enabled);
+        }
+      }
+    }
+  } catch (e) { LOG("plugin update request failed:", e.message); }
+  finally { pluginRequestBusy = false; }
+}
+setInterval(pollPluginRequests, 1000);
+setInterval(() => { if (pluginUpdater) pluginUpdater.tick().catch((e) => LOG("plugin auto update:", e.message)); }, 60000);
+if (pluginUpdater) pluginUpdater.tick().catch((e) => LOG("plugin auto update:", e.message));
+
+function injectOverlay(wc) {
+  if (!overlaySrc || !isMainWindowState(wc)) return;
+  wc.executeJavaScript(overlaySrc, true).then(() => {
+    /* 无条件推送：updater 不可用时也要让面板拿到 rateLine 真值（缺省开） */
+    pushPluginState(wc, pluginUpdater ? pluginUpdater.status() : {});
+  }).catch(() => { });
+}
+
+const hook = (wc) => {
+  if (!isMainWindowState(wc)) return;
+  wc.on("did-finish-load", () => injectOverlay(wc));
+  if (wc.isLoading()) return;
+  injectOverlay(wc);
+};
+app.on("web-contents-created", (e, wc) => hook(wc));
+for (const wc of webContents.getAllWebContents()) hook(wc);
+
+LOG("injected v11 (per-pane wants array, resident query mode + remote SSH datasource, answer_rate_line config write for the per-answer rate line toggle, plugin request polling decoupled from updater availability)");

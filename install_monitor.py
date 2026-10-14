@@ -36,6 +36,7 @@ TMP = ASAR.with_name("app.asar.zusage.tmp")
 POLL = 10            # 检测间隔（秒）
 CONFIRM_WAIT = 120   # 重启后等 diag 确认的超时（秒）
 BYE = 8              # 成功提示停留秒数
+QUIET = os.environ.get("ZUSAGE_MONITOR_QUIET") == "1"
 
 
 def load_lang():
@@ -91,12 +92,18 @@ def diag_fresh(since):
     return None
 
 
-def finalize_tmp():
-    try:
-        os.replace(TMP, ASAR)
-        return True
-    except OSError:
-        return False
+def patch_module():
+    import patch_install as pi
+    pi.set_target(ASAR)
+    pi.set_runtime(RUNTIME_DIR)
+    return pi
+
+
+def finalize_tmp(verified=None):
+    """监控按 sidecar 的 install/remove 收尾，不吞掉不可重试的完整性错误。"""
+    pi = patch_module()
+    return pi.finalize_tmp(operation=None, client_closed=lambda: zcode_pids() == set(),
+                           verified=verified)
 
 
 def draw(lines):
@@ -104,7 +111,27 @@ def draw(lines):
     print("\n".join(lines), flush=True)
 
 
+def quiet_finalize():
+    """hook 无窗口收尾：来源由 repack 前 sidecar 决定，不用监控启动时间推断。"""
+    pi = patch_module()
+    verified = {}
+    deadline = time.monotonic() + 86400
+    while TMP.exists() and time.monotonic() < deadline:
+        try:
+            pi.pending_tmp(operation=None)  # 等待/重试只读 stat，不每 10 秒 hash 大包。
+            if zcode_pids() == set() and finalize_tmp(verified=verified):
+                return
+        except pi.PendingTmpError:
+            return  # 完整性/来源失效立刻取消；不删旧包，更不能回滚客户端新版。
+        except OSError:
+            pass  # 文件占用等系统错误才重试，最多一天。
+        time.sleep(POLL)
+
+
 def main():
+    if QUIET:
+        quiet_finalize()
+        return
     epoch = float(sys.argv[1]) if len(sys.argv) > 1 else time.time()
     if os.name == "nt":
         try:
@@ -114,25 +141,61 @@ def main():
     pids0 = zcode_pids() or set()   # 启动采集 ≈ 安装时刻的进程集合（install 完成即拉起本窗口）
     t0 = time.time()
     new_since = None
+    pi = patch_module()
+    verified = {}
+    deadline = time.monotonic() + 86400
     while True:
         pids = zcode_pids()
         now = time.time()
         done = False
+        pending = None
+        if TMP.exists():
+            try:
+                pending = pi.pending_tmp(operation=None)
+                if time.monotonic() >= deadline:
+                    draw([L("[!] 待替换包收尾已超过一天，停止自动重试。文件保留，请重新安装。",
+                            "[!] Pending finalization timed out after one day; files kept. Re-run install.")])
+                    return
+            except pi.PendingTmpError as e:
+                draw([L(f"[!] 待替换包来源/身份失效，取消收尾，文件保留：{e}",
+                        f"[!] Pending source/identity invalid; finalization cancelled, files kept: {e}"),
+                      L("请重新运行 install/remove，不要手动覆盖新版 asar。",
+                        "Re-run install/remove; do not manually overwrite a newer asar.")])
+                return
+            except OSError as e:
+                draw([L(f"[!] 暂时无法检查待替换包，稍后重试：{e}",
+                        f"[!] Cannot check pending package yet; will retry: {e}")])
+                if time.monotonic() >= deadline:
+                    return
+                time.sleep(POLL)
+                continue
         if pids is None:
             lines = [L("[!] 无法检测 ZCode 进程（探测命令不可用）。",
                        "[!] Cannot detect ZCode processes (detection command unavailable).")]
-        elif TMP.exists():
-            # 运行中替换失败的收尾：ZCode 一退出就自动替换，无需计划任务
+        elif pending is not None:
+            # 和 quiet/--finalize 共用来源、TMP hash、自检及退出校验。
             if not pids:
-                if finalize_tmp():
+                try:
+                    finished = finalize_tmp(verified=verified)
+                except pi.PendingTmpError as e:
+                    draw([L(f"[!] 待替换包已失效，取消收尾，文件保留：{e}",
+                            f"[!] Pending package invalid; finalization cancelled, files kept: {e}")])
+                    return
+                except OSError:
+                    finished = False
+                if finished:
                     lines = [L("[OK] ZCode 已退出，asar 替换完成。", "[OK] ZCode has exited; app.asar replacement finished."),
                              "",
                              L("请启动 ZCode，悬浮条即可显示。", "Start ZCode and the floating bar will appear.")]
+                    if pending["operation"] == "remove":
+                        lines[-1] = L("注入已移除；重新启动 ZCode 后生效。",
+                                      "Injection removed; takes effect when ZCode starts again.")
+                        done = True
                 else:
                     lines = [L("[!] ZCode 已退出但替换失败（文件仍被占用？）",
                                "[!] ZCode has exited but the replacement failed (file still locked?)"),
                              L("稍后自动重试；也可手动执行：", "Will retry automatically; you can also run manually:"),
-                             "  python patch_install.py install --finalize"]
+                             "  python patch_install.py " + ("remove" if pending["operation"] == "remove" else "install --finalize")]
             else:
                 lines = [L("[等待] 有待替换文件，请完全退出 ZCode。",
                            "[waiting] A pending replacement file exists; please exit ZCode completely."),
