@@ -37,6 +37,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from runtime_lock import update_config
 
 HERE = Path(__file__).parent.resolve()
 
@@ -93,7 +94,7 @@ ZCODE_CONFIG = real_home() / ".zcode" / "cli" / "config.json"
 COMMANDS_DIR = real_home() / ".zcode" / "commands"
 MCP_NAME = "zcode-token-usage-statusbar"   # MCP server 注册名（与仓库名一致；老安装叫 token-usage/zusage，自动迁移）
 MCP_NAME_OLD = ("token-usage", "zusage")   # 历史注册名
-RUNTIME_FILES = ("inject-main.cjs", "overlay.js", "zusage.py", "usage_mcp.py")
+RUNTIME_FILES = ("inject-main.cjs", "plugin-updater.cjs", "plugin-release.cjs", "plugin-storage.cjs", "release_unpack.py", "runtime_lock.py", "overlay.js", "zusage.py", "usage_mcp.py")
 
 # ZCode 安装位置候选：resources/app.asar 存在即命中（按序探测，按当前平台取组）
 if sys.platform == "darwin":
@@ -237,20 +238,29 @@ def find_installed_asar(explicit=None):
     return find_asar() or ask_asar()
 
 
+def update_runtime_config(runtime, changes, defaults=None):
+    runtime = Path(runtime)
+    runtime.mkdir(parents=True, exist_ok=True)
+    chown_to_user(runtime)
+    try:
+        return update_config(runtime, changes, defaults)
+    finally:
+        for name in ("config.json", "plugin-config.lock"):
+            if (runtime / name).exists():
+                chown_to_user(runtime / name)
+
+
 def remember_asar(asar, dev):
     """安装后把 asar 路径记进 config.json 的 asar_path 字段（其余组件忽略未知字段），
     之后的安装/卸载免传 --asar。config 定位与 load_lang_from_config 同款（--dev 在仓库目录）。"""
     cfg = HERE / "config.json" if dev else DATA_DIR / "config.json"
     try:
-        data = json.loads(cfg.read_text(encoding="utf-8")) if cfg.exists() else {}
-    except (OSError, ValueError):
-        data = {}
-    if data.get("asar_path") == str(asar):
+        changed = update_runtime_config(cfg.parent, {"asar_path": str(asar)})
+    except (OSError, ValueError, TimeoutError):
+        print(L(f"[配置] 保留不可更新的 {cfg}", f"[config] keeping config that could not be updated: {cfg}"))
         return
-    data["asar_path"] = str(asar)
-    cfg.parent.mkdir(parents=True, exist_ok=True)
-    cfg.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(L(f"[目标] 已记住安装位置 → {cfg}", f"[target] install location remembered -> {cfg}"))
+    if changed:
+        print(L(f"[目标] 已记住安装位置 → {cfg}", f"[target] install location remembered -> {cfg}"))
 
 
 def chown_to_user(path):
@@ -292,10 +302,8 @@ def prepare_config(dry, dev):
         if args_lang:
             if not dry:
                 try:
-                    data = json.loads(cfg.read_text(encoding="utf-8"))
-                    data["lang"] = LANG
-                    cfg.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-                except (OSError, ValueError):
+                    update_runtime_config(cfg.parent, {"lang": LANG})
+                except (OSError, ValueError, TimeoutError):
                     pass
             print(L(f"[配置] 沿用已有 {cfg}（lang = {LANG}）", f"[config] keeping {cfg} (lang = {LANG})"))
         else:
@@ -305,8 +313,13 @@ def prepare_config(dry, dev):
         print(L(f"[配置] 迁移旧配置 {HERE / 'config.json'} → {cfg}",
                 f"[config] migrating old config {HERE / 'config.json'} -> {cfg}"))
         if not dry:
-            cfg.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(HERE / "config.json", cfg)
+            try:
+                migrated = json.loads((HERE / "config.json").read_text(encoding="utf-8"))
+                if not isinstance(migrated, dict):
+                    raise ValueError("config.json is not an object")
+                update_runtime_config(cfg.parent, {}, migrated)
+            except (OSError, ValueError, TimeoutError):
+                return False
         return True
     vals = {
         "python_path": sys.executable,
@@ -321,7 +334,7 @@ def prepare_config(dry, dev):
     if not dry:
         cfg.parent.mkdir(parents=True, exist_ok=True)
         chown_to_user(cfg.parent)
-        cfg.write_text(json.dumps(vals, indent=2, ensure_ascii=False), encoding="utf-8")
+        update_runtime_config(cfg.parent, {}, vals)
         chown_to_user(cfg)
     return True
 

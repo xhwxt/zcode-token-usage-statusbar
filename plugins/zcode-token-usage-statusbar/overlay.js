@@ -1,0 +1,1841 @@
+/* ZCode token 用量状态条 v58（渲染进程注入，自包含 IIFE）。
+ * 形态：输入框视觉卡片正下方的悬浮胶囊条 —— 给卡片加 margin-bottom 上移让位，
+ *       条 fixed 悬浮在卡片边框外、窗口底边上的空带里，rAF 每帧跟随，
+ *       左右两缘都与卡片对齐（宽=卡片实测宽；内容超宽先藏「本轮/会话累计」
+ *       的缓存命中率，仍装不下右缘渐隐）。
+ *       （条不能放在输入框中心点所在矩形内：命中检测自遮挡 = 周期性闪烁，v12-v14 实测。）
+ * 视觉（v28）：半透明胶囊底 + 组间 │ 分隔 + 上下文微进度条（三档色）+ 子代理呼吸灯；
+ *       条面只放主数值，明细进 hover title。
+ * 视觉（v54 重写）：玻璃拟态胶囊（blur+内高光+分层投影）、发丝分隔线替代 │ 字符、
+ *       条目悬浮底色提示可交互、行内 SVG 线性图标、tabular 数字、exc 呼吸闪烁、
+ *       面板/tooltip/气泡统一圆角玻璃系；行为机制（tooltip 生命周期/遮挡豁免/面板互斥）零改动。
+ * 主题（v58）：配色全量跟随客户端主题 —— 颜色一律 var(--color-*, 兜底值) 引用客户端语义
+ *       变量（<html> 的 .dark 类翻转整套值，zai-light/zai-dark 特殊主题同样适配），
+ *       MutationObserver 观察该类同步 .zu-light（仅剩阴影/光晕程度性差异）。
+ * 字体（v64）：字族/字号跟随客户端 —— font-family 一律 var(--font-mono, 旧硬编码栈兜底)
+ *       （客户端 ：root 上的等宽令牌，macOS 解析为 SF Mono，含中文回退）；字号一律
+ *       var(--ui-font-size, 14px) 按应用 text-ui 档位加减偏移（设置页「界面字号」
+ *       运行时写 <html> 内联 --ui-font-size，改动实时联动），不再硬编码 px。
+ * 数据：主进程泵推 window.__zusageUpdate；显示项可在 ⚙ 面板配置（localStorage 持久化）。
+ * 分屏（v61.1）：协调器每 600ms 扫描可见输入框，按 pane（data-pane-id）派发实例——
+ *       一个 pane 一条，各自显示 composer 祖先链 data-session-id 指向的会话；
+ *       各 pane 会话 id 汇总挂 window.__zusageWantSids 交泵强制拉取（旧泵忽略）。
+ * 当前会话（v34）：泵按窗口注入 payload.mine（客户端渲染端经 IPC 向主进程上报的焦点会话 id，
+ *       可为空串）；overlay 优先显示 mine 对应的池条目，池里还没有（新会话没数据）就显示
+ *       零值 —— 绝不回退到"别的会话"的数字（多窗口共享 localStorage 时旧启发式必错，实测）。
+ *       mine 缺失（辅助窗口/旧泵）才走 localStorage 键启发式 pickCurrent。
+ * 热更新：主进程 mtime 检测 + new Function 语法校验后重注入；代际守卫防旧实例打架。
+ * 诊断：异常与挂载信息写 window.__zusageDiag，由主进程泵取回写 diag-<n>.json。 */
+(function () {
+  if (window.__zusageOverlay) return;
+  window.__zusageOverlay = true;
+  /* 代际守卫：热更新后旧实例（interval/rAF 闭包无法外部清除）发现代号落后即永久罢工 */
+  var MY_GEN = (window.__zusageGen = (window.__zusageGen || 0) + 1);
+  function stale() { return MY_GEN !== window.__zusageGen; }
+  if (window.__zusageRateCleanup) window.__zusageRateCleanup();
+
+  var FATAL = (window.__zusageDiag = {});
+  /* 多实例（v61.1）：热更新时泵只按 id 清 0 号条，其余实例的 DOM（条/tip/气泡）
+   * 在新代码启动时按类名统一自清；旧实例闭包靠 stale() 罢工。 */
+  try {
+    document.querySelectorAll(".zusage-root,.zusage-tip-root,.zusage-exc,.zusage-rate-tip").forEach(function (el) { el.remove(); });
+  } catch (e) { }
+
+  /* ---------- 共享状态（多实例一致）：显示项/语言/上下文覆盖/最近一次数据 ---------- */
+  var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv", lang: "zusage3.lang" };
+  var state = {
+    show: { win: 1, ctx: 1, today: 1, turn: 1, sub: 1, tools: 1 },
+    ctxOv: "", data: null,
+    lang: "zh", pluginUpdate: window.__zusagePluginState || null,
+    /* 逐问速率行开关：真值在运行时 config.json 的 answer_rate_line（主进程随插件状态推送
+       rateLine 字段），渲染端只做展示与请求转发；缺省开启 */
+    rateLine: !(window.__zusagePluginState && window.__zusagePluginState.rateLine === false),
+  };
+  /* ---------- i18n（v57）：L(中文, English) 内联双语文案，语言存 localStorage ---------- */
+  function L(zh, en) { return state.lang === "en" ? en : zh; }
+  function ls(k, d) { try { return localStorage.getItem(k) ?? d; } catch (e) { return d; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { } }
+  try {
+    var s0 = JSON.parse(ls(LS.show, "null"));
+    if (s0 && typeof s0 === "object") {
+      for (var k0 in state.show) if (k0 in s0) state.show[k0] = s0[k0] ? 1 : 0;
+    }
+    state.ctxOv = ls(LS.ctxOv, "");
+    if (ls(LS.lang, "") === "en") state.lang = "en";
+  } catch (e) { }
+  function persist() {
+    lsSet(LS.show, JSON.stringify(state.show));
+    lsSet(LS.ctxOv, state.ctxOv);
+    lsSet(LS.lang, state.lang);
+  }
+
+  /* ---------- 多实例注册表（v61.1）：每个分屏 pane 一个条实例 ---------- */
+  var instances = [];   // spawnInstance 返回的 api：{pid, attach, render, ...}
+  var nextSlot = 0;     // 实例序号；0 号保留兼容 id（#zusage-bar，泵热更新按它清理）
+  function renderAll(rebuildPanels) {
+    if (rateTipFor) showRateTip(rateTipFor);
+    for (var i = 0; i < instances.length; i++) {
+      if (rebuildPanels) instances[i].rebuild();   // 语言切换等文案重建（各实例面板独立 DOM）
+      if (state.data) instances[i].render(state.data);
+    }
+  }
+  window.__zusageUpdate = function (d) {
+    if (stale()) return;
+    state.data = d;
+    for (var i = 0; i < instances.length; i++) {
+      try { instances[i].render(d); } catch (e) { FATAL.updateErr = String((e && e.stack) || e); }
+    }
+  };
+  window.__zusagePluginRequests = [];
+  function pluginRequest(action, enabled) {
+    window.__zusagePluginRequests.push({ action: action, enabled: enabled });
+  }
+  window.__zusagePluginUpdate = function (s) {
+    if (stale() || JSON.stringify(state.pluginUpdate) === JSON.stringify(s)) return;
+    window.__zusagePluginState = state.pluginUpdate = s;
+    if (s && typeof s.rateLine === "boolean") state.rateLine = s.rateLine;
+    scanRateLines();
+    instances.forEach(function (inst) { inst.syncUpdate(); });
+  };
+  function refreshWants() {
+    /* 各 pane 会话 id 汇总给泵：__zusageWantSids（新泵按数组强制纳入快照），
+     * __zusageWantSid 保底兼容旧泵单值通路（取 0 号实例的会话） */
+    try {
+      var arr = [];
+      for (var i = 0; i < instances.length; i++) {
+        var s1 = instances[i].getSid();
+        if (s1 && arr.indexOf(s1) < 0) arr.push(s1);
+      }
+      window.__zusageWantSids = arr;
+      if (arr.length) window.__zusageWantSid = arr[0];
+    } catch (e) { }
+  }
+
+  /* ---------- 回复末尾速率行的悬停解释（v67）：给消息流里的统计行挂同款 tooltip ----------
+   * 统计行是模型贴的 Markdown 引用块（⚡ … tok/s(本轮)），本身没有 hover 能力；
+   * 浮层是注入 DOM 的，所以由它扫描消息流、给匹配节点挂自绘 tooltip（与状态条同套路：
+   * 挂 body 的 fixed 浮层，免疫消息流层叠上下文）。document 级、只此一份，不随 pane 实例走。 */
+  var rateTip = document.createElement("div");
+  rateTip.className = "tip zusage-rate-tip";
+  /* .tip 的类样式挂在条实例的 <style> 里（样式随条走）——本浮层是 document 级的，
+   * 实例销毁/重建的间隙会失去类样式。内联关键属性兜底（值与 .tip 类一致，含主题 var），
+   * 类样式在位时两者相同、不冲突；display 由 show/hide 控制。 */
+  rateTip.style.cssText =
+    "position:fixed;display:none;background:rgba(19,22,30,.98);" +
+    "background:color-mix(in srgb,var(--color-background,#13161e) 98%,transparent);" +
+    "border:1px solid var(--color-border,rgba(255,255,255,.1));border-radius:10px;padding:10px 14px;" +
+    "font-family:var(--font-mono,Consolas,'Microsoft YaHei UI',monospace);" +
+    "font-size:calc(var(--ui-font-size,14px) - 1px);line-height:1.55;color:var(--color-foreground,#c6cdd9);" +
+    "box-shadow:0 10px 28px rgba(0,0,0,.5),0 2px 6px rgba(0,0,0,.3);" +
+    "white-space:normal;z-index:2147483646;max-width:520px;box-sizing:border-box";
+  document.body.appendChild(rateTip);
+  var rateTipFor = null;
+  /* 结构化内容：样式内嵌本浮层（选择器带 .zusage-rate-tip 前缀，随元素清理），
+   * 不依赖条实例的 <style>；全部为静态双语文案，无任何插值。 */
+  function rateTipHTML() {
+    var row = function (label, text) {
+      return '<div class="rt-row"><b>' + label + "</b><span>" + text + "</span></div>";
+    };
+    return '<style>.zusage-rate-tip .rt-h{font-weight:600;color:var(--color-foreground,#e9edf4);margin:0 0 7px}' +
+      ".zusage-rate-tip .rt-row{display:flex;gap:10px;margin:3px 0}" +
+      ".zusage-rate-tip .rt-row b{flex:0 0 auto;min-width:78px;color:var(--color-foreground,#e9edf4);font-weight:600}" +
+      ".zusage-rate-tip .rt-row span{color:var(--color-foreground-subtle,#8791a3)}" +
+      '.zusage-rate-tip .rt-note{margin-top:8px;padding-top:7px;border-top:1px solid var(--color-border,rgba(255,255,255,.1));color:var(--color-foreground-subtle,#8791a3)}</style>' +
+      '<div class="rt-h">⚡ ' + L("本问速率 · 各数值含义", "Rate line · what each figure means") + "</div>" +
+      row("tok/s", L("本问各段加权平均：总输出 ÷ 总生成时长，工具等待不计入", "weighted average of all segments: total output ÷ total generation time, tool waits excluded")) +
+      row(L("首字", "TTFT"), L("第一段从发出请求到首个 token 的等待", "wait from request to the first token of the first segment")) +
+      row(L("输出", "Output"), L("本问各段输出合计（思考 token 已含其中）", "sum of segment output (thinking tokens already included)")) +
+      row(L("生成", "Gen"), L("各段生成窗口合计：含思考用 completed_at − started_at，否则用 completed_at − first_token_at；不含段间工具等待", "sum of segment generation windows: with thinking use completed_at − started_at, otherwise completed_at − first_token_at; tool waits between segments excluded")) +
+      row(L("段 / 峰", "Seg/Peak"), L("段＝模型请求次数；峰＝最快一段的速率", "segments = model requests; peak = fastest segment")) +
+      row(L("累计", "Session"), L("本会话已完成请求的输出总量（不含子代理）", "cumulative output of completed requests (sub-agents excluded)")) +
+      row("⏱", L("采样时刻——写正文前自测，收尾正文段未计入", "sample time — self-tested before the final text, so that segment is excluded")) +
+      '<div class="rt-note">' + L("状态条「生成速度」是最近一段的瞬时值，与本行的整问均值不同，数值有差异属正常。⚙ 设置可关。",
+        "The bar's \"generation speed\" is the latest segment's instant value; this line is the whole-answer average — a difference is expected. Toggle in ⚙ settings.") + "</div>";
+  }
+  function showRateTip(el) {
+    if (stale() || !state.rateLine || !isRateLine(el)) { hideRateTip(); return; }
+    rateTip.innerHTML = rateTipHTML();
+    rateTip.style.display = "block";
+    var r = el.getBoundingClientRect(), tw = rateTip.offsetWidth, th = rateTip.offsetHeight;
+    var vw = window.innerWidth, vh = window.innerHeight;
+    var left = Math.max(8, Math.min(r.left, vw - tw - 8));
+    var top = r.top - th - 8;               // 优先弹在统计行上方
+    if (top < 8) top = Math.min(r.bottom + 8, vh - th - 8);   // 上方放不下改下方
+    rateTip.style.left = Math.round(left) + "px";
+    rateTip.style.top = Math.round(top) + "px";
+    rateTipFor = el;
+  }
+  function hideRateTip() {
+    rateTip.style.display = "none";
+    rateTipFor = null;
+  }
+  var rateBindings = [];
+  function isRateLine(el) {
+    var t = el.textContent || "";
+    return document.body.contains(el) && t.indexOf("tok/s(本轮)") >= 0 && t.indexOf("⚡") >= 0 &&
+      !(el.tagName === "BLOCKQUOTE" && el.querySelector("p"));
+  }
+  function unbindRateLine(binding) {
+    var el = binding.el;
+    el.removeEventListener("mouseenter", onRateEnter);
+    el.removeEventListener("mouseleave", hideRateTip);
+    if (el.dataset.zusageRateTip === String(MY_GEN)) delete el.dataset.zusageRateTip;
+    if (el.style.cursor === "help") el.style.cursor = binding.cursor;
+  }
+  function onRateEnter() { showRateTip(this); }
+  function scanRateLines() {
+    if (stale()) { cleanupRateTip(); return; }
+    rateBindings = rateBindings.filter(function (binding) {
+      if (state.rateLine && isRateLine(binding.el)) return true;
+      unbindRateLine(binding);
+      return false;
+    });
+    if (!state.rateLine) { hideRateTip(); return; }
+    var nodes = document.querySelectorAll("blockquote p, blockquote, p");
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (el.dataset.zusageRateTip === String(MY_GEN) || !isRateLine(el)) continue;
+      rateBindings.push({ el: el, cursor: el.style.cursor });
+      el.dataset.zusageRateTip = String(MY_GEN);
+      el.style.cursor = "help";
+      el.addEventListener("mouseenter", onRateEnter);
+      el.addEventListener("mouseleave", hideRateTip);
+    }
+    if (rateTipFor && !isRateLine(rateTipFor)) hideRateTip();
+  }
+  function cleanupRateTip() {
+    clearInterval(rateScanTimer);
+    window.removeEventListener("scroll", hideRateTip, true);
+    rateBindings.forEach(unbindRateLine);
+    rateBindings = [];
+    hideRateTip();
+    rateTip.remove();
+    if (window.__zusageRateCleanup === cleanupRateTip) delete window.__zusageRateCleanup;
+  }
+  window.addEventListener("scroll", hideRateTip, true);   // 捕获：任意容器滚动即收
+  var rateScanTimer = setInterval(scanRateLines, 2000);
+  window.__zusageRateCleanup = cleanupRateTip;
+  scanRateLines();
+
+  setTimeout(function () {
+    try { coordinator(); } catch (e) {
+      FATAL.fatal = String((e && e.stack) || e);
+      var b = document.getElementById("zusage-bar");
+      if (b) b.style.cssText = "position:fixed;right:16px;bottom:16px;font:12px monospace;color:#ff7a59;" +
+        "background:#1a0f0d;border:1px solid #ff7a59;border-radius:6px;padding:4px 10px;z-index:2147483647";
+    }
+  }, 0);
+
+  function coordinator() {
+    /* 协调器（v61.1）：扫描主文档里全部下半屏可见输入框，按 pane 键（data-pane-id，
+     * 无属性回退 "auto"）分组派发给实例；一个 pane 一条，pane 消失对应条自藏。 */
+    function paneKeyOf(el) {
+      for (var p = el; p && p !== document.body; p = p.parentElement) {
+        if (p.hasAttribute && p.hasAttribute("data-pane-id")) return p.getAttribute("data-pane-id") || "auto";
+      }
+      return "auto";
+    }
+    function sessIdOf(el) {
+      for (var p = el; p && p !== document.body; p = p.parentElement) {
+        if (p.hasAttribute && p.hasAttribute("data-session-id")) return p.getAttribute("data-session-id") || "";
+      }
+      return "";
+    }
+    var SEL = 'textarea, [contenteditable="true"], [role="textbox"], .ProseMirror, .ql-editor';
+    function tick() {
+      if (stale()) return;
+      try {
+        var best = {};
+        document.querySelectorAll(SEL).forEach(function (el) {
+          if (el.closest && el.closest('[role="dialog"]')) return;   // v62：弹窗内的编辑框不是聊天输入框，不派实例（issue #9）
+          var r = el.getBoundingClientRect();
+          if (!(r.width > 40 && r.height > 8 && r.bottom > 0 && r.top < innerHeight)) return;
+          if (r.top < innerHeight * 0.45) return;   // 聊天输入框特征：视口下半部（排除设置页等处元素）
+          var k = paneKeyOf(el);
+          if (!best[k] || r.top > best[k].top) best[k] = { el: el, top: r.top };
+        });
+        var keys = Object.keys(best);
+        if (!keys.length && !instances.length) best["auto"] = { el: null, top: 0 };   // 主文档找不到（shadow/iframe 场景）→ 0 号实例走自带 deepFind 兜底
+        keys.forEach(function (k) {
+          var inst = null;
+          for (var i = 0; i < instances.length; i++) if (instances[i].pid === k) { inst = instances[i]; break; }
+          if (!inst && instances.length < 4) inst = spawnInstance(k, nextSlot++);
+          if (inst) inst.attach(best[k].el, sessIdOf(best[k].el));
+        });
+        instances.forEach(function (inst) {
+          if (keys.indexOf(inst.pid) < 0) inst.attach(null, "");   // pane 关闭：条随 composer 缺失自藏，实例保留待 pane 重开复用
+        });
+        FATAL.insts = instances.map(function (a) { return a.pid + "=" + (a.getSid() ? a.getSid().slice(-8) : "-"); }).join(" | ");
+      } catch (e) { FATAL.coordErr = String((e && e.stack) || e); }
+    }
+    tick();
+    setInterval(tick, 600);
+  }
+
+  /* ---------- 实例工厂（v61.1）：一个 pane 一套 条/面板/气泡/tooltip/定位循环。
+   * slot 0 保留 #zusage-bar/#zusage-tip 兼容 id（泵热更新按它清理），其余实例仅类名。 */
+  function spawnInstance(pid, slot) {
+    var VERSION = "v67";   // v67：回复末尾统计行悬停解释 —— 浮层扫描消息流给 ⚡ 统计行挂同款 tooltip（逐数值口径详解）   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
+    /* ---------- 状态（实例级） ---------- */
+    var excOn = false,    // 本 pane 会话处于"上下文超限被拒"状态（render 时按 picked 会话计算）
+      excGone = false,    // 用户点 ✕ 关闭了本次气泡；超限解除后自动复位
+      nativeCtxVal = 0,   // 本 pane 输入框卡片上读到的原生上下文总量
+      lastSub = null,     // 子代理明细面板数据源
+      instSid = "",       // 本 pane 当前会话（composer 祖先链 data-session-id）
+      pendingSid = "", wantedEl = null,   // 协调器派发的最新 composer/会话
+      shrink = 0,         // 分级收缩（v66）：1 = 内容超卡片宽，「本轮/会话累计」缓存命中率已让位
+      fadeOn = false;     // 收缩后仍超宽：右缘渐隐（.zu-clip）
+
+    /* ---------- DOM ---------- */
+    /* 样式表挂在 bar 内部而非 head：React 可能清理 head 里的外来 style，
+     * CSS 一旦失效条就退化成 static 占位元素（"输入框下方空白"的历史根因）。 */
+    var style = document.createElement("style");
+    style.textContent =
+      /* 胶囊条：半透明底 + 微边框。配色全量跟随客户端主题（v58）：颜色一律
+       * var(--color-*, 旧值兜底) 引用客户端语义变量（<html> 的 .dark 类翻转整套值，
+       * zai-light/zai-dark 特殊主题同样自动适配）；color-mix 处加同值前置声明，
+       * 不支持 color-mix 的旧引擎落到实色行不至于透明。 */
+      ".zusage-root{position:fixed;box-sizing:border-box;" +
+      "font-family:var(--font-mono,Consolas,'Cascadia Mono',Menlo,'Microsoft YaHei UI','Microsoft YaHei',monospace);" +
+      "font-size:var(--ui-font-size,14px);line-height:1.3;" +
+      "font-variant-numeric:tabular-nums;color:var(--color-foreground-subtle,#8791a3);" +
+      "background:rgba(15,18,25,.86);background:color-mix(in srgb,var(--color-background,#0f1219) 86%,transparent);" +
+      "backdrop-filter:blur(14px) saturate(1.3);-webkit-backdrop-filter:blur(14px) saturate(1.3);" +
+      "border:1px solid var(--color-border,rgba(255,255,255,.07));border-radius:9px;padding:2px 6px;user-select:none;" +
+      "box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 4px 14px rgba(0,0,0,.38),0 1px 3px rgba(0,0,0,.28);" +
+      "display:flex;align-items:center;gap:2px;white-space:nowrap;" +
+      /* 条不能 overflow:hidden：设置面板是条的子元素、展开在条外上方，裁剪会吞掉面板（v15"点设置看不到窗口"根因）。
+       * 超宽截断由 #zu-main 自己负责。 */
+      "z-index:50}" +
+      ".zu-main{overflow:hidden;min-width:0;flex:1 1 auto;display:flex;align-items:center;gap:1px;justify-content:space-between}" +
+      /* 收缩兜底（v66）：分级收缩后仍装不下时右缘 26px 渐隐，替代生硬的截断 */
+      ".zu-main.zu-clip{-webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 26px),transparent);" +
+      "mask-image:linear-gradient(90deg,#000 calc(100% - 26px),transparent)}" +
+      /* zu-main 不得带 .it class：querySelectorAll('.it') 收集 tooltip 时会把它算进第 0 位，
+       * tips 全部错位一位且末项为 null —— v31"悬停只有空胶囊/内容错位"的根因 */
+      ".it{display:flex;align-items:center;gap:4px;padding:2px 6px;border-radius:6px;" +
+      "transition:background-color .12s ease-out}" +
+      ".it:hover{background:var(--color-hover,rgba(255,255,255,.06))}" +
+      ".sep{width:1px;height:15px;background:var(--color-border,rgba(255,255,255,.09));flex:0 0 auto;margin:0 1px}" +
+      ".k{color:#7e8899}.v{color:var(--color-foreground,#e9edf4);font-weight:600}" +
+      ".pct{font-weight:700}.dim{color:var(--color-foreground-subtle,#667082)}" +
+      /* 三档状态色刻意不走客户端变量（v58.1）：terminal-bright-* 是语法高亮色板，
+       * 绿档在条面小字号/细进度条上发白（用户实测）；改用高对比自调档，
+       * 浅色加深版在 .zu-light 组。 */
+      ".ok{color:#3ecf8e}.warm{color:#f5b944}.hot{color:#ff6b57}" +
+      /* 超限=亮红呼吸闪烁（v38 定性"亮红闪烁优先于一切档位"，v54 落成动画） */
+      "@keyframes zuexc{0%,100%{opacity:1}50%{opacity:.4}}" +
+      ".exc{color:var(--color-destructive,#ff2d55);text-shadow:0 0 8px rgba(255,45,85,.5);animation:zuexc 1.1s ease-in-out infinite}" +
+      ".btn{cursor:pointer;padding:2px 6px;border-radius:6px;color:var(--color-foreground-subtle,#7e8899);" +
+      "transition:background-color .12s ease-out,color .12s ease-out}" +
+      ".btn:hover{color:var(--color-foreground,#e9edf4);background:var(--color-hover,rgba(255,255,255,.07))}" +
+      ".btn:active{transform:scale(.96)}" +
+      ".zu-gear{flex:0 0 auto;font-size:calc(var(--ui-font-size,14px) + 3px);border-radius:6px}" +
+      /* 行内 SVG 线性图标（v54）：currentColor 跟随文字色，一处定义全局换色 */
+      ".ico{width:12px;height:12px;flex:0 0 auto;color:var(--color-foreground-subtle,#7e8899);opacity:.85}" +
+      /* 工具错误数徽标 */
+      ".eb{background:rgba(255,107,87,.14);background:color-mix(in srgb,var(--color-destructive,#ff6b57) 14%,transparent);" +
+      "color:var(--color-destructive,#ff8a73);border-radius:999px;padding:0 6px;line-height:16px;font-weight:600;display:inline-flex;align-items:center;gap:2px}" +
+      ".eb .ico{color:inherit}" +
+      /* 上下文微进度条：量感一眼可读，填充色随占比三档。
+       * 填充块 background:currentColor —— 三档色类只给 color，填充靠 currentColor 着色
+       * （v28 只写了 height 没写背景，填充块全透明 = "空条"根因）。 */
+      ".cbar{display:inline-block;width:46px;height:5px;border-radius:999px;" +
+      "background:var(--color-hover,rgba(255,255,255,.1));overflow:hidden;flex:0 0 auto}" +
+      ".cbar>i{display:block;height:100%;border-radius:999px;background:currentColor}" +
+      /* 子代理运行中呼吸灯 */
+      "@keyframes zupulse{0%,100%{opacity:1}50%{opacity:.2}}" +
+      ".dot{animation:zupulse 1.6s ease-in-out infinite;font-size:var(--ui-font-size,14px);line-height:1}" +
+      ".panel{position:absolute;bottom:calc(100% + 10px);left:0;background:rgba(19,22,30,.97);" +
+      "background:color-mix(in srgb,var(--color-card,#13161e) 96%,transparent);" +
+      "backdrop-filter:blur(18px) saturate(1.3);-webkit-backdrop-filter:blur(18px) saturate(1.3);" +
+      "border:1px solid var(--color-border,rgba(255,255,255,.09));border-radius:12px;padding:12px 14px;display:none;" +
+      "flex-direction:column;gap:4px;" +
+      "font-family:var(--font-mono,Consolas,Menlo,'Microsoft YaHei UI',monospace);" +
+      "font-size:calc(var(--ui-font-size,14px) - 1px);line-height:1.6;color:var(--color-foreground,#c6cdd9);" +
+      "box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 12px 32px rgba(0,0,0,.5),0 2px 8px rgba(0,0,0,.35);" +
+      "min-width:280px;max-width:480px;max-height:72vh;overflow:auto;white-space:normal;z-index:2147483647;" +
+      "scrollbar-width:thin;scrollbar-color:var(--color-border,rgba(255,255,255,.14)) transparent}" +
+      ".panel.open{display:flex}" +
+      ".panel::-webkit-scrollbar{width:8px}" +
+      ".panel::-webkit-scrollbar-thumb{background:var(--color-border,rgba(255,255,255,.14));border-radius:999px}" +
+      ".panel label{display:flex;align-items:flex-start;gap:8px;cursor:pointer;padding:5px 8px;margin:0 -8px;" +
+      "border-radius:8px;transition:background-color .12s ease-out}" +
+      ".panel input[type=text]{width:110px;background:var(--color-input,rgba(0,0,0,.3));border:1px solid var(--color-border,rgba(255,255,255,.14));" +
+      "color:var(--color-foreground,#e9edf4);border-radius:6px;padding:2px 7px;font:inherit;outline:none}" +
+      ".panel input[type=text]:focus{border-color:var(--color-brand,#57c7ff);box-shadow:0 0 0 2px rgba(87,199,255,.15)}" +
+      ".panel .hr{border-top:1px solid var(--color-border,rgba(255,255,255,.08));margin:5px 0}" +
+      ".panel .cap{color:var(--color-foreground-subtlest,#6b7484);margin:4px 0 2px;font-size:calc(var(--ui-font-size,14px) - 2px);letter-spacing:.08em}" +
+      ".panel .phead{font-weight:700;color:var(--color-foreground,#eef2f8);font-size:calc(var(--ui-font-size,14px) + 2px);margin-bottom:5px;display:flex;align-items:center;gap:8px}" +
+      ".panel .pver{color:var(--color-brand,#57c7ff);font-weight:400;font-size:calc(var(--ui-font-size,14px) - 2px);background:rgba(87,199,255,.12);background:color-mix(in srgb,var(--color-brand,#57c7ff) 12%,transparent);border-radius:999px;padding:1px 8px}" +
+      ".panel label em{font-style:normal;color:var(--color-foreground-subtle,#6f7989);display:block}" +
+      ".panel input[type=checkbox]{accent-color:var(--color-brand,#57c7ff);margin-top:3px}" +
+      ".panel .pnote{line-height:1.6;color:var(--color-foreground-subtle,#6f7989);margin-top:3px}" +
+      ".panel .zu-update-actions{display:flex;gap:8px;margin:5px 0}" +
+      ".panel .zu-update-actions button{font:inherit;color:var(--color-foreground,#e9edf4);background:var(--color-hover,rgba(255,255,255,.07));border:1px solid var(--color-border,rgba(255,255,255,.14));border-radius:6px;padding:3px 10px;cursor:pointer}" +
+      ".panel .zu-update-actions button:disabled{opacity:.5;cursor:default}" +
+      ".panel .zu-update-status{overflow-wrap:anywhere;white-space:pre-line}" +
+      /* 子代理明细面板（v49）：点击条目弹出的固定面板（与设置面板同机制，互斥打开）；
+       * 面板不随鼠标消失，绕开悬停+tab 的全部几何问题。 */
+      ".zu-sub{cursor:pointer}" +
+      ".zu-sub:hover .v{color:var(--color-foreground,#fff)}" +
+      ".panel.subp{width:420px;max-width:60vw;gap:8px}" +
+      ".subrow{padding:8px 10px;background:var(--color-surface,rgba(255,255,255,.03));border:1px solid var(--color-border,rgba(255,255,255,.06));border-radius:8px}" +
+      ".subname{font-weight:600;color:var(--color-foreground,#e9edf4);font-size:var(--ui-font-size,14px);overflow-wrap:anywhere}" +
+      ".substat{color:var(--color-foreground-subtle,#8791a3);margin-top:2px}" +
+      ".sublive{color:#3ecf8e;font-size:calc(var(--ui-font-size,14px) - 2px);font-weight:400;background:rgba(62,207,142,.12);border-radius:999px;padding:0 7px;margin-left:7px}" +
+      /* 自绘 tooltip（v31）：向上弹出（原生 title 方向不可控且会被窗口下缘遮挡），
+       * 支持多 tab；white-space:pre-line 保留数据里的 \n 换行。
+       * v32：fixed 挂 body —— 原 absolute 挂 bar，被页面消息流的层叠上下文盖住
+       * （diag 实证 disp=block 但不可见），挂 body 用视口坐标独立定位。 */
+      ".tip{position:fixed;background:rgba(19,22,30,.98);background:color-mix(in srgb,var(--color-background,#13161e) 98%,transparent);" +
+      "backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);" +
+      "border:1px solid var(--color-border,rgba(255,255,255,.1));border-radius:10px;padding:8px 12px;" +
+      "font-family:var(--font-mono,Consolas,'Microsoft YaHei UI',monospace);" +
+      "font-size:calc(var(--ui-font-size,14px) - 1px);line-height:1.6;color:var(--color-foreground,#c6cdd9);" +
+      "box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 10px 28px rgba(0,0,0,.5),0 2px 6px rgba(0,0,0,.3);" +
+      "white-space:pre-line;z-index:2147483646;max-width:560px;display:none;scrollbar-width:thin}" +
+      /* 结构化 tooltip 行排版（v67.1，与统计行悬停解释同款；仅状态条 .tip 作用域） */
+      ".tip .rt-h{font-weight:600;color:var(--color-foreground,#e9edf4);margin:0 0 6px}" +
+      ".tip .rt-row{display:flex;gap:10px;margin:3px 0}" +
+      ".tip .rt-row b{flex:0 0 auto;min-width:86px;color:var(--color-foreground,#e9edf4);font-weight:600}" +
+      ".tip .rt-row span{color:var(--color-foreground-subtle,#8791a3)}" +
+      ".tip .rt-note{margin-top:7px;padding-top:6px;border-top:1px solid var(--color-border,rgba(255,255,255,.1));color:var(--color-foreground-subtle,#8791a3)}" +
+      ".ttabs{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:7px}" +
+      ".ttab{cursor:pointer;padding:2px 10px;border-radius:999px;background:var(--color-hover,rgba(255,255,255,.06));" +
+      "color:var(--color-foreground-subtle,#8791a3);white-space:nowrap;font-size:calc(var(--ui-font-size,14px) - 1px);" +
+      "transition:background-color .12s ease-out,color .12s ease-out}" +
+      ".ttab:hover{color:var(--color-foreground,#e9edf4);background:rgba(255,255,255,.1);background:color-mix(in srgb,var(--color-foreground,#fff) 10%,transparent)}" +
+      ".ttab.on{background:rgba(87,199,255,.16);background:color-mix(in srgb,var(--color-brand,#5ac8ff) 16%,transparent);color:var(--color-brand,#5ac8ff)}" +
+      ".tbody{max-height:60vh;overflow:auto;scrollbar-width:thin}" +
+      ".tbody::-webkit-scrollbar{width:8px}" +
+      ".tbody::-webkit-scrollbar-thumb{background:var(--color-border,rgba(255,255,255,.14));border-radius:999px}" +
+      /* 超限告警气泡（v39）：挂 body 的独立浮层（与 .tip 同套路，免受条面重建影响），
+       * 红边警示 + 建议步骤 + 可点击复制的会话 ID；user-select:text 允许手动选中兜底。
+       * 底色 = 客户端 destructive 掺背景色：深色下深红黑、浅色下淡粉，自动适配。 */
+      ".zusage-exc{position:fixed;max-width:470px;" +
+      "background:linear-gradient(180deg,rgba(41,18,22,.98),rgba(27,14,16,.98));" +
+      "background:linear-gradient(180deg,color-mix(in srgb,var(--color-destructive,#ff2d55) 10%,var(--color-background,#1b0e10)),color-mix(in srgb,var(--color-destructive,#ff2d55) 5%,var(--color-background,#1b0e10)));" +
+      "border:1px solid rgba(255,45,85,.4);border-color:color-mix(in srgb,var(--color-destructive,#ff2d55) 40%,transparent);" +
+      "border-radius:12px;padding:12px 15px;" +
+      "font-family:var(--font-mono,Consolas,'Microsoft YaHei UI',monospace);" +
+      "font-size:calc(var(--ui-font-size,14px) - 1px);line-height:1.7;color:var(--color-foreground,#e9edf4);" +
+      "box-shadow:0 12px 32px rgba(0,0,0,.5),0 4px 18px rgba(255,45,85,.12);white-space:normal;z-index:2147483647;" +
+      "user-select:text;display:none}" +
+      ".zusage-exc .xb-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}" +
+      ".zusage-exc .xb-title{font-weight:700;color:var(--color-destructive,#ff5c77)}" +
+      ".zusage-exc .xb-step{color:var(--color-foreground-subtle,#c6cdd9)}" +
+      ".zusage-exc .xb-close{cursor:pointer;color:var(--color-foreground-subtlest,#8791a5);padding:2px 5px;border-radius:6px;font-size:calc(var(--ui-font-size,14px) + 2px);line-height:1}" +
+      ".zusage-exc .xb-close:hover{color:var(--color-foreground,#fff);background:var(--color-hover,rgba(255,255,255,.08))}" +
+      ".zusage-exc .xb-sid{color:var(--color-brand,#57c7ff);cursor:pointer;text-decoration:underline dotted}" +
+      ".zusage-exc .xb-sid:hover{text-decoration-style:solid}" +
+      ".zusage-exc .xb-copied{color:#3ecf8e;margin-left:6px;display:none}" +
+      /* 白色主题程度性覆盖（v58.1）：颜色已全量走客户端变量随 .dark 自动翻转，
+       * 这里只兜两类 —— 程度差（浅色下阴影/内高光减重、红字光晕收掉）与
+       * 三档状态色加深版（高对比自调档，见 .ok 注释）。 */
+      ".zusage-root.zu-light{box-shadow:inset 0 1px 0 rgba(255,255,255,.85),0 4px 14px rgba(15,23,42,.12),0 1px 3px rgba(15,23,42,.08)}" +
+      ".zu-light .panel{box-shadow:inset 0 1px 0 rgba(255,255,255,.9),0 12px 32px rgba(15,23,42,.14),0 2px 8px rgba(15,23,42,.08)}" +
+      ".tip.zu-light{box-shadow:inset 0 1px 0 rgba(255,255,255,.9),0 10px 28px rgba(15,23,42,.16),0 2px 6px rgba(15,23,42,.08)}" +
+      ".zusage-exc.zu-light{box-shadow:0 12px 32px rgba(15,23,42,.14),0 4px 18px rgba(220,38,38,.1)}" +
+      ".zu-light .exc{text-shadow:none}" +
+      ".zu-light .ok{color:#0f9d6c}.zu-light .warm{color:#b6791a}.zu-light .hot{color:#d8482f}" +
+      ".zu-light .sublive{color:#0c8a63;background:rgba(15,140,102,.12)}" +
+      ".zu-light .xb-copied{color:#0c8a63}" +
+      /* 减少动态偏好：关闭呼吸/闪烁与悬浮过渡 */
+      "@media (prefers-reduced-motion:reduce){.exc,.dot{animation:none}" +
+      ".it,.btn,.ttab,.panel label{transition:none}}";
+
+    /* 结构：条撑满卡片宽后 .zu-main 占满剩余宽、条目+分隔线 space-between 均匀分布，
+     * ⚙ 落在最右缘（内容超宽时分级收缩、极限右缘渐隐 .zu-clip）；面板绝对定位向上展开 */
+    var bar = document.createElement("div");
+    bar.className = "zusage-root";
+    if (slot === 0) bar.id = "zusage-bar";
+    bar.style.display = "none";   // 定位成功前不显示（避免占位）
+    bar.innerHTML = '<span class="zu-main">…</span>' +
+      '<span class="btn zu-gear">⚙</span>';
+    var panel = document.createElement("div");
+    panel.className = "panel";
+    /* 面板文案可随语言重建（事件走 panel 级委托，重建不丢监听） */
+    function buildPanel() {
+      panel.innerHTML =
+      '<div class="phead">⚙ ' + L("状态条设置", "Status bar settings") + '<span class="pver">' + VERSION + '</span></div>' +
+      '<div class="cap">' + L("显示项（条面）", "Display items (bar)") + '</div>' +
+      '<label><input type="checkbox" data-k="ctx"><span>' + L("上下文", "Context") + '<em>' + L("进度条 + 百分比，颜色随占比变化", "Progress bar + percentage, color by usage") + '</em></span></label>' +
+      '<label><input type="checkbox" data-k="turn"><span>' + L("本轮", "Current turn") + '<em>' + L("tokens / 次数 / 单次耗时 / 首字", "tokens / requests / duration / first token") + '</em></span></label>' +
+      '<label><input type="checkbox" data-k="win"><span>' + L("会话累计", "Session total") + '<em>' + L("当前会话 tokens / 轮数 / 次数", "session tokens / turns / requests") + '</em></span></label>' +
+      '<label><input type="checkbox" data-k="tools"><span>' + L("工具调用", "Tool calls") + '<em>' + L("当前会话，悬停看各工具明细与错误", "per-session, hover for per-tool details and errors") + '</em></span></label>' +
+      '<label><input type="checkbox" data-k="today"><span>' + L("今日合计", "Today's total") + '<em>' + L("今天所有会话的消耗", "consumption of all sessions today") + '</em></span></label>' +
+      '<label><input type="checkbox" data-k="sub"><span>' + L("子代理", "Sub-agents") + '<em>' + L("后台子代理消耗，点击条目看明细面板", "background sub-agent usage, click the item for the detail panel") + '</em></span></label>' +
+      '<div class="hr"></div>' +
+      '<div class="cap">' + L("上下文窗口", "Context window") + '</div>' +
+      '<label><input type="text" class="zu-ctxov" placeholder="' + L("自动(按模型)", "auto") + '"><span class="dim">' + L("留空 = 自动（原生UI > 模型目录）", "leave empty = auto (native UI > model catalog)") + '</span></label>' +
+      '<div class="hr"></div>' +
+      '<div class="cap">Language / 语言</div>' +
+      '<label><input type="radio" name="zu-lang" value="zh"><span>中文</span></label>' +
+      '<label><input type="radio" name="zu-lang" value="en"><span>English</span></label>' +
+      '<div class="hr"></div>' +
+      '<div class="cap">' + L("逐问速率行", "Per-answer rate line") + '</div>' +
+      '<label><input type="checkbox" class="zu-rate-line"><span>' + L("回答末尾追加统计行（默认开启）", "Append stats line to each reply (on by default)") + '<em>' + L("即时 tok/s（含思考）/ 首字延迟 / 输出 / 生成耗时 / 段数峰值 / 会话累计；由插件提问钩子注入，开关下一问生效", "Instant tok/s (incl. thinking), TTFT, output, generation time, segments/peak, session total; injected by the plugin prompt hook, effective on the next prompt") + '</em></span></label>' +
+      '<div class="hr"></div>' +
+      '<div class="cap">' + L("插件更新", "Plugin updates") + '</div>' +
+      '<label><input type="checkbox" class="zu-auto-update"><span>' + L("自动更新", "Automatic updates") + '<em>' + L("每 24 小时检测并安装新版（默认开启，可关闭）", "Check and install every 24 hours (on by default, can be disabled)") + '</em></span></label>' +
+      '<div class="zu-update-actions"><button type="button" data-update="check">' + L("检查更新", "Check for updates") + '</button><button type="button" data-update="update">' + L("立即更新", "Update now") + '</button></div>' +
+      '<div class="pnote zu-update-status" role="status" aria-live="polite"></div>' +
+      '<div class="pnote">' + L("仅更新此插件；通过已配置的插件市场检测。GitHub 来源会联网，本地目录来源只检查本地文件，不上传用量数据。", "Only this plugin is updated through its configured marketplace. GitHub sources use the network; directory sources check local files. Usage data is never uploaded.") + '</div>' +
+      '<div class="hr"></div>' +
+      '<div class="pnote">' + L("悬停条面各项看明细；点击子代理项看全部明细面板。数据源 ~/.zcode/cli/db/db.sqlite（只读），请求完成后才落库，数值随上次完成请求变化。",
+        "Hover bar items for details; click the sub-agent item for the full detail panel. Data source ~/.zcode/cli/db/db.sqlite (read-only); rows are written when requests complete, numbers follow the latest completed request.") + '</div>';
+      panel.querySelectorAll('input[name=zu-lang]').forEach(function (r) {
+        r.checked = state.lang === r.value;
+      });
+      /* 重建后回填全部控件状态（语言切换路径不走 syncPanel）：checkbox 按 state.show、
+         上下文窗口输入框按 state.ctxOv——否则切语言后勾选态清空、首次点击语义反转 */
+      panel.querySelectorAll("input[type=checkbox][data-k]").forEach(function (cb) {
+        cb.checked = !!state.show[cb.dataset.k];
+      });
+      var ovInput = panel.querySelector(".zu-ctxov");
+      if (ovInput) ovInput.value = state.ctxOv;
+      syncUpdate();
+    }
+    buildPanel();
+    bar.appendChild(panel);
+    /* 子代理明细面板（v49）：与设置面板同款 .panel 机制，点击条目开关，互斥打开 */
+    var subPanel = document.createElement("div");
+    subPanel.className = "panel subp";
+    bar.appendChild(subPanel);
+    /* 自绘 tooltip：向上弹出（v45 起配空中走廊，移入点击不再被移开即隐掐断）；取代原生 title（方向不可控，在窗口底边会朝下被遮挡） */
+    /* 自绘 tooltip 挂 body（fixed 视口坐标）：挂 bar 内会被消息流的层叠上下文盖住（v31 实证） */
+    var tip = document.createElement("div");
+    tip.className = "tip zusage-tip-root";
+    if (slot === 0) tip.id = "zusage-tip";
+    tip.style.display = "none";
+    document.body.appendChild(tip);
+    bar.appendChild(style);           // 样式随条走，不进 head（防清理）
+    /* 内联兜底：即使样式表意外失效，定位行为也不退化。
+     * z-index 50：压得过聊天列表/输入框外层容器（Tailwind z-20），又不盖权限菜单等弹层（实测值）。 */
+    bar.style.position = "fixed";
+    bar.style.zIndex = "50";
+    document.body.appendChild(bar);
+
+    /* ---------- 超限告警气泡（v39）：当前会话"上下文超限被拒"时自动弹出，随条定位 ---------- */
+    var excBubble = document.createElement("div");
+    excBubble.className = "zusage-exc";
+    /* 热更新防重：上一实例的气泡可能残留（收尾清理只删 bar/tip），先移除旧的再挂新的。
+     * 仅 0 号执行——后 spawn 的实例会删掉先 spawn 实例的气泡 DOM（多实例 v61.1）。 */
+    if (slot === 0) {
+      try {
+        document.querySelectorAll(".zusage-exc").forEach(function (el) { if (el !== excBubble) el.remove(); });
+      } catch (e) { }
+    }
+    /* 文案只进 textContent/静态 innerHTML；会话 ID 是动态数据，一律走 textContent 防注入。
+     * 面板语言切换时 rebuildExcBubble() 重建气泡文案。 */
+    var excSid, excCopied;
+    function rebuildExcBubble() {
+      excBubble.innerHTML =
+      '<div class="xb-head"><span class="xb-title">' + L("⚠ 上下文超限", "⚠ Context over limit") + '</span>' +
+      '<span class="xb-close" aria-label="' + L("关闭，本次不再提醒", "Close; do not remind again this session") + '">✕</span></div>' +
+      '<div class="xb-step">' + L("最近一次请求因超出上下文窗口容量被拒绝，本轮对话暂时无法继续。建议依次尝试：",
+        "The latest request was rejected for exceeding the context window; this turn cannot continue for now. Try these in order:") + '</div>' +
+      '<div class="xb-step">' + L("① 回滚上一轮对话，去掉超限的那次请求后继续；",
+        "① Roll back the previous turn, drop the over-limit request and continue;") + '</div>' +
+      '<div class="xb-step">' + L("② 换用上下文窗口更大的模型继续，或压缩 / 精简本会话；",
+        "② Continue with a larger-window model, or compress / trim this session;") + '</div>' +
+      '<div class="xb-step">' + L("③ 仍无法解决时，新开一个对话，把下面的会话 ID（必要时连同工作区路径）发给它，让新会话读取本会话的记录文件接手修复。",
+        "③ If that still fails, start a new conversation and send it the session ID below (workspace path if needed) — the new session can pick up this session's rollout files to take over.") + '</div>' +
+      '<div>' + L("会话 ID：", "Session ID: ") + '<span class="xb-sid"></span><span class="xb-copied">' + L("已复制", "Copied") + '</span></div>';
+      excSid = excBubble.querySelector(".xb-sid");
+      excCopied = excBubble.querySelector(".xb-copied");
+      excSid.addEventListener("click", onExcSidCopy);
+      excBubble.querySelector(".xb-close").addEventListener("click", onExcClose);
+    }
+    function onExcSidCopy() {
+      if (stale() || !excSid.textContent) return;
+      try {
+        var ta = document.createElement("textarea");
+        ta.value = excSid.textContent;
+        ta.style.cssText = "position:fixed;left:-9999px;top:0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      } catch (e) { }
+      excCopied.style.display = "inline";
+      clearTimeout(excCopied.timer);
+      excCopied.timer = setTimeout(function () { excCopied.style.display = "none"; }, 1500);
+    }
+    function onExcClose() {
+      if (stale()) return;
+      excGone = true;
+      syncExcBubble();
+    }
+    rebuildExcBubble();
+    document.body.appendChild(excBubble);
+
+    /* ---------- 主题跟随（v58）：深浅由客户端根元素 .dark 类驱动 ----------
+     * 客户端主题切换时往 <html> 挂/摘 .dark（zai-dark 时挂；theme-zai-* 同步），整套
+     * CSS 变量（--color-background/foreground/border/hover/card/destructive/brand/
+     * terminal-* …）随级联翻转，上面的配色自动换装 —— 本块只负责观察 .dark 摘挂，
+     * 同步 .zu-light（仅剩阴影/光晕程度性覆盖）。观察类属性而非 matchMedia：
+     * 信号源与变量翻转同源，客户端强制浅色+系统深色等错位态不会劈叉。 */
+    var rootEl = document.documentElement;
+    function themeIsDark() {
+      try { return rootEl.classList.contains("dark"); } catch (e) { return true; }
+    }
+    var themeDark = themeIsDark();
+    function applyTheme() {
+      bar.classList.toggle("zu-light", !themeDark);
+      tip.classList.toggle("zu-light", !themeDark);
+      excBubble.classList.toggle("zu-light", !themeDark);
+    }
+    try {
+      new MutationObserver(function () {
+        var d = themeIsDark();
+        if (d !== themeDark) { themeDark = d; applyTheme(); }
+      }).observe(rootEl, { attributes: true, attributeFilter: ["class"] });
+    } catch (e) { }
+    applyTheme();
+
+    var $ = function (id) { return bar.querySelector(id); };
+    var main = bar.querySelector(".zu-main"), gear = bar.querySelector(".zu-gear");
+
+    /* ---------- 渲染 ---------- */
+    function fmt(n) {
+      n = n || 0;
+      if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+      if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+      return String(n);
+    }
+    function sec(ms) { return ms ? (ms / 1000).toFixed(1) + "s" : "–"; }
+
+    /* 超限判定：最近一次"上下文超限被拒"晚于最近成功请求 = 仍处于超限状态（该请求
+     * status=error，不进任何 completed 统计，只能这样单独检测）。html() 与气泡共用。 */
+    function excActive(s) {
+      return !!(s && s.ctx_exc > 0 && s.ctx_exc >= (s.last_at || 0));
+    }
+
+    function cachePct(cache, input) {
+      // 无原生 title：原生提示向下弹且与自绘 tooltip 双显闪烁（v33 移除），定义见各项 tooltip 明细
+      return input > 0 ? '<span class="dim">' + Math.round(cache / input * 100) + "%</span>" : "";
+    }
+
+    /* 显示顺序：本轮 → 上下文 → 会话 → 工具 → 今日 → 子代理；token 后带缓存命中率。
+     * v31：条面只放主数值；悬停改自绘 tooltip（向上弹），随渲染以 tips[]
+     * 按 .it 顺序挂到元素 __tip，全部为字符串单页（{tabs:[...]} 多 tab 机制 v49 起
+     * 无条目使用已删除：子代理改点击面板，tooltip 不再承载 tab 切换）。
+     * 缓存写入/思考/重试/错误均 >0 才显示，0 时不产生噪音。 */
+    function fmtTime(ms) {
+      var d = ms ? new Date(ms) : null;
+      return d ? (d.getHours() < 10 ? "0" : "") + d.getHours() + ":" +
+        (d.getMinutes() < 10 ? "0" : "") + d.getMinutes() + ":" +
+        (d.getSeconds() < 10 ? "0" : "") + d.getSeconds() : "?";
+    }
+    function ioc(inp, out, cache, rea, cw) {   // 悬停明细行：输入/输出/缓存命中/缓存写入/思考
+      return L("输入 ", "Input ") + fmt(inp) + L(" / 输出 ", " / Output ") + fmt(out) + L(" / 缓存命中 ", " / Cache read ") + fmt(cache) +
+        (cw > 0 ? L(" / 缓存写入 ", " / Cache write ") + fmt(cw) : "") +
+        (rea > 0 ? L(" / 思考 ", " / Thinking ") + fmt(rea) : "");
+    }
+    /* 结构化 tooltip（v67.1）：\x01 前缀标记 HTML 内容（drawTip 分流），行/脚注排版与
+     * 回复末尾统计行 tooltip 同款；动态值一律过 ttEsc（innerHTML 安全，如工具名/错误文案） */
+    function ttEsc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+    function ttH(t) { return '<div class="rt-h">' + ttEsc(t) + "</div>"; }
+    function ttRow(k, v) { return '<div class="rt-row"><b>' + ttEsc(k) + '</b><span>' + ttEsc(v) + "</span></div>"; }
+    function ttNote(v) { return '<div class="rt-note">' + ttEsc(v) + "</div>"; }
+    /* 行内 SVG 线性图标（v54）：stroke 走 currentColor，颜色由 .ico 控制统一换色 */
+    function ico(paths) {
+      return '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + paths + "</svg>";
+    }
+    function html(d) {
+      var sess = d.session || {}, lt = d.last_turn || {}, today = d.today || {}, last = d.last || {};
+      var tls = d.tools || { total: 0, errors: 0, list: [] };
+      var items = [], tips = [];
+      function it(inner, tip, cls) { items.push('<span class="it' + (cls ? " " + cls : "") + '">' + inner + "</span>"); tips.push(tip || null); }
+      if (d.remote) {   // v9：SSH 远程会话（数据取自远端机），置顶徽标标明数据源
+        it(ico('<path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>') +
+          '<span class="dim">' + L("远端", "remote") + "</span>",
+          L("数据源：SSH 远程服务器 ", "Data source: remote server over SSH ") + (d.remote_host || "?") + "\n" +
+          L("会话数据实时取自远端机的 ZCode 数据库，「今日合计」亦为远端值", "Session data is fetched live from the remote machine's ZCode database; today's total is the remote value") +
+          (d.remote_error ? "\n⚠ " + L("最近一次远端查询失败：", "Last remote query failed: ") + d.remote_error : "") +
+          (d.remote_empty ? "\n⚠ " + L("远端库里这个会话还没有已完成的请求（各项为 0）——确认远端 zusage.py 读到的库与远端 ZCode 实际写入的库是同一个",
+                                        "The remote database has no completed requests for this session (all items are 0) — check that the remote zusage.py reads the same database the remote ZCode actually writes") : ""));
+      }
+      if (d.not_local) {   // v62（issue #14）：本地库没有这个会话 —— 全 0 不是插件坏了，是数据不在这儿
+        it(ico('<circle cx="12" cy="12" r="9"/><path d="M12 16h.01"/><path d="M12 8h.01"/>') +
+          '<span class="dim">' + L("不在本地库", "not in local db") + "</span>",
+          L("这个会话不在本地数据库里（~/.zcode/cli/db/db.sqlite 查不到它），所以各项显示 0 —— 不是插件坏了。",
+            "This session is not in the local database (~/.zcode/cli/db/db.sqlite), which is why every item reads 0 — the plugin is not broken.") + "\n" +
+          (d.remote_enabled
+            ? L("已配置 remote 段，但远端查询没有返回它：", "A remote section is configured, but the remote query did not return it: ")
+              + (d.remote_error ? L("查询失败 ", "query failed: ") + d.remote_error
+                 : L("远端库里也没有这个会话（核对远端 zusage.py 读的库/用户与远端 ZCode 实际写入的是否一致）",
+                     "the remote database does not have it either (verify the database/user the remote zusage.py reads matches what the remote ZCode writes)"))
+            : L("若这是 SSH 远程 / 他机会话：在 config.json 配置 remote 段即可（README「SSH 远程会话支持」；ssh 也可写成 argv 数组，docker exec / wsl / kubectl exec 等通道都能借道）",
+                "If this is an SSH/remote session, add the remote section to config.json (see README; ssh may also be an argv array, so docker exec / wsl / kubectl exec all work)")));
+      }
+      if (last.tps) {   // 最近一次请求的生成速度，置顶显示；随数值三档变色
+        var tpsCls = last.tps >= 70 ? "ok" : last.tps >= 40 ? "warm" : "hot";
+        it(ico('<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>') +
+          '<span class="' + tpsCls + '">' + last.tps + '</span><span class="dim">t/s</span>',
+          "\x01" +
+          ttH(L("生成速度 · 最近一段", "Generation speed · latest segment")) +
+          ttRow(L("口径", "Basis"), L("输出 tokens（含思考）÷ 生成耗时", "output tokens (thinking incl.) ÷ generation time")) +
+          ttRow(L("档位", "Bands"), L("≥70 绿 · 40–70 黄 · <40 红", "≥70 green · 40–70 yellow · <40 red")) +
+          ttNote(L("回答期间每段完成即刷新。回复末尾的统计行是整问加权均值，两者数值不同属正常",
+            "Refreshes as each segment completes. The reply-end rate line is the whole-turn weighted average, so the two legitimately differ")));
+      }
+      if (state.show.ctx) {
+        var cw = parseInt(state.ctxOv, 10) || d.native_ctx || d.context_window || 0;
+        var pct = cw ? sess.ctx / cw * 100 : 0;
+        var exc = excActive(sess);
+        /* 占比档位分两套：窗口 ≥100 万时同一百分比的绝对 token 量大，40/60 提前预警；其余维持 70/85。 */
+        var big = cw >= 1000000;
+        var cls = exc ? "exc" : pct >= (big ? 60 : 85) ? "hot" : pct >= (big ? 40 : 70) ? "warm" : "ok";
+        var bar = cw ? '<span class="cbar"><i class="' + cls + '" style="width:' +
+          Math.min(100, pct).toFixed(1) + '%"></i></span>' : "";
+        it(bar + (cw ? '<span class="pct ' + cls + '">' + pct.toFixed(1) + "%</span>"
+              : '<span class="v' + (exc ? " exc" : "") + '">' + fmt(sess.ctx) + "</span>"),
+          "\x01" +
+          ttH(L("上下文容量", "Context capacity")) +
+          (cw ? ttRow(L("已用 / 窗口", "Used / window"), fmt(sess.ctx) + " / " + fmt(cw))
+              : ttRow(L("已用", "Used"), fmt(sess.ctx) + L("（窗口容量未知）", " (window capacity unknown)"))) +
+          ttRow(L("颜色档位", "Color bands"),
+            (big ? L("≤40% 绿 · 40–60% 黄 · ≥60% 红", "≤40% green · 40–60% yellow · ≥60% red")
+                 : L("<70% 绿 · 70–85% 黄 · ≥85% 红", "<70% green · 70–85% yellow · ≥85% red")) +
+            L(" · 超限=亮红闪烁", " · over-limit = flashing red")) +
+          (exc ? ttNote(L("⚠ 上下文超限：最近一次请求被拒（" + fmtTime(d.ctx_exc) + "），需压缩会话或新开会话",
+                          "⚠ Over limit: the latest request was rejected (" + fmtTime(d.ctx_exc) + ") — compress or restart the session")) : ""));
+      }
+      if (state.show.turn) {
+        it(ico('<path d="M23 4v6h-6"/><path d="M20.49 15A9 9 0 1 1 18.36 5.64L23 10"/>') +
+          '<span class="v">' + fmt(lt.total) + "</span>" +
+          (shrink ? "" : cachePct(lt.cache_read, lt.input)) +   // v66 超宽时命中率让位，明细仍在悬停 tooltip
+          '<span class="dim">' + (lt.requests || 0) + L("次", " req") + "</span>" +
+          ico('<path d="M6 3h12M6 21h12M8 3v3.5L12 11l4-4.5V3M8 21v-3.5L12 13l4 4.5V21"/>') +
+          '<span class="dim">' + sec(last.duration_ms) + "</span>" +
+          ico('<path d="M5 20v-5M12 20v-9M19 20V5"/>') +
+          '<span class="dim">' + sec(last.ttft_ms) + "</span>",
+          "\x01" +
+          ttH(state.lang === "en"
+            ? "Latest turn · " + (lt.requests || 0) + " requests"
+            : "本轮 · " + (lt.requests || 0) + " 次请求") +
+          ttRow(L("输入", "Input"), fmt(lt.input) +
+            (lt.input > 0 && lt.cache_read > 0 ? L("（命中 " + Math.round(lt.cache_read / lt.input * 100) + "%）", " (" + Math.round(lt.cache_read / lt.input * 100) + "% cached)") : "")) +
+          ttRow(L("输出", "Output"), fmt(lt.output) +
+            (lt.reasoning > 0 ? L("（含思考 " + fmt(lt.reasoning) + "）", " (incl. " + fmt(lt.reasoning) + " thinking)") : "")) +
+          (lt.cache_write > 0 ? ttRow(L("缓存写入", "Cache write"), fmt(lt.cache_write)) : "") +
+          ttRow(L("耗时", "Time"), L("单次 ", "request ") + sec(last.duration_ms) + L(" · 首字 ", " · TTFT ") + sec(last.ttft_ms) + L(" · 轮总 ", " · turn ") + sec(lt.duration_ms)) +
+          ((lt.tool_calls || lt.retries || lt.tool_errors)
+            ? ttRow(L("工具", "Tools"), (lt.tool_calls ? lt.tool_calls + L(" 次调用", " calls") : "") +
+                (lt.retries ? L(" · 重试 ", " · retries ") + lt.retries : "") +
+                (lt.tool_errors ? L(" · 错误 ", " · errors ") + lt.tool_errors : "")) : ""));
+      }
+      if (state.show.win) {
+        it(ico('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>') +
+          '<span class="v">' + fmt(sess.total) + "</span>" +
+          (shrink ? "" : cachePct(sess.cache_read, sess.input)) +   // v66 同上
+          '<span class="dim">' + (sess.turns || 0) + L("轮 ", " turns · ") + (sess.requests || 0) + L("次", " req") + "</span>",
+          "\x01" +
+          ttH(L("会话累计 · 全部请求", "Session total · all requests")) +
+          ttRow(L("输入", "Input"), fmt(sess.input) +
+            (sess.input > 0 && sess.cache_read > 0 ? L("（命中 " + Math.round(sess.cache_read / sess.input * 100) + "%）", " (" + Math.round(sess.cache_read / sess.input * 100) + "% cached)") : "")) +
+          ttRow(L("输出", "Output"), fmt(sess.output) +
+            (sess.reasoning > 0 ? L("（含思考 " + fmt(sess.reasoning) + "）", " (incl. " + fmt(sess.reasoning) + " thinking)") : "")) +
+          (sess.cache_write > 0 ? ttRow(L("缓存写入", "Cache write"), fmt(sess.cache_write)) : "") +
+          ttRow(L("规模", "Scale"), (sess.turns || 0) + L(" 轮 · ", " turns · ") + (sess.requests || 0) + L(" 次请求", " requests") +
+            (sess.tool_calls ? L(" · 工具 ", " · tools ") + sess.tool_calls : "") +
+            (sess.retries ? L(" · 重试 ", " · retries ") + sess.retries : "")) +
+          (d.code && (d.code.add || d.code.del)
+            ? ttRow(L("代码变更", "Code changes"), "+" + (d.code.add || 0) + " / -" + (d.code.del || 0) +
+                (d.code.files ? L("（" + d.code.files + " 文件）", " (" + d.code.files + " files)") : "")) : ""));
+      }
+      if (state.show.tools) {
+        var toolRows = (tls.list || []).map(function (t1) {
+          return ttRow(t1.name, t1.count + L(" 次 · ", " calls · ") + sec(t1.duration_ms) +
+            (t1.errors ? L(" · 错误 ", " · errors ") + t1.errors : ""));
+        }).join("");
+        it(ico('<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>') +
+          '<span class="v">' + (tls.total || 0) + "</span>" +
+          (tls.errors ? '<span class="eb">' +
+            ico('<circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>') +
+            tls.errors + "</span>" : ""),
+          "\x01" +
+          ttH(state.lang === "en"
+            ? "Tool calls · " + (tls.total || 0) + " total" + (tls.errors ? ", " + tls.errors + " errors" : "")
+            : "工具调用 · 共 " + (tls.total || 0) + " 次" + (tls.errors ? " · 错误 " + tls.errors : "")) +
+          (toolRows || ttNote(L("无工具调用记录", "No tool calls recorded"))));
+      }
+      if (state.show.today) {
+        it(ico('<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>') +
+          '<span class="v">' + fmt(today.total) + "</span>",
+          "\x01" +
+          ttH(L("今日合计 · 今天所有会话", "Today · all sessions")) +
+          ttRow(L("输入", "Input"), fmt(today.input) +
+            (today.input > 0 && today.cache_read > 0 ? L("（命中 " + Math.round(today.cache_read / today.input * 100) + "%）", " (" + Math.round(today.cache_read / today.input * 100) + "% cached)") : "")) +
+          ttRow(L("输出", "Output"), fmt(today.output) +
+            (today.reasoning > 0 ? L("（含思考 " + fmt(today.reasoning) + "）", " (incl. " + fmt(today.reasoning) + " thinking)") : "")) +
+          ttRow(L("请求", "Requests"), (today.requests || 0) +
+            (today.retries ? L(" 次请求 · 重试 ", " requests · retries ") + today.retries : L(" 次", " requests"))));
+      }
+      if (state.show.sub && d.sub && (d.sub.total || d.sub.active)) {
+        /* v50：悬停 tooltip 只放汇总 + 打开面板的提示；各子代理明细在点击弹出的
+         * 固定面板里用页签切换（面板固定不随鼠标，页签点击没有几何问题） */
+        it(ico('<path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>') +
+          '<span class="v">' + fmt(d.sub.total) + "</span>" +
+          (d.sub.active ? '<span class="ok dot">●</span>' : ""),
+          L("子代理：当前会话的后台子代理消耗（独立统计，不计入会话累计）", "Sub-agents: background sub-agent usage of the current session (tracked separately, not counted in the session total)") + "\n" +
+          ioc(d.sub.input, d.sub.output, d.sub.cache_read, d.sub.reasoning, d.sub.cache_write) +
+          L("，共 ", ", ") + (d.sub.requests || 0) + L(" 次", " requests in total") + (d.sub.active ? L(" · 运行中", " · running") : "") +
+          "\n" + L("点击条目打开面板，查看每个子代理的具体消耗", "Click the item to open the panel with per-sub-agent details"), "zu-sub");
+      }
+      return { s: items.join('<span class="sep"></span>') || '<span class="dim">' + L("全部显示项已关闭", "All display items are off") + '</span>', tips: tips };
+    }
+
+    /* 当前会话识别（v34 起 mine 优先，此处为兜底启发式）：ZCode 在 localStorage 的
+     * "zcode-v4-last-session:v1:<工作区路径>" 键里保存每个工作区当前打开的会话 id。
+     * 键随会话切换由应用更新（新开空会话时应用还会删键）；但 localStorage 全窗口共享、
+     * 键对"自动新建的会话"更新滞后，多窗口下根本分不清哪个键属于本窗口 ——
+     * 所以 v34 起正常路径是泵按窗口注入的 mine（渲染端经 IPC 上报的焦点会话），
+     * 只有泵无该窗口信息时（辅助窗口/旧泵）才落到这里：取所有键值与 payload.recent
+     * 的 sid 求交集；多候选取最近活跃（数值 last_at 比较，勿用 HH:MM:SS 字符串，跨午夜会排错）。
+     * v32：键值即使不在 recent 池里也作为 want 返回（挂 window.__zusageWantSid），
+     * 泵把它传给 zusage.py 强制纳入快照——刚开的新会话/超出 6+6 池的会话也能显示自己的数据。
+     * 注意：会话标题不在可扫描的 DOM 文本节点里（顶栏标题扫描方案实测永远失败，勿回退）。 */
+    var pickedSid = "", wsPrev = null, lastHtml = "";
+    function pickCurrent(d) {
+      var recent = d.recent || [];
+      if (!recent.length) return null;
+      var bySid = {}, kv = {};
+      for (var i = 0; i < recent.length; i++) bySid[recent[i].sid] = recent[i];
+      try {
+        Object.keys(localStorage).forEach(function (k) {
+          if (/^zcode-v4-last-session:/.test(k)) {
+            var v = localStorage.getItem(k);
+            if (v && /^[A-Za-z0-9_-]+$/.test(v)) kv[k] = v;
+          }
+        });
+      } catch (e) { return null; }
+      if (!Object.keys(kv).length) return null;
+      var hit = {}, firstKeyVal = "";
+      for (var k in kv) {
+        if (bySid[kv[k]]) hit[k] = kv[k];
+        if (!firstKeyVal) firstKeyVal = kv[k];
+      }
+      var switched = null;
+      if (wsPrev) {
+        for (var k2 in kv) {
+          if (wsPrev[k2] && wsPrev[k2] !== kv[k2]) switched = kv[k2];   // 该工作区刚切换了会话
+        }
+      }
+      wsPrev = kv;
+      /* want = 当前真正打开的会话（切换优先，否则任一键值），交由泵强制补拉 */
+      var want = switched || firstKeyVal;
+      if (switched && bySid[switched]) return { sess: bySid[switched], want: want };
+      var cands = [];
+      for (var k3 in hit) cands.push(bySid[hit[k3]]);
+      if (cands.length === 1) return { sess: cands[0], want: want };
+      if (!cands.length) return { sess: null, want: want };
+      var best = cands[0];   // 多候选：取最近活跃的
+      for (var n = 1; n < cands.length; n++) {
+        if ((cands[n].last_at || 0) > (best.last_at || 0)) best = cands[n];
+      }
+      return { sess: best, want: want };
+    }
+
+    /* 子代理查看视图识别：子代理会话的任务提示词会作为聊天气泡文本出现在消息流里，
+     * 用 recent 中 is_sub 候选的标题前缀（前 30 字）在 DOM 文本里匹配。
+     * （主会话的标题不在 DOM 文本里，但子代理视图的气泡是普通文本，可匹配。） */
+    /* 零值会话 stub：当前会话在共享池里还没有数据行（新会话没发过消息/还没拉到）时，
+     * 显示"当前会话的 0 值"。绝不回退到池里别的会话 —— 显示错会话的数字正是 v34 修的 bug。 */
+    function stubFor(sid) {
+      return { sid: String(sid || ""), title: "", active: false, turns: 0, requests: 0,
+        input: 0, output: 0, reasoning: 0, cache_read: 0, cache_write: 0, total: 0,
+        tool_calls: 0, retries: 0, ctx: 0, updated: "", last_at: 0, ctx_exc: 0,
+        last_turn: {requests: 0, retries: 0, tool_calls: 0, tool_errors: 0, input: 0, output: 0,
+          reasoning: 0, cache_read: 0, cache_write: 0, total: 0, duration_ms: 0, ttft_ms: 0},
+        last: {duration_ms: 0, ttft_ms: 0, model: "", tps: 0},
+        code: {add: null, del: null, files: null},
+        tools: {total: 0, errors: 0, list: []},
+        sub: {requests: 0, total: 0, input: 0, output: 0, cache_read: 0, reasoning: 0,
+          cache_write: 0, active: false, list: []},
+        context_window: 0, context_auto: false };
+    }
+    function render(d) {
+      state.data = d;
+      var pc = null, p = null;
+      if (instSid) {
+        /* v61.1 分屏多实例：本条显示哪个会话由 composer 祖先链的 data-session-id 决定
+         * （客户端每个 pane 自带该标记，比窗口级 mine 更准，绝不串 pane）；
+         * 会话不在池里（还没拉取）就显示本会话 0 值 —— 绝不回退到别的会话（v34 原则）。 */
+        pickedSid = instSid;
+        var rec = d.recent || [];
+        for (var i = 0; i < rec.length; i++) if (rec[i].sid === instSid) { p = rec[i]; break; }
+        if (!p) p = stubFor(instSid);
+      } else {
+        var mine = d.mine;   // 泵按窗口注入：string=本窗口焦点会话（空串=该窗口当前无会话），undefined=泵无该窗口信息
+        if (typeof mine === "string") {
+          pickedSid = mine;
+          window.__zusageWantSid = mine;
+          if (mine) {
+            var rec2 = d.recent || [];
+            for (var j = 0; j < rec2.length; j++) if (rec2[j].sid === mine) { p = rec2[j]; break; }
+            if (!p) p = stubFor(mine);
+          } else {
+            p = stubFor("");
+          }
+        } else {
+          pc = pickCurrent(d);
+          p = pc ? pc.sess : null;
+          pickedSid = p ? p.sid : "";
+          window.__zusageWantSid = (pc && pc.want) || "";   // 泵读取后让 zusage.py 强制纳入该会话
+          if (!p) p = stubFor((pc && pc.want) || "");
+        }
+      }
+      excOn = excActive(p);   // 气泡的显示依据（track 每帧消费）
+      var view = {
+        session: p, last_turn: p.last_turn || {}, last: p.last || {},
+        /* v9：远端会话的「今日合计」用远端机数据，本地 today 只在显示本地会话时使用 */
+        today: (p.remote && d.remote_today) ? d.remote_today : d.today,
+        native_ctx: nativeCtxVal,
+        context_window: p.context_window, context_auto: p.context_auto,
+        code: p.code, ctx_exc: p.ctx_exc, tools: p.tools,
+        remote: !!p.remote, remote_host: p.remote_host || "", remote_error: d.remote_error || "",
+        /* v62（issue #14 / #10）：该会话不在本地库且没命中远端 → 条面给一次配置指引，
+         * 把"各项全 0 = 插件坏了"的误判转成可执行的下一步；远端命中的会话由 ☁ 徽标那套说明。 */
+        not_local: (d.not_local || []).indexOf(p.sid) >= 0 && !p.remote,
+        remote_enabled: !!d.remote_enabled,
+        remote_empty: !!(p.remote && !p.requests),   // 远端答了、但远端库里该会话没有已完成请求
+        sub: p.sub || {requests: 0, total: 0, input: 0, output: 0, cache_read: 0, active: false, list: []},
+      };
+      lastSub = view.sub;   // 子代理明细面板的数据源（开关面板/数据推送刷新用）
+      refreshWants();
+      var h = html(view);
+      /* 内容没变就不重建 DOM：泵每 1.5s 推送一次，无条件 innerHTML 会重建条面+重启呼吸灯
+       * 动画+触发 tooltip 重画 = 悬停时周期性闪烁（v33 修复）。变化时才重建。 */
+      if (h.s !== lastHtml) {
+        lastHtml = h.s;
+        main.innerHTML = h.s;
+      }
+      var els = main.querySelectorAll(".it");
+      for (var i = 0; i < els.length; i++) els[i].__tip = h.tips[i] || null;
+      /* 数据刷新时正在悬停：接管同位置的新元素继续显示。只调位置不重画内容——
+       * 数字每 1.5s 都在变，重画就是闪烁；旧文本保持到鼠标下次移动为止。 */
+      if (tipFor) {
+        var nu = null;
+        if (tipFor === main) nu = main;
+        else if (tipFor.__n === els.length) nu = els[tipFor.__idx];
+        if (nu && nu.__tip) { tipFor = nu; positionTip(nu, true); } else hideTip(false, "render-orphan");
+        /* 接管失败（条目结构变化）也受总闸保护：鼠标仍在条上时保持旧 tooltip，
+         * 下一次 mousemove 会重新判定该显示哪一项 */
+      }
+      if (subPanel.classList.contains("open")) buildSubPanel(view.sub);   // 面板开着：随推送实时刷新
+    }
+
+
+    /* ---------- 自绘 tooltip：向上弹出（原生 title 方向不可控） ---------- */
+    var tipFor = null, lastMoveAt = 0, tipSig = "";
+    var mouseInBar = false;   // 鼠标是否悬停在条面/tooltip/面板上（最近一次 mousemove 判定）
+    var tipGraceTimer = 0;    // 越顶宽限定时器（v46）
+    var tipStats = { mv: 0, shows: 0, hides: 0, last: "", lastHide: "", corridor: 0, grace: 0 };   // 诊断：随 mount diag 回写
+    /* 隐藏总闸（v33.3）：鼠标还在条面上时，任何路径（数据刷新接管失败/输入框重建/
+     * 瞬时不可见判定）都不得隐藏 tooltip——只有鼠标真正离开条面（left-bar，force）
+     * 或条面整体隐藏（force）才允许。 */
+    function hideTip(force, cause) {
+      if (!force && mouseInBar) { tipStats.lastHide = "blocked:" + (cause || "?"); return; }
+      if (tipGraceTimer) { clearTimeout(tipGraceTimer); tipGraceTimer = 0; }
+      if (tip.style.display !== "none") tip.style.display = "none";
+      tipFor = null;
+      tipSig = "";
+      tipStats.hides++;
+      tipStats.lastHide = cause || "?";
+    }
+    function positionTip(el, keepTop) {
+      var tr = tip.getBoundingClientRect(), ar = el.getBoundingClientRect();
+      var left = ar.left + ar.width / 2 - tr.width / 2;
+      left = Math.max(8, Math.min(left, Math.max(8, innerWidth - tr.width - 8)));
+      /* keepTop=数据刷新等重定位时保持顶边——悬停中只调位置不重建，顶边不动鼠标就
+       * 不会因盒形变化被甩出去（外面是 iframe 静默区，甩出去就回不来了）。
+       * 只有首次弹出才按条目重新锚定（悬空 8px）。 */
+      var top = (keepTop && tip.style.top) ? parseFloat(tip.style.top) : 0;
+      if (!isFinite(top) || top < 8) top = Math.max(8, ar.top - tr.height - 8);
+      tip.style.left = Math.round(left) + "px";
+      tip.style.top = Math.round(top) + "px";
+    }
+    function drawTip(el, keepTop) {
+      var t = el && el.__tip;
+      if (!t) { tip.style.display = "none"; tipFor = null; return; }
+      /* 幂等：内容没变就只调位置，不重建 innerHTML（重建=悬停中每 1.5s 闪烁） */
+      if (t === tipSig && tip.style.display === "block") {
+        positionTip(el, true);
+        return;
+      }
+      tipSig = t;
+      tip.innerHTML = '<div class="tbody"></div>';
+      if (t.charCodeAt(0) === 1) tip.firstChild.innerHTML = t.slice(1);   // \x01 前缀 = 结构化 HTML（v67.1）
+      else tip.firstChild.textContent = t;
+      tip.style.display = "block";
+      positionTip(el, keepTop);
+    }
+    function showTipFor(el) {
+      tipFor = el;
+      var its = main.querySelectorAll(".it");
+      el.__idx = el === main ? -1 : Array.prototype.indexOf.call(its, el);
+      el.__n = its.length;   // render 接管时校验条目数未变，数量变了 __idx 就不可信
+      tipStats.shows++;
+      tipStats.last = el === main ? "main" : String(el.textContent || "").slice(0, 12);
+      drawTip(el, false);
+    }
+    /* 事件挂 document 捕获阶段（v32）：React/应用层可能在冒泡路上 stopPropagation，
+     * 挂 main 的 mousemove 收不到（v31 实证：原生 title 有 hover、自绘 tip 无事件）。
+     * stale() 守卫：热更新后旧实例监听器必须罢工，否则新旧两个 tip 同时工作。 */
+    document.addEventListener("mousemove", function (e) {
+      if (stale()) return;
+      tipStats.mv++;
+      if (Date.now() - lastMoveAt < 150) return;
+      lastMoveAt = Date.now();
+      var t = e.target;
+      if (!t || !t.closest) return;
+      if (tip.contains(t)) { mouseInBar = true; cancelTipGrace(); return; }   // 鼠标移入 tooltip：保持
+      if (t.closest(".panel")) {
+        /* 面板上不保留条面 tooltip（v42）：开设置的路上触发过条目 tooltip 的话，
+         * 这分支若不清掉它，鼠标在面板里它就永不消失。 */
+        mouseInBar = true;
+        if (tipFor) hideTip(true, "panel-hover");
+        return;
+      }
+      if (!bar.contains(t)) {
+        /* 空中走廊（v45）：悬空缝是"条外且 tip 外"的真空带，采样事件落在这里会被误判
+         * 成"移开"立即熄灭——鼠标在 tooltip 横向范围、底边下方 ~12px 内时视同仍在条上，
+         * 穿行去 tooltip 点 tab 的路上不熄灭。 */
+        if (tipFor && inTipCorridor(e.clientX, e.clientY)) {
+          tipStats.corridor++;
+          mouseInBar = true;
+          cancelTipGrace();
+          return;
+        }
+        /* 越顶宽限（v46）：mousemove 有 150ms 节流采样，快速上移时两个采样点之间能跨过
+         * 整个 tooltip，采样点落在 tip 上方的死区——此前立即隐藏就把"正要进 tip"错杀成
+         * "离开"。改挂 300ms 宽限：下一个采样落回 tip/走廊就取消（tip 仍可点 tab），
+         * 确实继续远离才真正收起。横向/向下移出不享受宽限，依旧立即消失。 */
+        if (tipFor && inTipColumn(e.clientX, e.clientY)) {
+          tipStats.grace++;
+          mouseInBar = true;   // 视同在途：总闸拦住 render-orphan 等路径趁机熄灯
+          if (!tipGraceTimer) tipGraceTimer = setTimeout(function () {
+            tipGraceTimer = 0;
+            hideTip(true, "grace-expire");
+          }, 300);
+          return;
+        }
+        mouseInBar = false;
+        if (tipFor) hideTip(true, "left-bar");   // v43：移开条面立即消失，不再留 300ms 缓冲
+        return;
+      }
+      mouseInBar = true;
+      cancelTipGrace();
+      if (panel.classList.contains("open")) return;   // 面板开着：条面不弹 tooltip（弹出也会被面板盖住，只露边角）
+      var el = t.closest(".it");
+      if (el) {
+        if (el !== tipFor) showTipFor(el);
+      } else if (tipFor) {
+        /* 条面内非条目区（项间隔/分隔符/⚙）：保持当前 tooltip 不动（此处刻意无操作）。
+         * 慢速移动时命中目标在条目↔空隙间反复跳，若此处切换内容/隐藏
+         * 就是"出现一下立刻消失"的闪烁（v33.2，概览 tooltip 因此废除） */
+      }
+    }, true);
+    /* 鼠标甩出窗口外/窗口失焦：tooltip 立即收起（v43）。
+     * v47 根因修正：ZCode 条面上方的聊天区是独立浏览上下文（iframe/webview，findComposer
+     * 穿透同源 iframe 即佐证），光标从条面跨入其上时宿主文档会发 documentElement
+     * mouseleave、且后续 mousemove 全部进子文档——diag 实证（mv 上万但 corridor/grace
+     * 计数全 0、lastHide=win-leave）这就是"一向上移 tooltip 就消失"的根因：v43 把这种
+     * 内部 leave 当成了甩出窗口。故 mouseleave 按退出点分流：
+     *   · 退出点贴窗口边缘 = 真离开窗口 → 立即收；
+     *   · 内部 leave 且退出点在 tip 横向列内（±30px）= 去 tooltip/回条面的穿行 → 400ms
+     *     宽限（子上下文区域事件停摆，靠定时器兜底收回；tip/条面/走廊事件会取消它）；
+     *   · 内部 leave 列外 = 横向走掉 → 立即收。 */
+    function tipBoundaryHide() {
+      if (stale()) return;
+      mouseInBar = false;
+      if (tipFor) hideTip(true, "win-leave");
+    }
+    window.addEventListener("blur", tipBoundaryHide, true);
+    function tipLeaveAt(x, y) {
+      if (stale() || !tipFor) return;
+      if (x <= 1 || x >= innerWidth - 2 || y <= 1 || y >= innerHeight - 2) {
+        tipBoundaryHide();
+        return;
+      }
+      var r = tip.getBoundingClientRect();
+      if (x >= r.left - 30 && x <= r.right + 30) {
+        tipStats.grace++;
+        mouseInBar = true;   // 在途：总闸拦住 render-orphan 等路径趁机熄灯
+        cancelTipGrace();
+        tipGraceTimer = setTimeout(function () {
+          tipGraceTimer = 0;
+          hideTip(true, "grace-expire");
+        }, 400);
+      } else {
+        mouseInBar = false;
+        hideTip(true, "left-bar");
+      }
+    }
+    document.documentElement.addEventListener("mouseleave", function (e) {
+      tipLeaveAt(e.clientX, e.clientY);
+    }, true);
+    /* 光标离开 tooltip 本体：上行越顶/下行回条面 → 列内宽限；横向 → 立即收（分流同上） */
+    tip.addEventListener("mouseleave", function (e) {
+      tipLeaveAt(e.clientX, e.clientY);
+    }, true);
+    tip.addEventListener("mouseenter", function () {
+      if (stale()) return;
+      cancelTipGrace();
+    }, true);
+    /* 空中走廊判定（v45）：tooltip 矩形横向 ±4px、纵向 tip 顶边到底边下方 12px
+     * （覆盖条面顶边到 tooltip 底边的 8px 悬空缝）。只在 tipFor 存在时被调用。 */
+    function inTipCorridor(x, y) {
+      var r = tip.getBoundingClientRect();
+      return x >= r.left - 4 && x <= r.right + 4 && y >= r.top && y <= r.bottom + 12;
+    }
+    /* 越顶宽限判定（v46）：tip 正上方 ±30px、高 80px 的柱形区——快速上移的采样点
+     * 落进这里说明鼠标刚越过 tip 顶边，大概率下一拍就停在 tip 里。 */
+    function inTipColumn(x, y) {
+      var r = tip.getBoundingClientRect();
+      return x >= r.left - 30 && x <= r.right + 30 && y >= r.top - 80 && y < r.top;
+    }
+    function cancelTipGrace() {
+      if (tipGraceTimer) { clearTimeout(tipGraceTimer); tipGraceTimer = 0; }
+    }
+
+    /* ---------- 设置面板 ---------- */
+    function syncUpdate() {
+      var u = state.pluginUpdate;
+      var active = !!(u && u.supported);
+      var cb = panel.querySelector(".zu-auto-update");
+      cb.checked = !!(u && u.auto);
+      cb.disabled = !active;
+      panel.querySelector('[data-update=check]').disabled = !active || !!u.busy;
+      panel.querySelector('[data-update=update]').disabled = !active || !!u.busy || u.phase !== "available";
+      var messages = {
+        idle: L("尚未检测", "Not checked yet"),
+        checking: L("正在检查更新…", "Checking for updates…"),
+        available: L("发现新版本", "Update available"),
+        current: L("当前已是最新版本", "Up to date"),
+        updating: L("正在更新插件…", "Updating plugin…"),
+        updated: L("插件已更新；请重开会话以加载新版插件组件", "Plugin updated; start a new session to load the new components"),
+        error: L("更新失败：", "Update failed: ") + (u && u.error || ""),
+      };
+      var text = !active ? L("仅支持已安装的 zusage-marketplace 用户插件；更新通道未就绪时需先升级插件并重启 ZCode。", "Requires the installed user plugin from zusage-marketplace. Upgrade the plugin and restart ZCode if the update channel is not ready.") : messages[u.phase] || messages.idle;
+      if (!active && u && u.error) text += "\n" + messages.error;
+      if (active && u.currentVersion) text += "\n" + L("当前版本：", "Current version: ") + u.currentVersion;
+      if (active && u.latestVersion) text += (u.channel === "release" ? L(" · Release 版本：", " · Release version: ") : L(" · 市场版本：", " · Marketplace version: ")) + u.latestVersion;
+      if (active && u.channel) text += "\n" + (u.channel === "release" ? L("更新来源：GitHub 正式 Release（校验 ZIP 与 SHA256）", "Update source: stable GitHub Release (validated ZIP and SHA256)") : L("更新来源：本地目录市场", "Update source: local directory marketplace"));
+      if (active && u.releaseUrl) text += "\n" + u.releaseUrl;
+      if (active && u.checkedAt) text += "\n" + L("上次检测：", "Last checked: ") + new Date(u.checkedAt).toLocaleString();
+      if (u && u.phase === "updating") text += "\n" + L("关闭自动更新仅阻止后续安装；已开始的安装会继续完成", "Turning automatic updates off stops future installs; an install already started will finish");
+      if (u && u.restartRequired) text += "\n" + L("主进程或关闭热更新的文件已更新，需重启 ZCode", "Restart ZCode to load main-process updates or files with hot reload disabled");
+      if (u && u.skipped && u.skipped.length) text += "\n" + L("保留本地热修（未覆盖）：", "Local edits preserved (not overwritten): ") + u.skipped.join(", ");
+      panel.querySelector(".zu-update-status").textContent = text;
+      /* 逐问速率行开关勾选态：state.rateLine 由主进程推送（或 change 时代乐观更新） */
+      var rl = panel.querySelector(".zu-rate-line");
+      if (rl) rl.checked = state.rateLine;
+    }
+    function syncPanel() {
+      panel.querySelectorAll("input[type=checkbox][data-k]").forEach(function (cb) {
+        cb.checked = !!state.show[cb.dataset.k];
+      });
+      panel.querySelector(".zu-ctxov").value = state.ctxOv;
+      syncUpdate();
+    }
+    panel.addEventListener("click", function (e) {
+      var button = e.target.closest && e.target.closest("[data-update]");
+      if (button && !button.disabled) pluginRequest(button.dataset.update);
+    });
+    gear.addEventListener("click", function (e) {
+      e.stopPropagation();
+      syncPanel();
+      var opening = !panel.classList.contains("open");
+      panel.classList.toggle("open");
+      if (opening) {
+        subPanel.classList.remove("open");   // 两面板同位重叠，互斥打开（v49）
+        hideTip(true, "gear-open");   // 移向齿轮的路上可能触发过条目 tooltip，开面板时一并收掉
+      }
+    });
+    panel.addEventListener("change", function (e) {
+      var t2 = e.target;
+      if (t2.classList.contains("zu-auto-update")) {
+        pluginRequest("auto", t2.checked);
+        return;
+      }
+      if (t2.classList.contains("zu-rate-line")) {
+        /* 乐观更新勾选态，真值以主进程写 config.json 后回推的 rateLine 为准 */
+        state.rateLine = t2.checked;
+        scanRateLines();
+        pluginRequest("rate-line", t2.checked);
+        return;
+      }
+      if (t2.name === "zu-lang") {
+        state.lang = t2.value;
+        persist();
+        buildPanel();   // 面板自身文案随语言重建（含 radio 勾选态）
+        rebuildExcBubble();
+        renderAll(true);   // 条面单位与 tooltip 文案随语言刷新（含各实例面板文案重建）
+        return;
+      }
+      if (t2.type === "checkbox") {
+        state.show[t2.dataset.k] = t2.checked ? 1 : 0;
+        persist();
+      } else if (t2.id === "zu-ctxov") {
+        state.ctxOv = t2.value.trim();
+        persist();
+      }
+      renderAll(false);
+    });
+    document.addEventListener("mousedown", function (e) {
+      if (panel.classList.contains("open") && !bar.contains(e.target)) panel.classList.remove("open");
+      if (subPanel.classList.contains("open") && !bar.contains(e.target)) subPanel.classList.remove("open");
+    });
+
+    /* ---------- 子代理明细面板（v49）：点击条目弹出的固定面板，替代悬停 tooltip ---------- */
+    var subPanelTab = 0;   // 面板当前页签（0=汇总，i=第 i 个子代理）；数据刷新时保持
+    function buildSubPanel(sub) {
+      var list = (sub && sub.list) || [];
+      if (subPanelTab > list.length) subPanelTab = 0;   // 列表变短则回汇总
+      subPanel.innerHTML = "";
+      var head = document.createElement("div");
+      head.className = "phead";
+      head.textContent = L("子代理明细", "Sub-agent details");
+      var ver = document.createElement("span");
+      ver.className = "pver";
+      ver.textContent = L("独立统计 · 不计入会话累计", "Tracked separately · not counted in session total");
+      head.appendChild(ver);
+      subPanel.appendChild(head);
+      if (!sub || (!sub.total && !sub.active)) {
+        var empty = document.createElement("div");
+        empty.className = "pnote";
+        empty.textContent = L("当前会话没有子代理记录", "No sub-agent records in the current session");
+        subPanel.appendChild(empty);
+        return;
+      }
+      /* 页签行：汇总 + 每个子代理（复用 .ttabs/.ttab 样式）；动态名走 textContent 防注入 */
+      var tabsRow = document.createElement("div");
+      tabsRow.className = "ttabs";
+      var labels = [L("汇总", "Summary")];
+      list.forEach(function (s1) {
+        /* task=派发时的 description（右侧"子智能体目录"同源）；无则退回 title/线路名 */
+        var nm = String(s1.task || "").trim() || String(s1.title || "").trim() ||
+          String(s1.agent || "sub").replace(/^zcode-/, "") + "…" + String(s1.sid).slice(-4);
+        labels.push(nm.length > 12 ? nm.slice(0, 11) + "…" : nm);
+      });
+      labels.forEach(function (lb, i) {
+        var tb = document.createElement("span");
+        tb.className = "ttab" + (i === subPanelTab ? " on" : "");
+        tb.setAttribute("data-i", String(i));
+        tb.textContent = lb;
+        tabsRow.appendChild(tb);
+      });
+      subPanel.appendChild(tabsRow);
+      var body = document.createElement("div");
+      body.className = "tbody";   // 复用 tooltip 内容容器的限高滚动
+      subPanel.appendChild(body);
+      function fillRow(row, s1) {
+        var nm = String(s1.task || "").trim() || String(s1.title || "").trim() ||
+          String(s1.agent || "sub").replace(/^zcode-/, "") + "…" + String(s1.sid).slice(-4);
+        var n = document.createElement("div");
+        n.className = "subname";
+        n.textContent = nm + L("（", " (") + String(s1.agent || "subagent").replace(/^zcode-/, "") +
+          " …" + String(s1.sid).slice(-4) + L("）", ")");
+        if (s1.active) {   // 运行中徽章：动态名仍走 textContent，徽章是独立 span
+          var live = document.createElement("span");
+          live.className = "sublive";
+          live.textContent = L("运行中", "running");
+          n.appendChild(live);
+        }
+        var st = document.createElement("div");
+        st.className = "substat";
+        st.textContent = L("总消耗 ", "Total ") + fmt(s1.total) + L(" · ", " · ") + (s1.requests || 0) +
+          L(" 次请求", " requests") + (s1.last ? L(" · 最后活动 ", " · last activity ") + fmtTime(s1.last) : "");
+        var br = document.createElement("div");
+        br.className = "substat dim";
+        br.textContent = ioc(s1.input, s1.output, s1.cache_read, s1.reasoning, s1.cache_write);
+        row.appendChild(n);
+        row.appendChild(st);
+        row.appendChild(br);
+      }
+      if (subPanelTab === 0) {
+        var p1 = document.createElement("div");
+        p1.className = "pnote";
+        p1.textContent = ioc(sub.input, sub.output, sub.cache_read, sub.reasoning, sub.cache_write) +
+          L("，共 ", ", ") + (sub.requests || 0) + L(" 次", " requests in total") +
+          (sub.active ? L(" · 有子代理运行中", " · sub-agent running") : "");
+        body.appendChild(p1);
+        if (!list.length) {
+          var p2 = document.createElement("div");
+          p2.className = "pnote";
+          p2.textContent = L("当前会话还没有子代理记录", "No sub-agent records in the current session yet");
+          body.appendChild(p2);
+        }
+      } else {
+        var row = document.createElement("div");
+        row.className = "subrow";
+        fillRow(row, list[subPanelTab - 1]);
+        body.appendChild(row);
+      }
+    }
+    function toggleSubPanel() {
+      var opening = !subPanel.classList.contains("open");
+      subPanel.classList.toggle("open", opening);
+      if (opening) {
+        panel.classList.remove("open");   // 与设置面板互斥
+        buildSubPanel(lastSub);
+        hideTip(true, "sub-open");
+      }
+    }
+    bar.addEventListener("click", function (e) {
+      if (stale()) return;
+      if (e.target && e.target.closest && e.target.closest(".zu-sub")) {
+        e.stopPropagation();
+        toggleSubPanel();
+      }
+    });
+    subPanel.addEventListener("click", function (e) {
+      if (stale()) return;
+      var b = e.target && e.target.closest ? e.target.closest(".ttab") : null;
+      if (!b) return;
+      subPanelTab = +b.getAttribute("data-i") || 0;
+      buildSubPanel(lastSub);   // 面板固定，切页签只换内容
+    });
+
+    /* ---------- 输入框查找（穿透 open shadow / 同源 iframe） ---------- */
+    var COMPOSER_SEL = 'textarea, [contenteditable="true"], [role="textbox"], .ProseMirror, .ql-editor';
+    var deepCache = { el: null, at: 0 };
+    function visible(el) {
+      var r = el.getBoundingClientRect();
+      return r.width > 40 && r.height > 8 && r.bottom > 0 && r.top < innerHeight;
+    }
+    function deepFind() {
+      if (deepCache.el && deepCache.el.isConnected && reallyVisible(deepCache.el)) return deepCache.el;
+      if (Date.now() - deepCache.at < 1000) return null;
+      deepCache.at = Date.now();
+      var found = null;
+      function scan(doc, depth) {
+        if (found || !doc || depth > 8) return;
+        try {
+          doc.querySelectorAll(COMPOSER_SEL).forEach(function (el) {
+            if (el.closest && el.closest('[role="dialog"]')) return;   // v62：弹窗内的编辑框不是聊天输入框（issue #9）
+            if (!found && visible(el) && el.getBoundingClientRect().top > innerHeight * 0.45) found = el;
+            else if (found && el.getBoundingClientRect().top > found.getBoundingClientRect().top && visible(el)) found = el;
+          });
+        } catch (e) { }
+        if (found) return;
+        try {
+          doc.querySelectorAll("*").forEach(function (el) {
+            if (!found && el.shadowRoot) scan(el.shadowRoot, depth + 1);
+          });
+        } catch (e) { }
+        try {
+          doc.querySelectorAll("iframe").forEach(function (fr) {
+            if (!found) { try { if (fr.contentDocument) scan(fr.contentDocument, depth + 1); } catch (e) { } }
+          });
+        } catch (e) { }
+      }
+      scan(document, 0);
+      if (found) deepCache.el = found;
+      return found;
+    }
+    /* 输入框是否真的露在屏幕上：幽灵子树检测（设置页等 opacity-0/inert 壳，v61）+
+     * 中心点命中测试（真渲染出来的覆盖层，如全屏对话框背景、悬浮菜单）。 */
+    /* 自己的浮层（设置面板/超限气泡/悬停 tooltip）展开在条上方、必然覆盖输入区中心：
+     * 若算进遮挡判定，会进 隐藏→复显→再隐藏 的循环（v40 离线复现的"打开设置闪烁"根因；
+     * v41 补 tooltip——会话/工具的长 tooltip 同样盖住输入框中心，悬停 0.4s 后闪一下且 tooltip 消失）。
+     * 只豁免 track 的可见性路径；findComposer 找输入框时不用（ownOK 缺省 false）。 */
+    function isOwnOverlay(el) {
+      try { return !!(el && el.closest && el.closest(".zusage-tip-root,.panel,.zusage-exc")); } catch (e) { return false; }
+    }
+    /* 幽灵子树检测（v61，取代 v58/v59 的 coverLock + 穿透特判）：
+     * 客户端 3.11.x 的设置页 = 设置 tab 激活时给工作区主视图套 opacity-0 + inert +
+     * pointer-events-none 的壳（DOM 与几何原样保留，纯视觉隐藏）。输入框落在这类
+     * "保持挂载但视觉已隐藏"的祖先链里就判不可见 —— 直接读计算样式，与
+     * elementFromPoint 无关，天然免疫滚动锁定期的穿透假象。 */
+    function inGhostSubtree(el) {
+      try {
+        for (var p = el; p && p !== document.body; p = p.parentElement) {
+          if (p.inert) return true;
+          var cs = getComputedStyle(p);
+          if (cs.visibility === "hidden" || parseFloat(cs.opacity) < 0.1) return true;
+        }
+      } catch (e) { }
+      return false;
+    }
+    /* 模态弹窗打开判定（v62，issue #9）：Radix Dialog 往 body 挂一层「固定全屏 + 带底色 +
+     * z-index 抬升」的遮罩（下拉菜单/选择器只设 body pointer-events:none、不挂遮罩——v61
+     * 实测），且文档里同时存在 [role="dialog"]。此时聊天区整体不可交互，条必须整体收起：
+     * 模型配置弹窗里的「推理参数映射」编辑框正好落在视口下半部，会被 findComposer 的
+     * 启发式当聊天输入框，条就冒在弹窗里（用户 issue #9 截图）。
+     * 自己的浮层（.zu-bar/.zu-back/.zu-sheet——移动端抽屉遮罩是同款全屏底色）不算。 */
+    function modalOpen() {
+      try {
+        if (!document.querySelector('[role="dialog"]')) return false;
+        var kids = document.body.children;
+        for (var i = 0; i < kids.length; i++) {
+          var el = kids[i];
+          var cls = String(el.getAttribute && el.getAttribute("class") || "");
+          if (el.id === "zusage-bar" || /(^|\s)zu-(bar|back|sheet)(\s|$)/.test(cls)) continue;
+          var cs = getComputedStyle(el);
+          if (cs.position !== "fixed" || cs.display === "none" || cs.visibility === "hidden") continue;
+          if (parseFloat(cs.opacity || "1") < 0.05) continue;
+          if (!(parseInt(cs.zIndex, 10) >= 10)) continue;   // 遮罩必抬层（z-40/50）；普通全屏容器不抬
+          var r = el.getBoundingClientRect();
+          if (r.width < innerWidth * 0.9 || r.height < innerHeight * 0.9) continue;
+          var bg = cs.backgroundColor;
+          if (!bg || bg === "transparent" || bg === "rgba(0, 0, 0, 0)") continue;
+          return true;
+        }
+      } catch (e) { }
+      return false;
+    }
+    function reallyVisible(el, ownOK) {
+      if (!visible(el)) return false;
+      if (inGhostSubtree(el)) return false;   // 设置页等幽灵壳：视觉已隐藏（v61）
+      var r = el.getBoundingClientRect();
+      var hit;
+      try { hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); } catch (e) { return true; }
+      if (!hit) return false;
+      /* 命中根元素 = 穿透（v61 翻转判定）：Radix 模态层（下拉/对话框/modal 弹层）打开时给
+       * body 设 pointer-events:none，应用树全被跳过、elementFromPoint 一路穿到 <html>。
+       * v58/v59 曾把它当"被盖"（修设置页冒条），但正常聊天里开任何下拉也会中招——
+       * 条被误藏（用户实测）。现改判"可见"：设置页场景由 inGhostSubtree 兜住
+       * （3.11.x 设置壳必带 opacity-0+inert，不依赖命中测试），其余穿透场景
+       * 都是真·未被盖（弹层在别处，输入框露着）。 */
+      if (hit === document.body || hit === document.documentElement) return true;
+      if (hit === el || hit.contains(el) || el.contains(hit)) return true;   // 命中自身/祖先/内部装饰层
+      /* 悬浮气泡豁免（v65）：非模态浮层（「剩余额度」hover 卡、下拉/选择器弹层——body
+       * 直挂、无遮罩）会压住输入框中心点，按旧判定悬停一超 400ms 迟滞整条就消失
+       * （用户实测）。但条挂在输入框正下方，上方浮层与条并无几何冲突：命中元素只是
+       * 部分遮挡（未把输入框矩形整体罩住）时仍判可见。整体罩住才维持"被盖"——模态
+       * 全屏遮罩等真接管行为不变，模态弹窗/设置页另有 modalOpen/inGhostSubtree 收口。 */
+      var hr = hit.getBoundingClientRect();
+      if (hr.left > r.left || hr.top > r.top || hr.right < r.right || hr.bottom < r.bottom) return true;
+      if (ownOK && isOwnOverlay(hit)) return true;
+      return false;
+    }
+    function findComposer() {
+      var best = null;
+      document.querySelectorAll("textarea").forEach(function (ta) {
+        if (ta.closest && ta.closest('[role="dialog"]')) return;   // v62：弹窗内的编辑框不是聊天输入框（模型配置弹窗的「推理参数映射」落在下半屏，issue #9）
+        if (!reallyVisible(ta)) return;
+        var r = ta.getBoundingClientRect();
+        if (r.top < innerHeight * 0.45) return;   // 聊天输入框特征：在视口下半部（排除设置页等处元素）
+        if (!best || r.top > best.getBoundingClientRect().top) best = ta;
+      });
+      return best || deepFind();
+    }
+    function collectDiag(extra) {
+      if (everMounted) return;  /* 已成功挂载的窗口才允许写诊断，防后台空窗口覆盖 */
+      if (Date.now() - (collectDiag.at || 0) < 5000) { if (extra) Object.assign(window.__zusageDiag, extra); return; }
+      collectDiag.at = Date.now();
+      /* 只在 window.__zusageDiag 本体上原地更新，绝不整体替换对象：
+       * v14 曾用 Object.assign(d, ...) 换新对象，FATAL 仍指旧对象，
+       * 之后写入的 mount/trackErr 全进孤儿对象，diag 文件永远看不到（实测翻车）。 */
+      var d = window.__zusageDiag;
+      d.time = new Date().toISOString();
+      d.version = VERSION;
+      d.href = String(location.href).slice(0, 90);
+      var shallow = {};
+      COMPOSER_SEL.split(",").forEach(function (sel) {
+        try { shallow[sel.trim()] = document.querySelectorAll(sel).length; } catch (e) { }
+      });
+      d.shallow = shallow;
+      d.iframes = document.querySelectorAll("iframe").length;
+      var sr = 0;
+      (function walk(doc) {
+        if (!doc || !doc.querySelectorAll) return;
+        var all;
+        try { all = doc.querySelectorAll("*"); } catch (e) { return; }
+        for (var i = 0; i < all.length; i++) {
+          if (all[i].shadowRoot) { sr++; walk(all[i].shadowRoot); }
+        }
+      })(document);
+      d.shadowRoots = sr;
+      if (extra) Object.assign(d, extra);
+    }
+
+    /* 清理历史版本残留在 DOM 上的样式，恢复原状：
+     * v12-v14 内嵌形态的 textarea padding（data-zu-pad）与 v18 前位置的旧标记 */
+    function releasePads() {
+      try {
+        document.querySelectorAll("[data-zu-pad],[data-zu-old-pad]").forEach(function (el) {
+          el.style.paddingBottom = el.dataset.zuPad || el.dataset.zuOldPad || "";
+          delete el.dataset.zuPad;
+          delete el.dataset.zuOldPad;
+        });
+        document.querySelectorAll("[data-zu-cardpad]").forEach(function (el) {
+          el.style.marginBottom = el.dataset.zuCardPad || "";
+          delete el.dataset.zuCardPad;
+        });
+      } catch (e) { }
+    }
+    try { releasePads(); } catch (e) { }
+
+    /* 卡片下移让位：给视觉卡片加 margin-bottom 空出悬浮带（条在卡片正下方）。
+     * React 重渲染会重置内联样式，track() 逐帧对比补回（v14 同款机制）。 */
+    var CARD_MARGIN = "24px";   // v58 贴卡片定位回归：24px 让位带 = 条高 ~28 + 顶缝 4 - 原生底距 ~15 → 条下仅余 ~7px
+    function ensureCardPad() {
+      if (!cardCache) return;
+      try {
+        if (cardCache.dataset.zuCardPad === undefined) cardCache.dataset.zuCardPad = cardCache.style.marginBottom || "";
+        if (cardCache.style.marginBottom !== CARD_MARGIN) cardCache.style.marginBottom = CARD_MARGIN;
+      } catch (e) { }
+    }
+
+    /* 从 textarea 向上找视觉卡片容器（有可见边框或背景的最近祖先）——条的锚点 + 读原生总量按钮 */
+    function isVisualBox(el) {
+      try {
+        var cs = getComputedStyle(el);
+        return cs.borderTopWidth !== "0px" || cs.backgroundColor !== "rgba(0, 0, 0, 0)";
+      } catch (e) { return false; }
+    }
+    function cardOf(el) {
+      var cr = el.getBoundingClientRect();
+      var p = el.parentElement, last = el, i = 0;
+      for (; p && p !== document.body && i < 8; p = p.parentElement, i++) {
+        var r = p.getBoundingClientRect();
+        if (r.height > cr.height * 8 + 80) break;          // 会话级大容器（高度异常）
+        if (isVisualBox(p)) return p;                       // 第一个有边框/背景的层 = 视觉卡片
+        last = p;
+      }
+      return last;
+    }
+    /* 读原生 UI 的上下文总量（输入框工具行按钮的文本/aria-label，如"…总量 1,000,000"）。
+     * 服务端下发、自动跟随模型，优先级高于 catalog 查表和 config fallback。 */
+    var nativeCtx = { val: 0, at: 0 };
+    function readNativeCtx(card) {
+      if (Date.now() - nativeCtx.at < 5000) return nativeCtx.val;
+      nativeCtx.at = Date.now();
+      var els = card.querySelectorAll("button, [aria-label], [title]");
+      for (var i = 0; i < els.length; i++) {
+        var el = els[i];
+        var t = el.getAttribute("aria-label") || el.getAttribute("title") || el.textContent || "";
+        var m = t.match(/总量\s*([\d,，]+)/);
+        if (m) {
+          nativeCtx.val = parseInt(m[1].replace(/[,,]/g, ""), 10);
+          return nativeCtx.val;
+        }
+      }
+      return nativeCtx.val;
+    }
+
+    /* ---------- 定位：重活低频（找输入框/找卡片），逐帧只做矩形跟随 ---------- */
+    var composer = null, cardCache = null, everMounted = false, lastMountDiagAt = 0;
+    var curDisplay = "none", lastPos = [-1, -1], hideSince = 0;
+
+    function setComposer(el) {
+      releasePads();   // 旧卡片的让位边距先还原，新卡片马上重新加
+      composer = el;
+      cardCache = null;
+      if (composer) {
+        var c = cardOf(composer);
+        if (c && c !== document.body) cardCache = c;
+      }
+      if (cardCache) ensureCardPad();
+    }
+    function heavy() {
+      if (stale()) return;
+      if (pid === "auto") {
+        /* 兜底模式（主文档找不到带 pane 标记的输入框，shadow/iframe 场景）：沿用原
+         * 单条查找链路（findComposer 含 deepFind 穿透），会话判定走 mine/pickCurrent */
+        var el = findComposer();
+        if (el && el !== composer) setComposer(el);
+        else if (!el && composer && !composer.isConnected) setComposer(null);
+      } else {
+        /* v61.1 多实例：composer 由协调器按 pane 派发（wantedEl），本层只对账——
+         * 元素被 React 重建/pane 关闭时清绑，等下一轮协调器重新派发 */
+        if (wantedEl && wantedEl.isConnected) {
+          if (wantedEl !== composer) setComposer(wantedEl);
+        } else if (composer) {
+          setComposer(null);
+        }
+        if (pendingSid !== instSid) {   // pane 切换了会话：立即按缓存 payload 重渲染
+          instSid = pendingSid;
+          if (state.data) render(state.data);
+        }
+      }
+      if (!composer && slot === 0) collectDiag();   // 一直找不到输入框的窗口：周期性写环境诊断（everMounted 门防覆盖）
+      if (composer) {
+        if (!cardCache || !cardCache.isConnected) {
+          var c = cardOf(composer);
+          cardCache = c && c !== document.body ? c : null;
+        }
+        if (cardCache) {
+          ensureCardPad();   // React 重渲染可能重建卡片/重置内联边距，对比后再补
+          nativeCtxVal = readNativeCtx(cardCache);
+        }
+      }
+      if (state.data && pid === "auto") {
+        var msid = typeof state.data.mine === "string" ? state.data.mine : null;
+        var pSid;
+        if (msid !== null) pSid = msid;   // mine 模式：泵会在会话切换时推新 payload，这里只需同步 pickedSid
+        else {
+          var pc = pickCurrent(state.data);
+          pSid = pc ? (pc.sess ? pc.sess.sid : pc.want) : "";
+        }
+        if (pSid !== pickedSid) render(state.data);   // 切换了会话：立即按缓存 payload 重渲染
+      }
+    }
+    function hideBar() {
+      if (curDisplay !== "none") { bar.style.display = "none"; curDisplay = "none"; }
+      hideTip(true, "bar-hidden");   // 条面整体隐藏时 tooltip 必须跟着走（force 绕过总闸）
+    }
+    /* 超限气泡同步（track 每帧调）：位置贴条上沿、左缘对齐；条隐藏/超限解除/已关闭则藏。
+     * exc 解除时复位 excGone，下次再超限会重新弹。display 切换与测量在同一同步块内
+     * 完成后才绘制，无首帧闪位。 */
+    function syncExcBubble() {
+      var show = excOn && !excGone && curDisplay === "flex";
+      if (!show) {
+        if (!excOn) excGone = false;
+        if (excBubble.style.display !== "none") excBubble.style.display = "none";
+        return;
+      }
+      var sidStr = pickedSid || L("（未知）", "(unknown)");
+      if (excSid.textContent !== sidStr) excSid.textContent = sidStr;
+      if (excBubble.style.display !== "block") excBubble.style.display = "block";
+      var br = bar.getBoundingClientRect();
+      var r = excBubble.getBoundingClientRect();
+      var left = Math.max(8, Math.round(Math.min(br.left, innerWidth - r.width - 8)));
+      var top = Math.max(8, Math.round(br.top - r.height - 8));
+      if (excBubble.style.left !== left + "px") excBubble.style.left = left + "px";
+      if (excBubble.style.top !== top + "px") excBubble.style.top = top + "px";
+    }
+    /* 可见性判定（带卡片豁免）：输入框视觉卡片内部的装饰层（占位符/镜像/焦点层等）
+     * 瞬时盖到输入框中心不算"被盖住"——逐帧严格判定会造成显示/隐藏来回横跳（闪烁）；
+     * 设置页等真正的覆盖层不在卡片内，仍判为盖住。
+     * 条外挂在输入框上方，不参与对输入框中心的遮挡（v12-v14 内嵌形态的自遮挡闪烁根因）。 */
+    function coverOK(el) {
+      var r = el.getBoundingClientRect();
+      var hit;
+      try { hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); } catch (e) { return true; }
+      if (!hit) return false;
+      if (hit === el || hit.contains(el) || el.contains(hit)) return true;
+      if (cardCache && cardCache.contains(el) && cardCache.contains(hit)) return true;
+      if (isOwnOverlay(hit)) return true;   // 自己的面板/气泡盖住输入框中心不算被盖（v40）
+      return false;
+    }
+    /* 隐藏态诊断（v61）：条被判定不可见时周期性转储现场 —— body 直接子层的矩形/
+     * pointer-events/透明度、elementFromPoint 命中链、幽灵子树判定与 body 的 pe 状态。
+     * 定位"正常聊天窗口被误藏"类问题用；节流 4s，只写 __zusageDiag.hidden
+     * （泵取回写 diag-<n>.json）。 */
+    var lastHiddenDiagAt = 0;
+    function elDesc(el) {
+      if (!el) return String(el);
+      var cls = el instanceof Element ? (el.getAttribute("class") || "") : "";
+      return el.tagName + (el.id ? "#" + el.id : "") + (cls ? "." + String(cls).slice(0, 60) : "");
+    }
+    function diagHidden(r) {
+      var now = Date.now();
+      if (now - lastHiddenDiagAt < 4000) return;
+      lastHiddenDiagAt = now;
+      var cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+      var hit = null, chain = [], bodyPE = "";
+      try {
+        hit = document.elementFromPoint(cx, cy);
+        chain = (document.elementsFromPoint(cx, cy) || []).slice(0, 8).map(elDesc);
+        bodyPE = getComputedStyle(document.body).pointerEvents;
+      } catch (e) { }
+      var kids = [];
+      try {
+        var cs = document.body.children;
+        for (var i = 0; i < cs.length; i++) {
+          var el = cs[i], kr = el.getBoundingClientRect(), st = getComputedStyle(el);
+          kids.push({
+            el: elDesc(el),
+            rect: [Math.round(kr.left), Math.round(kr.top), Math.round(kr.width), Math.round(kr.height)],
+            pe: st.pointerEvents, op: st.opacity, vis: st.visibility, disp: st.display,
+            covers: (kr.width >= 4 && kr.height >= 4 && cx >= kr.left && cx <= kr.right && cy >= kr.top && cy <= kr.bottom) ? 1 : 0,
+          });
+        }
+      } catch (e) { }
+      FATAL.hidden = {
+        time: new Date().toISOString(),
+        ghost: inGhostSubtree(composer),
+        modal: modalOpen(),   // v62：模态弹窗判定（弹窗打开时条本就该收起，用于区分"误藏"与"应藏"）
+        bodyPE: bodyPE,
+        hit: elDesc(hit),
+        chain: chain,
+        composerCenter: [Math.round(cx), Math.round(cy)],
+        composerRect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
+        bodyKids: kids,
+      };
+    }
+    /* 分屏现场诊断（v61）：转储全部可见 textarea 的祖先链（含 data-* 属性）、全页
+     * iframe 的矩形与 src、pane/layout 相关 localStorage 键——用于确认"pane → 工作区/
+     * 会话"能否从 DOM 映射（多实例状态条的数据源设计依据）。随 mount 诊断每 5s 刷新。 */
+    function diagPanes() {
+      try {
+        var composers = [];
+        document.querySelectorAll(COMPOSER_SEL + ",textarea").forEach(function (ta) {
+          if (!visible(ta)) return;
+          var r = ta.getBoundingClientRect();
+          if (r.top < innerHeight * 0.4) return;
+          var sess = null, pane = null, tag = elDesc(ta);
+          for (var p = ta; p && p !== document.body; p = p.parentElement) {
+            if (sess === null && p.hasAttribute && p.hasAttribute("data-session-id")) sess = p.getAttribute("data-session-id");
+            if (pane === null && p.hasAttribute && p.hasAttribute("data-pane-id")) pane = p.getAttribute("data-pane-id");
+          }
+          composers.push({ tag: tag, rect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)], pane: pane, sess: sess });
+        });
+        var webviews = [];
+        document.querySelectorAll("webview,iframe").forEach(function (fr) {
+          var r = fr.getBoundingClientRect();
+          webviews.push({ tag: fr.tagName, rect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)], src: String(fr.src || "").slice(0, 130) });
+        });
+        var attrHits = [];
+        document.querySelectorAll("[data-session],[data-session-id],[data-workspace],[data-workspace-path],[data-pane],[data-pane-id],[data-task-id]").forEach(function (el) {
+          var parts = [el.tagName];
+          for (var i = 0; i < el.attributes.length; i++) {
+            var a = el.attributes[i];
+            if (/^data-(session|workspace|pane|task)/i.test(a.name)) parts.push(a.name + "=" + String(a.value).slice(0, 60));
+          }
+          attrHits.push(parts.join(" "));
+        });
+        var lsPane = [];
+        try {
+          Object.keys(localStorage).forEach(function (k) {
+            if (/pane|split|layout|last-session/i.test(k)) lsPane.push(k + " = " + String(localStorage.getItem(k)).slice(0, 160));
+          });
+        } catch (e) { }
+        FATAL.panes = { time: new Date().toISOString(), composers: composers, webviews: webviews.slice(0, 10), attrHits: attrHits.slice(0, 30), lsPane: lsPane.slice(0, 20) };
+      } catch (e) { FATAL.panes = { err: String((e && e.stack) || e) }; }
+    }
+
+    function track() {
+      if (stale()) return;   // 旧实例罢工，把舞台让给新实例
+      try {
+        syncExcBubble();   // 超限气泡：显示/隐藏/贴条定位（内部自判状态，隐藏分支零开销）
+        if (!composer || !composer.isConnected) { hideSince = 0; hideBar(); return; }
+        if (cardCache && cardCache.style.marginBottom !== CARD_MARGIN) ensureCardPad();   // 流式期间 React 重置内联边距时立刻补回
+        var r = composer.getBoundingClientRect();
+        var on = r.width > 60 && r.height > 14 && r.bottom > 0 && r.top < innerHeight &&
+          !inGhostSubtree(composer) &&   // 设置页等幽灵壳（opacity-0/inert）：视觉已隐藏（v61）
+          !modalOpen() &&                // v62：模态弹窗（模型配置等）打开时整体收起，弹窗内容不归条管（issue #9）
+          (reallyVisible(composer, true) || coverOK(composer));
+        if (!on) {
+          if (slot === 0) diagHidden(r);   // 隐藏现场周期转储（v61，节流 4s；仅 0 号实例写，槽位共享）
+          // 迟滞：连续 400ms 判定不可见才隐藏，瞬时失败（流式装饰层等）不闪
+          if (!hideSince) hideSince = Date.now();
+          if (Date.now() - hideSince > 400) { hideBar(); }
+          return;
+        }
+        hideSince = 0;
+        if (curDisplay !== "flex") { bar.style.display = "flex"; curDisplay = "flex"; }
+        /* 悬浮在输入框视觉卡片正下方（v58 定位回归）：v55-v57 改贴窗口底，新对话 hero 页
+         * 输入框垂直居中时条与输入框彻底脱钩（用户点名回退）。让位带 24px 比条高+顶缝
+         * 短 ~7px，条底落进原生底部留白、距窗口底 ~7px —— v54 的"条下 15px 空白"不复发。
+         * 水平仍与卡片左缘对齐 */
+        var anchor = cardCache || composer;
+        var ar = anchor.getBoundingClientRect();
+        var left = Math.round(ar.left);
+        var top = Math.max(8, Math.min(Math.round(ar.bottom + 4), innerHeight - bar.offsetHeight - 2));
+        if (left !== lastPos[0] || top !== lastPos[1]) {
+          bar.style.left = left + "px"; bar.style.top = top + "px";
+          lastPos = [left, top];
+        }
+        /* 宽度锁死卡片（v63 对齐，v66 收缩）：min=max-width = 卡片实测宽（border-box，
+         * 外缘含边框正好压在卡片两缘上），任何内容量下条都与会话框两缘对齐。
+         * 内容超宽不撑破卡片，分级收缩：先隐藏「本轮/会话累计」的缓存命中率
+         * （核心项 tps/上下文/会话累计不动，明细仍在悬停 tooltip），迟滞 +12px/-120px
+         * 防数值刷新在阈值附近来回闪；仍装不下由 .zu-main 右缘渐隐兜底（.zu-clip）。 */
+        var minW = Math.max(60, Math.round(ar.width));
+        if (bar.style.minWidth !== minW + "px") bar.style.minWidth = minW + "px";
+        if (bar.style.maxWidth !== minW + "px") bar.style.maxWidth = minW + "px";
+        var ov = main.scrollWidth - main.clientWidth;
+        var ns = shrink;
+        if (!shrink && ov > 12) ns = 1;
+        else if (shrink && ov < -120) ns = 0;
+        if (ns !== shrink) { shrink = ns; render(state.data || { session: {}, last_turn: {}, today: {}, context_window: 0 }); }
+        var clip = main.scrollWidth > main.clientWidth + 1;
+        if (clip !== fadeOn) { fadeOn = clip; main.classList.toggle("zu-clip", clip); }
+        everMounted = true;
+        if (slot === 0 && Date.now() - lastMountDiagAt > 5000) {
+          lastMountDiagAt = Date.now();
+          var br = bar.getBoundingClientRect(), bh = null;
+          try { bh = document.elementFromPoint(br.left + br.width / 2, br.top + br.height / 2); } catch (e) { }
+          FATAL.mount = {
+            version: VERSION, mode: "below-card", bodyPE: (function () { try { return getComputedStyle(document.body).pointerEvents; } catch (e) { return ""; } })(),
+            panes: diagPanes(),
+            theme: themeDark ? "dark" : "light",
+            /* 字体跟随（v64）实测：条面计算字体 + 客户端两个字体变量的原值（验证 var 命中） */
+            font: (function () {
+              try {
+                var rs = getComputedStyle(document.documentElement), cs = getComputedStyle(bar);
+                return { fam: String(cs.fontFamily).slice(0, 90), size: cs.fontSize,
+                  mono: String(rs.getPropertyValue("--font-mono")).slice(0, 80).trim(),
+                  ui: String(rs.getPropertyValue("--ui-font-size")).trim() };
+              } catch (e) { return "ERR:" + e; }
+            })(),
+            tip: (function () { return { stats: tipStats, disp: tip.style.display, barRect: (function () { var b = bar.getBoundingClientRect(); return [Math.round(b.left), Math.round(b.top), Math.round(b.width), Math.round(b.height)]; })() }; })(),
+            composerRect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
+            anchorRect: [Math.round(ar.left), Math.round(ar.top), Math.round(ar.width), Math.round(ar.height)],
+            barRect: [Math.round(br.left), Math.round(br.top), Math.round(br.width), Math.round(br.height)],
+            /* 条中心命中元素：若被应用层盖住（z 序问题）此处直接暴露 */
+            barHit: bh ? bh.tagName + "." + String(bh.className).slice(0, 40) : String(bh),
+            bottomGap: Math.round(innerHeight - ar.bottom),
+            nativeCtx: nativeCtxVal,
+            picked: pickedSid,
+            exc: excOn ? (excGone ? "on-gone" : "on") : 0,
+            href: String(location.href).slice(0, 120),
+            lsVals: (function () {
+              try {
+                var out = [];
+                Object.keys(localStorage).forEach(function (k) {
+                  out.push(k + " = " + String(localStorage.getItem(k)).slice(0, 90));
+                });
+                var wk = [];
+                Object.keys(window).forEach(function (k) {
+                  if (/zcode|session|store|state|tab/i.test(k)) wk.push(k);
+                });
+                out.push("WINDOW_KEYS=" + wk.join("|").slice(0, 300));
+                return out.join("\n").slice(0, 7000) || "(none)";
+              } catch (e) { return "ERR:" + e; }
+            })(),
+            lastSessionVals: (function () {
+              try {
+                var out = [];
+                Object.keys(localStorage).forEach(function (k) {
+                  if (/last-session/i.test(k)) out.push(k.slice(22) + "=" + String(localStorage.getItem(k)).slice(0, 50));
+                });
+                return out.join(" | ").slice(0, 1000) || "(none)";
+              } catch (e) { return "ERR:" + e; }
+            })(),
+          };
+        }
+      } catch (e) {
+        if (Date.now() - (track.errAt || 0) > 5000) {
+          track.errAt = Date.now();
+          FATAL.trackErr = String((e && e.stack) || e);
+        }
+      } finally {
+        requestAnimationFrame(track);   // 自调度循环：异常绝不能杀死循环（setInterval 无此问题，rAF 有）
+      }
+    }
+
+    setInterval(heavy, 600);
+    heavy();
+    requestAnimationFrame(track);
+
+    syncPanel();
+    if (state.data) render(state.data);   // 已有共享数据（后 spawn 的实例）直接渲染，不用零值覆盖
+    else render({ session: {}, last_turn: {}, today: {}, context_window: 0 });
+
+    var api = {
+      pid: pid, slot: slot,
+      attach: function (el, sid) {   // 协调器派发：pane 最靠下的可见输入框 + 其 data-session-id
+        wantedEl = el;
+        pendingSid = sid || "";
+        heavy();   // 立即对账（composer 重建/pane 关闭的最快收敛路径）
+      },
+      render: render,
+      syncUpdate: syncUpdate,
+      rebuild: function () { buildPanel(); rebuildExcBubble(); syncPanel(); },
+      getSid: function () { return pickedSid || ""; },
+    };
+    instances.push(api);
+    refreshWants();
+    return api;
+  }
+})();

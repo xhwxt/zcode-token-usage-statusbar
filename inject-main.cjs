@@ -16,14 +16,29 @@
 "use strict";
 const path = require("path");
 const fs = require("fs");
-const { spawn } = require("child_process");
+const { spawn, execFile } = require("child_process");
+const { createHash } = require("crypto");
 const { app, BrowserWindow, webContents } = require("electron");
+const { fileURLToPath } = require("url");
 
 const HERE = __dirname;   // 本 loader 被 asar 注入行按绝对 file:// URL import，__dirname 即真实目录（克隆到任意路径无需改代码）
 const CONFIG = path.join(HERE, "config.json");
 const OVERLAY = path.join(HERE, "overlay.js");
 const ZUSAGE = path.join(HERE, "zusage.py");
 const LOG = (...a) => console.error("[zusage]", ...a);
+const loadedHashes = { _loadedAt: Date.now() - process.uptime() * 1000 };
+for (const name of ["inject-main.cjs", "plugin-updater.cjs", "plugin-release.cjs", "plugin-storage.cjs", "overlay.js", "zusage.py"]) {
+  try { loadedHashes[name] = createHash("sha256").update(fs.readFileSync(path.join(HERE, name))).digest("hex"); }
+  catch (e) { LOG("startup fingerprint unavailable:", name, e.message); }
+}
+function acknowledgeRestart() {
+  const helper = path.join(HERE, "runtime_lock.py");
+  if (!fs.existsSync(helper)) return;
+  execFile(readCfg().python_path || (process.platform === "win32" ? "python" : "python3"),
+    [helper, "--ack-restart", HERE, JSON.stringify(loadedHashes)],
+    { windowsHide: true, timeout: 15000, maxBuffer: 65536 },
+    (error) => { if (error) LOG("restart acknowledgement failed:", error.message); });
+}
 
 function readCfg() {
   const c = { python_path: "python", resident: true };
@@ -371,9 +386,78 @@ setInterval(maybeSpawn, Math.max(10000, readCfg().heartbeat_ms | 0 || 30000));  
 watchDb();
 maybeSpawn();   // 启动先拉一次
 
+let pluginUpdater = null;
+let pluginRequestBusy = false;
+function pushPluginState(wc, state) {
+  if (!isMainWindowState(wc) || wc.isDestroyed()) return;
+  /* rateLine 随插件状态一起推送：⚙ 面板「逐问速率行」勾选态的真值来自 config.json */
+  const payload = { ...state, rateLine: readCfgCached().answer_rate_line !== false };
+  wc.executeJavaScript(`window.__zusagePluginUpdate && window.__zusagePluginUpdate(${JSON.stringify(payload)})`, true).catch(() => { });
+}
+try {
+  const { createUpdater } = require("./plugin-updater.cjs");
+  pluginUpdater = createUpdater({ runtime: HERE, home: app.getPath("home"),
+    resourcesPath: process.resourcesPath, executable: process.execPath,
+    notify: (state) => webContents.getAllWebContents().forEach((wc) => pushPluginState(wc, state)) });
+} catch (e) {
+  delete loadedHashes["plugin-updater.cjs"];
+  delete loadedHashes["plugin-release.cjs"];
+  delete loadedHashes["plugin-storage.cjs"];
+  LOG("plugin updater unavailable:", e.message);
+}
+acknowledgeRestart();
+/* 逐问速率行开关（⚙ 面板）：原子写运行时 config.json 的 answer_rate_line（缺省=开启）。
+   prompt-submit hook 每次提问时读同一文件——开关下一问即生效，无需重启客户端。 */
+function broadcastPluginState() {
+  const base = pluginUpdater ? pluginUpdater.status() : {};
+  webContents.getAllWebContents().forEach((wc) => pushPluginState(wc, base));
+}
+async function setAnswerRateLine(enabled) {
+  try {
+    const { updateConfig } = require("./plugin-updater.cjs");
+    await updateConfig(HERE, { answer_rate_line: enabled }, readCfgCached().python_path || (process.platform === "win32" ? "python" : "python3"));
+    cfgCache = null;   // 写后置空，下一次 readCfgCached 立即重读（mtime 判变的双保险）
+    broadcastPluginState();
+  } catch (e) { LOG("answer_rate_line toggle failed:", e.message); }
+}
+async function pollPluginRequests() {
+  if (pluginRequestBusy) return;
+  pluginRequestBusy = true;
+  try {
+    for (const wc of webContents.getAllWebContents()) {
+      if (!isMainWindowState(wc) || wc.isDestroyed()) continue;
+      // 仅在宿主本地窗口读取固定动作；外部网页不能触发插件更新或配置写入。
+      const url = wc.getURL();
+      if (!url.startsWith("file:")) continue;
+      const local = fileURLToPath(url);
+      const relative = path.relative(process.resourcesPath, local);
+      if (relative.startsWith("..") || path.isAbsolute(relative)) continue;
+      const requests = await Promise.race([
+        wc.executeJavaScript('(function(){var q=window.__zusagePluginRequests;return Array.isArray(q)?q.splice(0,8):[]})()', true),
+        new Promise((resolve) => setTimeout(() => resolve([]), 1000)),
+      ]);
+      if (!Array.isArray(requests)) continue;
+      for (const req of requests) {
+        if (req && ["auto", "check", "update"].includes(req.action)) {
+          if (pluginUpdater) pluginUpdater.request(req).catch((e) => LOG("plugin update action failed:", e.message));
+        } else if (req && req.action === "rate-line" && typeof req.enabled === "boolean") {
+          setAnswerRateLine(req.enabled);
+        }
+      }
+    }
+  } catch (e) { LOG("plugin update request failed:", e.message); }
+  finally { pluginRequestBusy = false; }
+}
+setInterval(pollPluginRequests, 1000);
+setInterval(() => { if (pluginUpdater) pluginUpdater.tick().catch((e) => LOG("plugin auto update:", e.message)); }, 60000);
+if (pluginUpdater) pluginUpdater.tick().catch((e) => LOG("plugin auto update:", e.message));
+
 function injectOverlay(wc) {
   if (!overlaySrc || !isMainWindowState(wc)) return;
-  wc.executeJavaScript(overlaySrc, true).catch(() => { });
+  wc.executeJavaScript(overlaySrc, true).then(() => {
+    /* 无条件推送：updater 不可用时也要让面板拿到 rateLine 真值（缺省开） */
+    pushPluginState(wc, pluginUpdater ? pluginUpdater.status() : {});
+  }).catch(() => { });
 }
 
 const hook = (wc) => {
@@ -385,4 +469,4 @@ const hook = (wc) => {
 app.on("web-contents-created", (e, wc) => hook(wc));
 for (const wc of webContents.getAllWebContents()) hook(wc);
 
-LOG("injected v10 (per-pane wants array), resident query mode + remote SSH datasource (per-window active session via IPC, fs.watch db dir, remote poll_ms while remote session focused, zusage serve + one-shot fallback, activity_min_ms/heartbeat_ms, query timeout 15s)");
+LOG("injected v11 (per-pane wants array, resident query mode + remote SSH datasource, answer_rate_line config write for the per-answer rate line toggle, plugin request polling decoupled from updater availability)");

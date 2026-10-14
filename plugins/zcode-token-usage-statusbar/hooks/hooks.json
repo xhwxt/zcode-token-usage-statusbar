@@ -1,0 +1,36 @@
+{
+  "description": "zcode-token-usage-statusbar: 会话启动时同步运行时文件并按需安装悬浮状态条(默认只提示一次,auto 开关后自动装);每次提问记录时刻并下达「本问统计」指令(回复末尾追加逐问速率行,--current 守卫防止拿上一轮数据充数)",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear|resume",
+        "hooks": [
+          {
+            "type": "process",
+            "command": "python3",
+            "args": [
+              "${ZCODE_PLUGIN_ROOT}/hooks/session-start.py"
+            ],
+            "timeoutMs": 60000,
+            "statusMessage": "zcode-token-usage-statusbar: 检查悬浮状态条…"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "process",
+            "command": "python3",
+            "args": [
+              "${ZCODE_PLUGIN_ROOT}/hooks/prompt-submit.py"
+            ],
+            "timeoutMs": 8000,
+            "statusMessage": "zcode-token-usage-statusbar: 记录提问时刻…"
+          }
+        ]
+      }
+    ]
+  }
+}

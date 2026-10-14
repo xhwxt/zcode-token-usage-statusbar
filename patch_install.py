@@ -24,11 +24,15 @@ import hashlib
 import json
 import os
 import re
+import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
+
+from runtime_lock import file_lock
 
 IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
@@ -45,6 +49,7 @@ else:
 ASAR = ASAR_DEFAULT          # 可被 set_target() 改指其它安装位置（install.py 探测后调用）
 BAK = ASAR.with_name("app.asar.zusage.bak")
 TMP = ASAR.with_name("app.asar.zusage.tmp")
+TMP_META = TMP.with_name(TMP.name + ".json")
 HERE = Path(__file__).parent.resolve()
 # 运行时目录：install.py 标准安装时指向数据目录（~/.zcode/zcode-token-usage-statusbar，
 # 经 set_runtime() 切换）；独立运行本脚本或 --dev 安装时保持仓库目录（向后兼容）。
@@ -126,11 +131,12 @@ def zcode_exe_for(asar_path):
 
 def set_target(asar_path):
     """改指目标安装位置（BAK/TMP/ZCODE_EXE 随动）。ZCODE_EXE 只用于语法自检，缺了自动跳过。"""
-    global ASAR, BAK, TMP, ZCODE_EXE
-    asar_path = Path(asar_path)
+    global ASAR, BAK, TMP, TMP_META, ZCODE_EXE
+    asar_path = Path(asar_path).resolve()
     ASAR = asar_path
     BAK = asar_path.with_name("app.asar.zusage.bak")
     TMP = asar_path.with_name("app.asar.zusage.tmp")
+    TMP_META = TMP.with_name(TMP.name + ".json")
     ZCODE_EXE = zcode_exe_for(asar_path)
 
 
@@ -152,13 +158,19 @@ def client_running():
 def launch_monitor(epoch):
     """Windows 开新控制台窗口跑安装监控（提醒重启 + 确认生效 + .tmp 收尾）；
     macOS/Linux 无控制台概念，后台静默跑（收尾与自动退出照常）。设 ZUSAGE_NO_MONITOR=1 可禁用。"""
-    if os.environ.get("ZUSAGE_NO_MONITOR"):
+    if os.environ.get("ZUSAGE_NO_MONITOR") and not os.environ.get("ZUSAGE_MONITOR_QUIET"):
         return
     monitor = HERE / "install_monitor.py"
     if not monitor.exists():
         return
     cmd = [sys.executable, str(monitor), "%.3f" % epoch, str(ASAR), str(RUNTIME)]
     try:
+        if os.environ.get("ZUSAGE_MONITOR_QUIET"):
+            flags = subprocess.CREATE_NO_WINDOW if IS_WIN else 0
+            return subprocess.Popen(cmd, creationflags=flags, cwd=str(HERE),
+                                    start_new_session=not IS_WIN,
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
         if IS_WIN:
             return subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE, cwd=str(HERE))
         return subprocess.Popen(cmd, cwd=str(HERE),
@@ -252,7 +264,8 @@ def self_check(asar_path: Path, expect=True):
     with open(asar_path, "rb") as f:
         header, base = read_header(f)
         n = sum(1 for _ in iter_files(header))
-    has = INJECT_LINE.encode() in entry_bytes_of(asar_path)
+    entry = entry_bytes_of(asar_path)
+    has = INJECT_LINE.encode() in entry if expect else bool(ZUSAGE_LINE_RE.search(entry))
     ok = has == expect
     print(L(f"  [check] header ok, 文件数={n}, 注入行{'符合' if ok else '不符合'}预期（期望{'有' if expect else '无'}）",
             f"  [check] header ok, files={n}, injection line {'as expected' if ok else 'UNEXPECTED'} (expected {'present' if expect else 'absent'})"))
@@ -268,10 +281,12 @@ def syntax_check(asar_path: Path):
                 "  [check] ZCode executable not found; syntax check skipped"))
         return True
     src = entry_bytes_of(asar_path)
-    tmp_js = HERE / ".entry-check.js"
-    tmp_js.write_bytes(src)
     env = dict(os.environ, ELECTRON_RUN_AS_NODE="1")
+    fd, name = tempfile.mkstemp(prefix=".entry-check.", suffix=".js", dir=HERE)
+    tmp_js = Path(name)
     try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(src)
         r = subprocess.run([str(exe), "--check", str(tmp_js)], capture_output=True, text=True, env=env)
     except OSError as e:
         r = None
@@ -298,10 +313,270 @@ def cleanup_legacy_bak():
                 f"(failed to remove legacy backup {BAK}; delete it manually: {e})"))
 
 
+# ---------- 待替换包的来源与身份 ----------
+
+class PendingTmpError(ValueError):
+    """来源/身份不可信：立即取消收尾，保留文件供诊断，不按文件占用重试。"""
+
+
+_STAMP_FIELDS = ("size", "mtime_ns", "ctime_ns", "dev", "ino")
+
+
+def _stat_stamp(st):
+    if not stat.S_ISREG(st.st_mode):
+        raise PendingTmpError("not a regular file")
+    return dict(zip(_STAMP_FIELDS, (st.st_size, st.st_mtime_ns, st.st_ctime_ns,
+                                   st.st_dev, st.st_ino)))
+
+
+def file_stamp(path):
+    """廉价身份快照（不跟随 symlink）；每轮监控只读 stat 和小 sidecar。"""
+    return _stat_stamp(Path(path).lstat())
+
+
+def source_fingerprint(path):
+    """流式 SHA256；hash 前后及打开的 inode 都须一致，避免读取升级中的混合包。"""
+    before = file_stamp(path)
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        if _stat_stamp(os.fstat(stream.fileno())) != before:
+            raise PendingTmpError("file changed before hashing")
+        for block in iter(lambda: stream.read(BLOCK), b""):
+            digest.update(block)
+        if _stat_stamp(os.fstat(stream.fileno())) != before:
+            raise PendingTmpError("file changed while hashing")
+    if file_stamp(path) != before:
+        raise PendingTmpError("file replaced while hashing")
+    return dict(before, sha256=digest.hexdigest())
+
+
+def _same_stamp(path, fingerprint):
+    try:
+        current = file_stamp(path)
+    except FileNotFoundError as e:
+        raise PendingTmpError(f"pending source/TMP disappeared: {path}") from e
+    if current != {key: fingerprint[key] for key in _STAMP_FIELDS}:
+        raise PendingTmpError(f"file identity changed: {path}")
+
+
+def _load_tmp_metadata():
+    try:
+        if TMP_META.is_symlink():
+            raise PendingTmpError("sidecar is a symlink")
+        meta = json.loads(TMP_META.read_text(encoding="utf-8"))
+        if (meta["version"] != 1 or meta["asar"] != str(ASAR.resolve()) or
+                meta["tmp_path"] != str(TMP.absolute()) or
+                meta["operation"] not in ("install", "remove", "cancelled")):
+            raise PendingTmpError("sidecar target or operation mismatch")
+        for field in ("source", "tmp"):
+            fp = meta[field]
+            if (not all(type(fp[key]) is int for key in _STAMP_FIELDS) or
+                    not isinstance(fp["sha256"], str) or
+                    not re.fullmatch("[0-9a-f]{64}", fp["sha256"])):
+                raise PendingTmpError("invalid fingerprint")
+        if not isinstance(meta["runtime"], str):
+            raise PendingTmpError("invalid runtime")
+        return meta
+    except (FileNotFoundError, ValueError, KeyError, TypeError) as e:
+        raise PendingTmpError(f"untrusted pending TMP; re-run install: {e}") from e
+
+
+def _atomic_tmp_metadata(meta):
+    fd, name = tempfile.mkstemp(prefix=TMP_META.name + ".", dir=TMP_META.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(meta, stream, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(name, TMP_META)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def _target_lock():
+    # Independent of runtime/update locks: never call runtime synchronization here.
+    return file_lock(ASAR.with_name(ASAR.name + ".zusage.lock"))
+
+
+def _checked_tmp_metadata(path, source, operation):
+    if operation not in ("install", "remove"):
+        raise PendingTmpError("invalid pending operation")
+    _same_stamp(ASAR, source)
+    before = source_fingerprint(path)
+    try:
+        ok = self_check(path, expect=operation == "install") and syntax_check(path)
+    except (ValueError, AssertionError, KeyError, struct.error) as e:
+        raise PendingTmpError(f"pending validation failed: {e}") from e
+    if not ok:
+        raise PendingTmpError("pending structure/syntax validation failed")
+    _same_stamp(path, before)
+    _same_stamp(ASAR, source)
+    return {"version": 1, "asar": str(ASAR.resolve()), "tmp_path": str(TMP.absolute()),
+            "runtime": str(RUNTIME.resolve()), "operation": operation,
+            "validated": True, "source": source, "tmp": before}
+
+
+def write_tmp_metadata(source, operation="install"):
+    """Existing TMP helper: authorize only after structure and syntax validation."""
+    with _target_lock():
+        meta = _checked_tmp_metadata(TMP, source, operation)
+        _atomic_tmp_metadata(meta)
+        return meta
+
+
+def _owned_tmp_metadata():
+    """Only reclaim proven files, including our interrupted publication journal."""
+    meta = _load_tmp_metadata()
+    if TMP.exists() or TMP.is_symlink():
+        current = source_fingerprint(TMP)
+        matches = current == meta["tmp"]
+        if meta["operation"] == "cancelled" and meta.get("publishing") is True:
+            # rename can change ctime. Same inode, content and other stamps prove
+            # ownership; the prior package may still be present before rename.
+            fields = ("size", "mtime_ns", "dev", "ino", "sha256")
+            matches = matches or all(current[key] == meta["tmp"][key] for key in fields)
+            matches = matches or current == meta.get("previous_tmp")
+        if not matches:
+            raise PendingTmpError("pending TMP no longer belongs to its sidecar")
+    return meta
+
+
+def _cancel_pending_install():
+    if not TMP_META.exists() and not TMP_META.is_symlink():
+        return
+    meta = _load_tmp_metadata()
+    if meta["operation"] == "install":
+        meta["operation"] = "cancelled"
+        _atomic_tmp_metadata(meta)
+
+
+def cancel_pending_install():
+    """remove/optout revokes prior install finalization under the target lock."""
+    with _target_lock():
+        _cancel_pending_install()
+
+
+def _prepare_tmp(modify, operation="install", source=None):
+    source = source if source is not None else source_fingerprint(ASAR)
+    _same_stamp(ASAR, source)
+    previous = None
+    if TMP.exists() or TMP.is_symlink() or TMP_META.exists() or TMP_META.is_symlink():
+        previous = _owned_tmp_metadata()
+    fd, name = tempfile.mkstemp(prefix=TMP.name + ".", suffix=".stage", dir=TMP.parent)
+    os.close(fd)
+    stage = Path(name)
+    try:
+        repack(ASAR, modify, stage)
+        original_stat = ASAR.stat()
+        if os.name != "nt":
+            stage_stat = stage.stat()
+            if (stage_stat.st_uid, stage_stat.st_gid) != (original_stat.st_uid, original_stat.st_gid):
+                os.chown(stage, original_stat.st_uid, original_stat.st_gid)
+        os.chmod(stage, stat.S_IMODE(original_stat.st_mode))
+        meta = _checked_tmp_metadata(stage, source, operation)
+        # Two files cannot be atomically published together. Persist a cancelled
+        # ownership journal first, so any interruption is safe and recoverable.
+        journal = dict(meta, operation="cancelled", publishing=True)
+        if previous is not None and TMP.exists():
+            journal["previous_tmp"] = source_fingerprint(TMP)
+        _atomic_tmp_metadata(journal)
+        _same_stamp(ASAR, source)
+        _same_stamp(stage, meta["tmp"])
+        os.replace(stage, TMP)
+        meta["tmp"] = source_fingerprint(TMP)
+        _same_stamp(ASAR, source)
+        _atomic_tmp_metadata(meta)
+        return meta
+    finally:
+        # Only this invocation's exclusive name, never glob historical TMPs.
+        stage.unlink(missing_ok=True)
+
+
+def prepare_tmp(modify, operation="install", source=None):
+    """Generate privately, validate, then publish; unknown historical TMPs stay."""
+    with _target_lock():
+        return _prepare_tmp(modify, operation, source)
+
+
+def pending_tmp(operation="install", verify_hash=False, verified=None):
+    """校验来源及 TMP；verified 是单次监控的缓存，stat/sidecar 不变才复用 hash。"""
+    meta = _load_tmp_metadata()
+    if (meta["operation"] == "cancelled" or meta.get("validated") is not True or
+            (operation is not None and meta["operation"] != operation) or
+            (meta["operation"] == "install" and meta["runtime"] != str(RUNTIME.resolve()))):
+        raise PendingTmpError("pending operation/runtime is no longer authorized")
+    _same_stamp(ASAR, meta["source"])
+    _same_stamp(TMP, meta["tmp"])
+    if verify_hash and (verified is None or verified.get("metadata") != meta):
+        if (source_fingerprint(ASAR) != meta["source"] or
+                source_fingerprint(TMP) != meta["tmp"]):
+            raise PendingTmpError("pending source/TMP hash mismatch")
+        try:
+            ok = self_check(TMP, expect=meta["operation"] == "install")
+        except (ValueError, AssertionError, KeyError, struct.error) as e:
+            raise PendingTmpError(f"pending self-check failed: {e}") from e
+        if not ok:
+            raise PendingTmpError("pending self-check failed")
+        _same_stamp(ASAR, meta["source"])
+        _same_stamp(TMP, meta["tmp"])
+        if verified is not None:
+            verified["metadata"] = meta
+    return meta
+
+
+def _replace_pending(operation, verified=None, client_closed=None):
+    meta = pending_tmp(operation, verify_hash=True, verified=verified)
+    if client_closed is not None and not client_closed():
+        return False
+    # 紧贴 rename 再核对。外部升级不共享 OS 锁，仍有无法彻底消除的极短 TOCTOU 窗口。
+    if pending_tmp(operation) != meta:
+        raise PendingTmpError("sidecar changed before replacement")
+    os.replace(TMP, ASAR)
+    try:
+        if _load_tmp_metadata() == meta:
+            TMP_META.unlink()
+    except (OSError, PendingTmpError):
+        pass  # 替换已经成功；不能因 sidecar 清理失败重试并误报失败。
+    return True
+
+
+def finalize_tmp(operation="install", client_closed=None, verified=None):
+    """只收尾可信包且客户端已退出；OSError 可重试，PendingTmpError 须取消。"""
+    closed = client_closed if client_closed is not None else lambda: not client_running()
+    if not closed():
+        return False
+    with _target_lock():
+        if not closed():
+            return False
+        return _replace_pending(operation, verified=verified, client_closed=closed)
+
+
 # ---------- 安装 / 卸载 ----------
 
 def install(finalize=False):
+    """Serialize install/remove/finalize across processes without nested locks."""
+    if finalize:
+        return _install(finalize=True)
+    try:
+        with _target_lock():
+            return _install()
+    except OSError as e:
+        print(L(f"安装锁获取失败：{e}", f"Cannot acquire install lock: {e}"))
+        return False
+
+
+def _install(finalize=False):
     """返回 True=已安装/已指向当前目录，False=失败或待收尾。"""
+    if finalize:
+        try:
+            ok = finalize_tmp(operation="install")
+        except (OSError, PendingTmpError) as e:
+            print(L(f"收尾未完成，保留 TMP，请确认退出客户端并重新安装：{e}",
+                    f"Finalization not completed; TMP kept, quit the client and re-run install: {e}"))
+            return False
+        if ok:
+            cleanup_legacy_bak()
+        return ok
     assert LOADER.exists(), L(f"loader 缺失：{LOADER}", f"loader missing: {LOADER}")
     if not os.access(ASAR, os.W_OK) or not os.access(ASAR.parent, os.W_OK):
         print(L(f"[权限] app.asar 或所在目录不可写（Linux 上 /opt 等系统位置需要 root）：{ASAR}",
@@ -311,7 +586,13 @@ def install(finalize=False):
         print(L("  sudo python install.py            # 自动探测（含 /opt/ZCode）",
                 "  sudo python install.py            # auto-detects (including /opt/ZCode)"))
         return False
-    entry = entry_bytes_of(ASAR)
+    try:
+        source = source_fingerprint(ASAR)  # 必须在读取待修改入口和 repack 前取得。
+        entry = entry_bytes_of(ASAR)
+        _same_stamp(ASAR, source)
+    except (OSError, PendingTmpError) as e:
+        print(L(f"来源校验失败：{e}", f"Source validation failed: {e}"))
+        return False
     stripped = ZUSAGE_LINE_RE.sub(b"", entry)   # 剥离任何旧注入行（含指向旧目录的）
     if stripped + INJECT_LINE.encode() == entry:
         print(L("已安装，注入行已指向当前目录。如需重装先 remove。",
@@ -324,14 +605,14 @@ def install(finalize=False):
         print(L("检测到旧注入行（可能指向旧目录），将替换为新路径。",
                 "Old injection line detected (possibly pointing at an old directory); it will be replaced with the new path."))
     print(L("重打包（307MB，约需十几秒）...", "repacking (307MB, takes ~10-20 seconds)..."))
-    repack(ASAR, {"/" + ENTRY: new_entry}, TMP)
-    print(L("结构自检：", "self-check:"))
-    if not (self_check(TMP) and syntax_check(TMP)):
-        print(L("自检失败，未替换。TMP 保留供排查:", "self-check failed; not replaced. TMP kept for inspection:"), TMP)
+    try:
+        _prepare_tmp({"/" + ENTRY: new_entry}, source=source)
+    except (OSError, PendingTmpError) as e:
+        print(L(f"待替换包生成失败，未替换：{e}", f"Pending package preparation failed; not replaced: {e}"))
         return False
-    if client_running() and not finalize:
+    if client_running():
         try:
-            os.replace(TMP, ASAR)
+            _replace_pending("install")
             print(L("\n客户端运行中，但 asar 原子替换成功（运行中进程仍读旧数据）。",
                     "\nZCode is running, but the asar was replaced atomically (running processes keep reading the old data)."))
             print(L("重启 ZCode 后悬浮条生效；已弹出监控窗口，确认生效后自动关闭。",
@@ -339,6 +620,9 @@ def install(finalize=False):
             cleanup_legacy_bak()
             launch_monitor(time.time())
             return True
+        except PendingTmpError as e:
+            print(L(f"待替换包已失效，未替换：{e}", f"Pending package invalidated; not replaced: {e}"))
+            return False
         except OSError as e:
             print(L(f"\n运行中替换失败（{e}）。已弹出监控窗口：完全退出 ZCode 后会自动完成替换，",
                     f"\nReplacement while running failed ({e}). A monitor window has opened: it finishes the replacement once ZCode quits completely,"))
@@ -346,7 +630,17 @@ def install(finalize=False):
                     "or run manually afterwards: python patch_install.py install --finalize"))
             launch_monitor(time.time())
             return False
-    os.replace(TMP, ASAR)
+    try:
+        if not _replace_pending("install", client_closed=lambda: not client_running()):
+            launch_monitor(time.time())
+            return False
+    except PendingTmpError as e:
+        print(L(f"待替换包已失效，未替换：{e}", f"Pending package invalidated; not replaced: {e}"))
+        return False
+    except OSError as e:
+        print(L(f"替换失败，监控将等待退出并重试：{e}", f"Replacement failed; monitor will wait for exit and retry: {e}"))
+        launch_monitor(time.time())
+        return False
     print(L("完成。启动 ZCode 即可在窗口底部看到悬浮条。", "Done. Start ZCode and the floating bar appears at the bottom of the window."))
     cleanup_legacy_bak()
     launch_monitor(time.time())
@@ -354,28 +648,47 @@ def install(finalize=False):
 
 
 def remove():
+    try:
+        with _target_lock():
+            return _remove()
+    except OSError as e:
+        print(L(f"卸载锁获取失败：{e}", f"Cannot acquire remove lock: {e}"))
+        return False
+
+
+def _remove():
     """卸载：从当前 asar 剥离本工具注入行（不依赖备份，其它工具的注入行不受影响）。
     返回 True=已卸载/本就未注入，False=需人工处理（替换失败待收尾）。"""
-    old = entry_bytes_of(ASAR)
+    try:
+        _cancel_pending_install()  # 即使目标未注入，也不能让旧 install TMP 在 optout 后重注入。
+        source = source_fingerprint(ASAR)
+        old = entry_bytes_of(ASAR)
+        _same_stamp(ASAR, source)
+    except (OSError, PendingTmpError) as e:
+        print(L(f"卸载安全校验失败，未替换：{e}", f"Remove safety validation failed; not replaced: {e}"))
+        return False
     stripped = ZUSAGE_LINE_RE.sub(b"", old)
     if stripped == old:
         print(L("当前 asar 未注入。", "The current asar is not injected."))
         cleanup_legacy_bak()
         return True
     print(L("重打包（剥离注入行，约需十几秒）...", "repacking (stripping the injection line, takes ~10-20 seconds)..."))
-    repack(ASAR, {"/" + ENTRY: stripped}, TMP)
-    print(L("结构自检：", "self-check:"))
-    if not (self_check(TMP, expect=False) and syntax_check(TMP)):
-        print(L("自检失败，未替换。TMP 保留供排查:", "self-check failed; not replaced. TMP kept for inspection:"), TMP)
+    try:
+        _prepare_tmp({"/" + ENTRY: stripped}, operation="remove", source=source)
+    except (OSError, PendingTmpError) as e:
+        print(L(f"卸载待替换包生成失败：{e}", f"Remove pending package preparation failed: {e}"))
         return False
     running = client_running()
     try:
-        os.replace(TMP, ASAR)
+        _replace_pending("remove")
+    except PendingTmpError as e:
+        print(L(f"卸载待替换包已失效，未替换：{e}", f"Remove pending package invalidated; not replaced: {e}"))
+        return False
     except OSError as e:
         print(L(f"\n替换失败（{e}）。请完全退出 ZCode 后重跑 python patch_install.py remove，",
                 f"\nReplacement failed ({e}). Quit ZCode completely and re-run python patch_install.py remove, "))
-        hint = f"move /y {TMP} {ASAR}" if IS_WIN else f"mv -f '{TMP}' '{ASAR}'"
-        print(L(f"或手动替换：{hint}", f"or replace manually: {hint}"))
+        print(L("待替换文件保留；不要手动 move/mv 覆盖可能已升级的 app.asar。",
+                "Pending files kept; do not manually move/mv over a possibly upgraded app.asar."))
         return False
     print(L("已剥离注入行" + ("（客户端运行中，已原子替换，运行中进程仍读旧数据）" if running else "") + "。重启 ZCode 后生效。",
             "Injection line stripped" + (" (ZCode was running; replaced atomically, the running process keeps the old data)" if running else "") + ". Takes effect after restarting ZCode."))
@@ -394,6 +707,13 @@ def check():
         print(L("存在待替换 TMP:", "Pending replacement TMP exists:"), TMP, L("（退出 ZCode 后跑 install --finalize）", "(quit ZCode, then run install --finalize)"))
 
 
+def main(argv=None):
+    args = sys.argv[1:] if argv is None else argv
+    cmd = args[0] if args else "check"
+    if cmd == "install":
+        return install(finalize="--finalize" in args[1:])
+    return {"remove": remove, "check": check}.get(cmd, check)()
+
+
 if __name__ == "__main__":
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "check"
-    {"install": install, "remove": remove, "check": check}.get(cmd, check)()
+    main()

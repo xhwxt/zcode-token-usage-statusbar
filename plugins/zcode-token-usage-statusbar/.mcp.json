@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "zcode-token-usage-statusbar": {
+      "type": "stdio",
+      "command": "python3",
+      "args": [
+        "${ZCODE_PLUGIN_ROOT}/usage_mcp.py"
+      ],
+      "enabled": true
+    }
+  }
+}

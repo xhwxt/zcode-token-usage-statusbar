@@ -3,6 +3,9 @@
   "activity_min_ms": 1500,
   "heartbeat_ms": 30000,
   "hot_reload": true,
+  "answer_rate_line": true,
+  "plugin_auto_update": true,
+  "plugin_auto_install_overlay": false,
   "context_window": 1000000,
   "lang": "zh",
   "remote": {

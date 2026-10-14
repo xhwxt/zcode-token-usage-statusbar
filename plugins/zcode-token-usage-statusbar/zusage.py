@@ -1,0 +1,1073 @@
+# -*- coding: utf-8 -*-
+"""ZCode token 用量查询（只读访问 ~/.zcode/cli/db/db.sqlite）。
+
+既可作 CLI（python zusage.py [now|today|days N|sessions [N]|models [days]|workspace 关键词|session id前缀|watch [sec]]），
+也可被 usage_mcp.py import 为查询库。
+"""
+import json
+import re
+import shlex
+import sqlite3
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+
+DB_PATH = Path.home() / ".zcode" / "cli" / "db" / "db.sqlite"
+CONFIG_PATH = Path(__file__).parent / "config.json"
+
+
+def load_config():
+    cfg = {"context_window": 128000, "poll_ms": 2000}
+    if CONFIG_PATH.exists():
+        try:
+            cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
+        except Exception:
+            pass
+    return cfg
+
+
+def connect():
+    """只读连接优先；WAL shm 不可用时退回普通连接（全程只 SELECT）。
+    fallback 前先确认文件存在：sqlite3.connect 对不存在的路径会新建空库，
+    可能与尚未初始化数据库的 ZCode 产生交互（v32 审查修复）。"""
+    try:
+        con = sqlite3.connect(f"file:{DB_PATH.as_posix()}?mode=ro", uri=True, timeout=3)
+        con.execute("select 1 from model_usage limit 1").fetchone()
+    except sqlite3.OperationalError:
+        if not DB_PATH.exists():
+            raise
+        con = sqlite3.connect(str(DB_PATH), timeout=3)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def _ts(ms):
+    return datetime.fromtimestamp(ms / 1000) if ms else None
+
+
+def _day_start(d=None):
+    d = d or datetime.now()
+    return d.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _epoch_ms(dt):
+    return int(dt.timestamp() * 1000)
+
+
+def _load_lang():
+    """CLI/MCP 输出语言：config.json 的 "lang"（zh/en，缺省 zh）——与安装器/监控窗口同源。
+    查找顺序：脚本目录（--dev/仓库直跑）→ 标准数据目录（标准安装的 config 不在脚本目录）。"""
+    for base in (CONFIG_PATH,
+                 Path.home() / ".zcode" / "zcode-token-usage-statusbar" / "config.json"):
+        try:
+            lang = json.loads(base.read_text(encoding="utf-8")).get("lang")
+            if lang in ("zh", "en"):
+                return lang
+        except (OSError, ValueError):
+            pass
+    return "zh"
+
+
+_LANG = _load_lang()
+
+
+def L(zh, en):
+    """双语输出（与 install.py / overlay.js 的 L 同款约定）。"""
+    return en if _LANG == "en" else zh
+
+
+def fmt(n):
+    n = n or 0
+    if n >= 1_000_000_000:
+        return f"{n / 1e9:.2f}B"
+    if n >= 1_000_000:
+        return f"{n / 1e6:.2f}M"
+    if n >= 1_000:
+        return f"{n / 1e3:.1f}K"
+    return str(n)
+
+
+SESSION_TIMEOUT_MS = 30 * 60 * 1000  # 最近30分钟有请求视为活跃会话
+
+
+_AGG_TTL_MS = 2000   # 聚合短缓存：今日合计/会话池是慢变量，2s 陈旧无感；泵 1.5s 拉一次省约一半全表聚合
+_AGG_CACHE = {}
+
+
+def _cached_agg(key, fn):
+    now = int(time.time() * 1000)
+    hit = _AGG_CACHE.get(key)
+    if hit and now - hit[0] < _AGG_TTL_MS:
+        return hit[1]
+    val = fn()
+    if len(_AGG_CACHE) > 8:
+        _AGG_CACHE.clear()   # 键固定只有几个，正常到不了；保险防膨胀
+    _AGG_CACHE[key] = (now, val)
+    return val
+
+
+def _scan_session_ids(con):
+    """全库 session_id → max(completed_at) 一次分组扫描（731MB 库 ~55ms）。
+    最新会话与 recent 池原先各自独立做同样的全表 group by（3 次 118ms），
+    合并为一次扫描并挂 2s TTL。"""
+    def run():
+        return con.execute(
+            """select session_id, max(completed_at) as m
+               from model_usage group by session_id""").fetchall()
+    return _cached_agg("scan", run)
+
+
+def session_usage(con, sid):
+    # last_request_input 取最近一次 completed 请求的 input_tokens（= 当前上下文容量）。
+    # 不能用 max(input_tokens)：会话压缩后 input 骤降，峰值永远不回落（v28 修复）。
+    r = con.execute(
+        """select count(*), coalesce(sum(input_tokens),0), coalesce(sum(output_tokens),0),
+                  coalesce(sum(reasoning_tokens),0), coalesce(sum(cache_read_input_tokens),0),
+                  coalesce(sum(cache_creation_input_tokens),0), coalesce(sum(computed_total_tokens),0),
+                  coalesce(sum(tool_call_count),0),
+                  (select m2.input_tokens from model_usage m2
+                    where m2.session_id = m.session_id and m2.status = 'completed'
+                    order by m2.completed_at desc, m2.id desc limit 1),
+                  count(distinct turn_id), coalesce(sum(retry_count),0)
+           from model_usage m where m.session_id=? and status='completed'""",
+        (sid,),
+    ).fetchone()
+    return {
+        "requests": r[0], "input": r[1], "output": r[2], "reasoning": r[3],
+        "cache_read": r[4], "cache_write": r[5], "total": r[6], "tool_calls": r[7],
+        "last_request_input": r[8] or 0, "turns": r[9], "retries": r[10],
+    }
+
+
+def range_usage(con, start_ms, end_ms):
+    # 末尾三列（reasoning/retry/cache_write）是 v30/v31 追加，CLI 老代码按索引 0-4 取值不受影响
+    return con.execute(
+        """select count(*), coalesce(sum(input_tokens),0), coalesce(sum(output_tokens),0),
+                  coalesce(sum(cache_read_input_tokens),0), coalesce(sum(computed_total_tokens),0),
+                  coalesce(sum(duration_ms),0), coalesce(sum(reasoning_tokens),0),
+                  coalesce(sum(retry_count),0), coalesce(sum(cache_creation_input_tokens),0)
+           from model_usage where status='completed' and completed_at between ? and ?""",
+        (start_ms, end_ms),
+    ).fetchone()
+
+
+def daily_usage(con, days):
+    """近 N 天（含今天），按本地日聚合。返回 [(date, row), ...] 旧→新。"""
+    out = []
+    for i in range(days - 1, -1, -1):
+        d0 = _day_start(datetime.now() - timedelta(days=i))
+        r = range_usage(con, _epoch_ms(d0), _epoch_ms(d0 + timedelta(days=1)))
+        out.append((d0.strftime("%m-%d %a"), r))
+    return out
+
+
+def recent_sessions(con, limit=10):
+    return con.execute(
+        """select s.id, coalesce(s.title,'(无标题)'), coalesce(s.directory,''),
+                  count(m.id), coalesce(sum(m.input_tokens),0), coalesce(sum(m.output_tokens),0),
+                  coalesce(sum(m.computed_total_tokens),0), max(m.completed_at)
+           from model_usage m left join session s on s.id = m.session_id
+           where m.status='completed'
+           group by m.session_id order by max(m.completed_at) desc limit ?""",
+        (limit,),
+    ).fetchall()
+
+
+def model_usage(con, days=7):
+    since = _epoch_ms(datetime.now() - timedelta(days=days))
+    return con.execute(
+        """select provider_id, model_id, count(*), coalesce(sum(input_tokens),0),
+                  coalesce(sum(output_tokens),0), coalesce(sum(computed_total_tokens),0)
+           from model_usage where status='completed' and completed_at >= ?
+           group by provider_id, model_id order by sum(computed_total_tokens) desc""",
+        (since,),
+    ).fetchall()
+
+
+# ---------- 展示 ----------
+
+def render_current(con):
+    """当前会话 = _scan_session_ids 最近活跃的会话（子代理会话也在候选内）。"""
+    rows = _scan_session_ids(con)
+    sess, last_at = None, 0
+    if rows:
+        sid, last_at = max(rows, key=lambda r: r[1])
+        sess = con.execute("select * from session where id=?", (sid,)).fetchone()
+    lines = []
+    if sess is not None:
+        u = session_usage(con, sess["id"])
+        active = last_at and (int(time.time() * 1000) - last_at) < SESSION_TIMEOUT_MS
+        mark = L("🟢 活跃", "🟢 active") if active else L("⚪ 闲置", "⚪ idle")
+        lines.append(L(f"■ 当前会话 [{mark}]  ", f"■ Current session [{mark}]  ") + sess["title"])
+        if sess["directory"]:
+            lines.append(L(f"  目录: {sess['directory']}", f"  dir: {sess['directory']}"))
+        lines.append(
+            L(f"  {u['turns']} 轮 / {u['requests']} 次请求 / {u['tool_calls']} 次工具调用",
+              f"  {u['turns']} turns / {u['requests']} requests / {u['tool_calls']} tool calls")
+        )
+        lines.append(
+            L(f"  input {fmt(u['input'])} (其中 cache read {fmt(u['cache_read'])})  "
+              f"output {fmt(u['output'])}  合计 {fmt(u['total'])}",
+              f"  input {fmt(u['input'])} (incl. cache read {fmt(u['cache_read'])})  "
+              f"output {fmt(u['output'])}  total {fmt(u['total'])}")
+        )
+        lines.append(L(f"  上下文容量 ≈ {fmt(u['last_request_input'])} tokens (最近一次请求输入)",
+                       f"  context capacity ≈ {fmt(u['last_request_input'])} tokens (latest request input)"))
+        if last_at:
+            la = _ts(last_at)
+            lines.append(L(f"  最后活动: {la:%H:%M:%S}",
+                           f"  last activity: {la:%H:%M:%S}"))
+        lines.append("")
+    today = range_usage(con, _epoch_ms(_day_start()), _epoch_ms(_day_start() + timedelta(days=1)))
+    lines.append(L(f"■ 今日 ({datetime.now():%Y-%m-%d %a})", f"■ Today ({datetime.now():%Y-%m-%d %a})"))
+    lines.append(
+        L(f"  {today[0]} 次请求  input {fmt(today[1])} (cache read {fmt(today[3])})  "
+          f"output {fmt(today[2])}  合计 {fmt(today[4])}",
+          f"  {today[0]} requests  input {fmt(today[1])} (cache read {fmt(today[3])})  "
+          f"output {fmt(today[2])}  total {fmt(today[4])}")
+    )
+    return "\n".join(lines)
+
+
+def render_days(con, days):
+    lines = [L(f"■ 近 {days} 天每日用量 (合计=input+output)", f"■ Last {days} days (total=input+output)")]
+    for label, r in daily_usage(con, days):
+        bar = "█" * max(0, min(30, int(r[4] / 200_000)))
+        lines.append(
+            L(f"  {label}  {r[0]:>4} 次  in {fmt(r[1]):>8}  out {fmt(r[2]):>7}  合计 {fmt(r[4]):>8}  {bar}",
+              f"  {label}  {r[0]:>4} req  in {fmt(r[1]):>8}  out {fmt(r[2]):>7}  total {fmt(r[4]):>8}  {bar}")
+        )
+    return "\n".join(lines)
+
+
+def render_sessions(con, limit=10):
+    lines = [L(f"■ 最近 {limit} 个会话", f"■ Last {limit} sessions")]
+    for sid, title, d, n, inp, outp, total, last in recent_sessions(con, limit):
+        t = _ts(last)
+        if _LANG == "en" and title == "(无标题)":
+            title = "(untitled)"
+        dname = d.replace("\\", "/").rsplit("/", 1)[-1] if d else "?"
+        lines.append(
+            L(f"  {t:%m-%d %H:%M}  {fmt(total):>8}  ({fmt(inp)} in / {fmt(outp)} out, {n} 请求)  ",
+              f"  {t:%m-%d %H:%M}  {fmt(total):>8}  ({fmt(inp)} in / {fmt(outp)} out, {n} requests)  ")
+            + f"[{dname}]  {title[:32]}  [{sid[:13]}]"
+        )
+    return "\n".join(lines)
+
+
+def render_models(con, days=7):
+    lines = [L(f"■ 近 {days} 天按模型", f"■ Last {days} days by model")]
+    for prov, model, n, inp, outp, total in model_usage(con, days):
+        lines.append(
+            L(f"  {model:<22} {n:>5} 次  in {fmt(inp):>8}  out {fmt(outp):>7}  合计 {fmt(total):>8}  ({prov})",
+              f"  {model:<22} {n:>5} req  in {fmt(inp):>8}  out {fmt(outp):>7}  total {fmt(total):>8}  ({prov})")
+        )
+    return "\n".join(lines)
+
+
+# ---------- 工作区报表 ----------
+# 口径：主会话 = directory 命中且无父且非 sess_subagent 前缀；子代理按 parent_id 归并去重。
+# 子代理会话（sess_subagent_*）的 directory 字段也等于工作区目录，直接按 directory 聚合会把
+# 主/子重复计数，必须走 parent_id 归并。报表单连接一次算齐——库实时写入，分次查询之间对不上账。
+# 会话迁移过工作区时历史用量全部记在当前目录名下（model_usage 无工作区维度）。
+
+_SUB_PREFIX_LEN = 13   # len("sess_subagent")
+
+
+def _usage_rows(con, sids):
+    """一批会话的 completed 用量（口径与 session_usage 一致），返回 session_id → row。"""
+    qm = ",".join("?" * len(sids))
+    per = {}
+    for r in con.execute(
+        f"""select session_id, count(*) n,
+                   coalesce(sum(input_tokens),0) inp, coalesce(sum(output_tokens),0) outp,
+                   coalesce(sum(reasoning_tokens),0) reas,
+                   coalesce(sum(cache_read_input_tokens),0) crd,
+                   coalesce(sum(computed_total_tokens),0) tot,
+                   min(completed_at) first_at, max(completed_at) last_at
+            from model_usage where status='completed' and session_id in ({qm})
+            group by session_id""", sids):
+        per[r["session_id"]] = r
+    return per
+
+
+def _match_workspaces(con, pattern):
+    """工作区目录匹配：子串（SQLite LIKE 对 ASCII 大小写不敏感）或单词首字母缩写
+    （abc → **A**pple **B**anana **C**herry）。用户对工作区的称呼常是缩写而非子串。
+    返回 [(directory, 会话数)]，按会话数降序。"""
+    pat = pattern.lower()
+    out = []
+    for d, n in con.execute(
+            "select directory, count(*) n from session group by directory order by n desc"):
+        if pat in d.lower():
+            out.append((d, n))
+            continue
+        initials = "".join(w[0] for w in re.split(r"[^A-Za-z0-9]+", d) if w).lower()
+        if len(pat) >= 2 and pat in initials:
+            out.append((d, n))
+    return out
+
+
+def render_workspace(con, pattern, top=15):
+    """workspace:<目录关键词>：按工作区聚合主会话+子代理，含按会话与按模型两张明细。"""
+    pattern = (pattern or "").strip()
+    dirs = _match_workspaces(con, pattern) if pattern else []
+    if not dirs:
+        lines = [L(f"未找到目录含 {pattern!r} 的工作区。现有工作区（按会话数前 10）：",
+                   f"No workspace with directory matching {pattern!r}. Existing workspaces (top 10 by sessions):")]
+        for d, n in con.execute(
+                "select directory, count(*) n from session group by directory order by n desc limit 10"):
+            lines.append(f"  {n:>4}  {d}")
+        return "\n".join(lines)
+
+    dir_names = [d for d, _ in dirs]
+    qd = ",".join("?" * len(dir_names))
+    mains = con.execute(
+        f"""select id, title, time_created from session
+           where directory in ({qd}) and parent_id is null and substr(id,1,{_SUB_PREFIX_LEN})!='sess_subagent'
+           order by time_created""", dir_names).fetchall()
+    main_ids = [r["id"] for r in mains]
+    subs = []
+    if main_ids:
+        qm = ",".join("?" * len(main_ids))
+        subs = con.execute(
+            f"select id, title, parent_id from session where parent_id in ({qm})", main_ids).fetchall()
+    all_ids = list(dict.fromkeys(main_ids + [r["id"] for r in subs]))
+    per = _usage_rows(con, all_ids) if all_ids else {}
+    qm = ",".join("?" * len(all_ids))
+    models = con.execute(
+        f"""select model_id, count(*) n,
+                   coalesce(sum(input_tokens),0) inp, coalesce(sum(output_tokens),0) outp,
+                   coalesce(sum(computed_total_tokens),0) tot
+            from model_usage where status='completed' and session_id in ({qm})
+            group by model_id order by tot desc""", all_ids).fetchall() if all_ids else []
+
+    def agg(ids):
+        rows = [per[i] for i in ids if i in per]
+        return {k: sum(r[k] for r in rows)
+                for k in ("n", "inp", "outp", "reas", "crd", "tot")}
+
+    sub_of = {}
+    for s in subs:
+        sub_of.setdefault(s["parent_id"], []).append(s["id"])
+    sub_ids = [i for ids in sub_of.values() for i in ids]
+    tm, ts, ta = agg(main_ids), agg(sub_ids), agg(all_ids)
+
+    if len(dirs) == 1:
+        lines = [L(f"■ 工作区 {dirs[0][0]}", f"■ Workspace {dirs[0][0]}")]
+    else:
+        lines = [L(f"■ 工作区（匹配 {pattern!r}，命中 {len(dirs)} 个）",
+                   f"■ Workspaces matching {pattern!r} ({len(dirs)} dirs)")]
+        for d, n in dirs[:5]:
+            lines.append(f"  {n:>4}  {d}")
+    if not per:
+        lines.append(L("该工作区暂无 completed 请求。", "No completed requests in this workspace yet."))
+        return "\n".join(lines)
+    firsts = [r["first_at"] for r in per.values() if r["first_at"]]
+    lasts = [r["last_at"] for r in per.values() if r["last_at"]]
+    lines.append(L(
+        f"主会话 {len(main_ids)} 个（其中无请求 {len(main_ids) - len([i for i in main_ids if i in per])} 个）"
+        f" + 子代理 {len(subs)} 个 ｜ "
+        f"{_ts(min(firsts)):%m-%d %H:%M} ~ {_ts(max(lasts)):%m-%d %H:%M}",
+        f"{len(main_ids)} main sessions ({len(main_ids) - len([i for i in main_ids if i in per])} without requests)"
+        f" + {len(subs)} subagents ｜ {_ts(min(firsts)):%m-%d %H:%M} ~ {_ts(max(lasts)):%m-%d %H:%M}"))
+    lines.append(L(
+        f"请求 {ta['n']:,}（主 {tm['n']:,} / 子 {ts['n']:,}）  "
+        f"input {ta['inp']:,}（缓存读 {ta['crd']:,}）  "
+        f"output {ta['outp']:,}（含 reasoning {ta['reas']:,}）",
+        f"{ta['n']:,} requests (main {tm['n']:,} / sub {ts['n']:,})  "
+        f"input {ta['inp']:,} (cache-read {ta['crd']:,})  "
+        f"output {ta['outp']:,} (incl. reasoning {ta['reas']:,})"))
+    lines.append(L(
+        f"合计（=input+output，缓存读已含在 input 内） {ta['tot']:,}",
+        f"Total (=input+output; cache-read already inside input) {ta['tot']:,}"))
+
+    ranked = []
+    for m in mains:
+        if m["id"] in per:
+            su = agg(sub_of.get(m["id"], []))
+            ranked.append((m, per[m["id"]], su))
+    ranked.sort(key=lambda x: -(x[1]["tot"] + x[2]["tot"]))
+    lines.append(L(f"■ 按会话（含其子代理，按含子合计降序，前 {top}）",
+                   f"■ By session (incl. subagents, top {top} by combined total)"))
+    for m, u, su in ranked[:top]:
+        nsub = len(sub_of.get(m["id"], []))
+        subtxt = (L(f" +子{nsub}个 {su['tot']:,}", f" +{nsub} sub {su['tot']:,}") if nsub else "")
+        t = (m["title"] or L("(无标题)", "(untitled)")).replace("\n", " ")
+        lines.append(
+            f"  {_ts(u['last_at']):%m-%d %H:%M}  {u['n']:,}req  in {u['inp']:,}  out {u['outp']:,}  "
+            f"{L('合计', 'total')} {u['tot']:,}{subtxt}  {t[:26]}")
+    if len(ranked) > top:
+        rest = agg([m["id"] for m, _, _ in ranked[top:]])
+        lines.append(L(f"  （另有 {len(ranked) - top} 个会话 合计 {rest['tot']:,}）",
+                       f"  (…plus {len(ranked) - top} sessions totalling {rest['tot']:,})"))
+
+    lines.append(L("■ 按模型", "■ By model"))
+    for r in models:
+        lines.append(
+            f"  {r['model_id']:<24} {r['n']:,}req  in {r['inp']:,}  out {r['outp']:,}  "
+            f"{L('合计', 'total')} {r['tot']:,}")
+    return "\n".join(lines)
+
+
+# ---------- 机器可读快照（悬浮条数据源） ----------
+
+CATALOG_PATH = Path(r"D:\ZCode\resources\model-providers\models_catalog_china_llm_zcode_2026-06-03.json")
+
+
+_CTX_WINDOW_CACHE = {}
+
+
+def lookup_context_window(model_id):
+    """按模型 id 在客户端自带模型目录里查 contextWindow；查不到返回 None。带缓存。"""
+    want = (model_id or "").strip().lower()
+    if not want:
+        return None
+    if want in _CTX_WINDOW_CACHE:
+        return _CTX_WINDOW_CACHE[want]
+    result = None
+    try:
+        cat = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    for p in cat.get("providers", []):
+        for m in p.get("models", []):
+            if str(m.get("id", "")).lower() == want:
+                cw = m.get("contextWindow")
+                result = int(cw) if cw else None
+                break
+    _CTX_WINDOW_CACHE[want] = result
+    return result
+
+
+def _prompt_matches(title, prompt):
+    """子会话 title 是否为 Agent part prompt 的截断头（ZCode 规则：prompt 前 57 字符 + "..."）。"""
+    t = (title or "").strip()
+    if not t or not prompt:
+        return False
+    if t.endswith("..."):
+        base = t[:-3]
+        return len(base) >= 15 and prompt.startswith(base)
+    return prompt.startswith(t)
+
+
+# 任务名解析缓存（serve 常驻进程内）：like 扫描父会话全部 part 的 data（本会话可达
+# 2456 行大 JSON，实测 29ms/次，泵 1.5s 拉一次全付）。失效键 = 父会话 part 的
+# 行数+最新 time_updated（索引聚合，<1ms）；普通消息 part 新增也会失效，宁多算不漏算。
+_TASK_CACHE = {}
+
+
+def _sub_agent_tasks(con, sid):
+    stamp = con.execute(
+        "select count(*), coalesce(max(time_updated),0) from part where session_id=?", (sid,)
+    ).fetchone()
+    key = (stamp[0], stamp[1])
+    hit = _TASK_CACHE.get(sid)
+    if hit and hit[0] == key:
+        return hit[1]
+    sub_rows_titles = {r[0]: r[1] for r in con.execute(
+        "select id, title from session where parent_id=?", (sid,))}
+    agent_parts = []
+    for prow in con.execute(
+        """select data, time_created from part
+           where session_id=? and data like '%"tool":"Agent"%' order by time_created""",
+        (sid,),
+    ):
+        try:
+            o = json.loads(prow[0])
+            st = o.get("state") or {}
+            inp = st.get("input") or {}
+            desc = str(inp.get("description") or "").strip()
+            if desc:
+                agent_parts.append((desc, str(inp.get("prompt") or "").strip(),
+                                    str(st.get("output") or "")))
+        except Exception:
+            continue   # part.data 解析失败跳过该条，不影响其余
+    tasks = {}
+    for desc, _prompt, out in agent_parts:
+        m = re.search(r"(?:^|\n)agentId:\s*([^\s(]+)", out)
+        if m:
+            tasks["sess_subagent_" + m.group(1)] = desc
+    used = set(tasks)
+    for desc, prompt, out in agent_parts:
+        if re.search(r"(?:^|\n)agentId:\s*([^\s(]+)", out):
+            continue   # 已走回执关联
+        cands = [s for s, t in sub_rows_titles.items()
+                 if s not in used and _prompt_matches(t, prompt)]
+        if len(cands) == 1:
+            tasks[cands[0]] = desc
+            used.add(cands[0])
+    if len(_TASK_CACHE) > 32:   # 防长驻膨胀：会话数有限，正常到不了；超了整表清掉
+        _TASK_CACHE.clear()
+    _TASK_CACHE[sid] = (key, tasks)
+    return tasks
+
+
+def render_session_detail(con, prefix):
+    """session:<id前缀>：会话总量 + 按模型 + 子代理明细（任务名与状态条"子智能体目录"同源）。"""
+    rows = con.execute("select id from session where id like ?", (prefix + "%",)).fetchall()
+    if not rows:
+        rows = con.execute(
+            "select distinct session_id from model_usage where session_id like ?",
+            (prefix + "%",)).fetchall()
+    if not rows:
+        return L(f"未找到 id 前缀为 {prefix!r} 的会话",
+                 f"No session found with id prefix {prefix!r}")
+    sid = rows[0][0]
+    sess = con.execute("select * from session where id=?", (sid,)).fetchone()
+    u = session_usage(con, sid)
+    head = L(f"■ 会话 {sid}", f"■ Session {sid}")
+    if sess is not None:
+        head += f"  {sess['title']}"
+        if sess["directory"]:
+            head += L(f"\n  目录: {sess['directory']}", f"\n  dir: {sess['directory']}")
+    body = L(
+        f"  {u['turns']} 轮 / {u['requests']} 次请求\n"
+        f"  input {fmt(u['input'])} (其中 cache read {fmt(u['cache_read'])})  "
+        f"output {fmt(u['output'])}  合计 {fmt(u['total'])}（合计=input+output，缓存读已含在 input 内）\n"
+        f"  上下文容量 ≈ {fmt(u['last_request_input'])} tokens",
+        f"  {u['turns']} turns / {u['requests']} requests\n"
+        f"  input {fmt(u['input'])} (incl. cache read {fmt(u['cache_read'])})  "
+        f"output {fmt(u['output'])}  total {fmt(u['total'])} (total=input+output; cache-read already inside input)\n"
+        f"  context capacity ≈ {fmt(u['last_request_input'])} tokens")
+    lines = [head, body]
+    last = con.execute(
+        "select max(completed_at) from model_usage where session_id=?", (sid,)).fetchone()[0]
+    if last:
+        lines.append(L(f"  最后活动: {_ts(last):%m-%d %H:%M}",
+                       f"  last activity: {_ts(last):%m-%d %H:%M}"))
+    mrows = con.execute(
+        """select model_id, count(*) n, coalesce(sum(input_tokens),0),
+                  coalesce(sum(output_tokens),0), coalesce(sum(computed_total_tokens),0)
+           from model_usage where session_id=? and status='completed'
+           group by model_id order by sum(computed_total_tokens) desc limit 6""",
+        (sid,)).fetchall()
+    if mrows:
+        lines.append(L("  按模型:", "  By model:"))
+        for r in mrows:
+            lines.append(
+                f"    {r['model_id']:<24} {r['n']:,}req  in {fmt(r[2])}  out {fmt(r[3])}  "
+                f"{L('合计', 'total')} {fmt(r[4])}")
+    sub_rows = con.execute(
+        """select m.session_id, coalesce(s2.title,''), count(*),
+                  coalesce(sum(m.computed_total_tokens),0), max(m.completed_at)
+           from model_usage m join session s2 on m.session_id = s2.id
+           where m.query_source='subagent' and s2.parent_id=? and m.status='completed'
+           group by m.session_id order by max(m.completed_at) desc""", (sid,)).fetchall()
+    if sub_rows:
+        tasks = _sub_agent_tasks(con, sid)
+        lines.append(L(
+            f"  子代理: {len(sub_rows)} 个 / {sum(r[2] for r in sub_rows):,}req / "
+            f"合计 {sum(r[3] for r in sub_rows):,}",
+            f"  Subagents: {len(sub_rows)} / {sum(r[2] for r in sub_rows):,}req / "
+            f"total {sum(r[3] for r in sub_rows):,}"))
+        for r in sub_rows[:8]:
+            name = tasks.get(r[0]) or r[1] or r[0]
+            lines.append(
+                f"    {fmt(r[3]):>8}  {r[2]:>3}req  {str(name).replace(chr(10), ' ')[:30]}  [{r[0][-6:]}]")
+        if len(sub_rows) > 8:
+            lines.append(L(f"    （另有 {len(sub_rows) - 8} 个）", f"    (…plus {len(sub_rows) - 8} more)"))
+    return "\n".join(lines)
+
+
+def _light_snapshot(con, sid, cfg):
+    """recent 池轻量行（v8 瘦身）：两条聚合 SQL 出齐顶层计数，明细字段给空结构。
+    状态条只渲染 1 个会话，recent 长尾行仅作会话切换兜底；兜底候选（force + latest +
+    最近活跃前 2）恒为完整快照，轻量行只在极端长尾被兜底选中时降级显示（缺明细不缺计数）。
+    sub.list 聚合数字置 0 而非缺失：overlay 的子代理面板/汇总按字段渲染，结构必须完整。"""
+    u = session_usage(con, sid)
+    srow = con.execute(
+        "select title, summary_additions, summary_deletions, summary_files, parent_id from session where id=?",
+        (sid,),
+    ).fetchone()
+    lr = con.execute("select max(completed_at) from model_usage where session_id=?", (sid,)).fetchone()
+    now_ms = int(time.time() * 1000)
+    return {
+        "sid": sid,
+        "title": (srow["title"] if srow is not None else "") or "",
+        "active": bool(lr[0] and now_ms - lr[0] < SESSION_TIMEOUT_MS),
+        "turns": u["turns"], "requests": u["requests"], "input": u["input"],
+        "output": u["output"], "reasoning": u["reasoning"], "cache_read": u["cache_read"],
+        "cache_write": u["cache_write"], "total": u["total"], "tool_calls": u["tool_calls"],
+        "retries": u["retries"], "ctx": u["last_request_input"],
+        "updated": (_ts(lr[0]).strftime("%H:%M:%S") if lr[0] else ""),
+        "sub": {"requests": 0, "total": 0, "input": 0, "output": 0, "cache_read": 0,
+                "reasoning": 0, "cache_write": 0, "active": False, "list": []},
+        "tools": {"total": u["tool_calls"], "errors": 0, "list": []},
+        "last_turn": dict(_EMPTY_TURN),
+        "last": {"duration_ms": 0, "ttft_ms": 0, "model": "", "tps": 0},
+        "code": {"add": (srow["summary_additions"] if srow is not None else None),
+                 "del": (srow["summary_deletions"] if srow is not None else None),
+                 "files": (srow["summary_files"] if srow is not None else None)},
+        "ctx_exc": 0,
+        "context_window": cfg["context_window"], "context_auto": False,
+        "last_at": (lr[0] if lr[0] else 0),
+        "is_sub": sid.startswith("sess_subagent"),
+        "parent": (srow["parent_id"] if srow is not None else None),
+    }
+
+
+def _session_snapshot(con, sid, cfg):
+    """单个会话的完整快照（最新会话与 recent 列表共用一份结构）。"""
+    srow = con.execute("select * from session where id=?", (sid,)).fetchone()
+    u = session_usage(con, sid)
+    last = con.execute(
+        """select duration_ms, coalesce(time_to_first_token_ms,0), completed_at, turn_id, model_id,
+                  output_tokens, first_token_at, started_at, reasoning_tokens
+           from model_usage where session_id=? and status='completed'
+           order by completed_at desc limit 1""",
+        (sid,),
+    ).fetchone()
+    # 本轮数据源 = turn_usage 表的每轮完整聚合（v30 起，替代从 model_usage 手工按轮求和）：
+    # 自带请求/重试/工具/工具错误计数与 reasoning 拆分，一轮一行。
+    lt = {"requests": 0, "retries": 0, "tool_calls": 0, "tool_errors": 0, "input": 0,
+          "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0,
+          "total": 0, "duration_ms": 0, "ttft_ms": 0}
+    if last and last["turn_id"]:
+        t = con.execute(
+            """select coalesce(model_request_count,0), coalesce(model_retry_count,0),
+                      coalesce(tool_call_count,0), coalesce(tool_error_count,0),
+                      coalesce(input_tokens,0), coalesce(output_tokens,0), coalesce(reasoning_tokens,0),
+                      coalesce(cache_read_input_tokens,0), coalesce(cache_creation_input_tokens,0),
+                      coalesce(computed_total_tokens,0),
+                      coalesce(duration_ms,0), coalesce(time_to_first_token_ms,0)
+               from turn_usage where session_id=? and turn_id=? and status='completed'""",
+            (sid, last["turn_id"]),
+        ).fetchone()
+        if t:
+            lt = {"requests": t[0], "retries": t[1], "tool_calls": t[2], "tool_errors": t[3],
+                  "input": t[4], "output": t[5], "reasoning": t[6], "cache_read": t[7],
+                  "cache_write": t[8], "total": t[9], "duration_ms": t[10], "ttft_ms": t[11]}
+        else:
+            # 轮进行中 turn_usage 还没落 completed 行：回退 model_usage 现场聚合，保持实时显示
+            r = con.execute(
+                """select count(*), coalesce(sum(input_tokens),0), coalesce(sum(output_tokens),0),
+                          coalesce(sum(computed_total_tokens),0), coalesce(sum(duration_ms),0),
+                          coalesce(sum(cache_read_input_tokens),0), coalesce(sum(reasoning_tokens),0),
+                          coalesce(sum(cache_creation_input_tokens),0)
+                   from model_usage where session_id=? and turn_id=? and status='completed'""",
+                (sid, last["turn_id"]),
+            ).fetchone()
+            lt = {"requests": r[0], "retries": 0, "tool_calls": 0, "tool_errors": 0,
+                  "input": r[1], "output": r[2], "reasoning": r[6], "cache_read": r[5],
+                  "cache_write": r[7], "total": r[3], "duration_ms": r[4], "ttft_ms": 0}
+    lr = con.execute("select max(completed_at) from model_usage where session_id=?", (sid,)).fetchone()
+    active = bool(lr and lr[0] and int(time.time() * 1000) - lr[0] < SESSION_TIMEOUT_MS)
+    ctx_auto = lookup_context_window(last["model_id"]) if last else None
+    # 生成速度：输出 token ÷ 生成耗时。口径与逐问速率行（token_rate.py）一致：
+    #   分子 = output_tokens（ZCode 该列已含思考 token，不另加）；
+    #   分母 = completed − first_token（首 token 之后到完成），但思考 token 在
+    #   first_token_at 之前流出（2026-10-14 真库裁决），含思考段的窗口前移到
+    #   started_at，否则思考时长被漏出分母、速率虚高；缺 first_token_at 时退化总耗时。
+    tps = 0
+    if last and last["output_tokens"]:
+        gen_ms = None
+        if last["first_token_at"] and last["completed_at"] and last["completed_at"] > last["first_token_at"]:
+            gen_ms = last["completed_at"] - last["first_token_at"]
+            if last["reasoning_tokens"] and last["started_at"] and last["completed_at"] > last["started_at"]:
+                gen_ms = last["completed_at"] - last["started_at"]
+        elif last["duration_ms"]:
+            gen_ms = last["duration_ms"]
+        if gen_ms:
+            tps = round(last["output_tokens"] / (gen_ms / 1000), 1)
+    sub_rows = con.execute(
+        """select m.session_id, coalesce(m.agent,''), coalesce(s2.title,''), count(*),
+                  coalesce(sum(m.computed_total_tokens),0),
+                  coalesce(sum(m.input_tokens),0), coalesce(sum(m.output_tokens),0),
+                  coalesce(sum(m.cache_read_input_tokens),0), coalesce(sum(m.reasoning_tokens),0),
+                  coalesce(sum(m.cache_creation_input_tokens),0), max(m.completed_at), s2.time_created
+           from model_usage m join session s2 on m.session_id = s2.id
+           where m.query_source='subagent' and s2.parent_id=? and m.status='completed'
+           group by m.session_id order by max(m.completed_at) desc""",
+        (sid,),
+    ).fetchall()
+    # 子代理任务名：Agent 工具调用 part 的 input.description（与右侧"子智能体目录"面板同源）。
+    # 主关联用官方回执：完成后 part.state.output 尾部带 "agentId: agent_xxx" 行，
+    # 子会话 id 即 "sess_subagent_"+agentId（客户端自己的硬关联，无歧义）。
+    # 兜底只给运行中尚未出现回执的条目：prompt 前缀匹配且候选唯一才绑（同前缀多候选宁可
+    # 无名，不做时间猜测——历史 part 不带 childSessionId，时间最近邻存在错位风险）。
+    sub_tasks = _sub_agent_tasks(con, sid) if sub_rows else {}
+    now_ms = int(time.time() * 1000)
+    sub = {
+        "requests": sum(r[3] for r in sub_rows),
+        "total": sum(r[4] for r in sub_rows),
+        "input": sum(r[5] for r in sub_rows),
+        "output": sum(r[6] for r in sub_rows),
+        "cache_read": sum(r[7] for r in sub_rows),
+        "reasoning": sum(r[8] for r in sub_rows),
+        "cache_write": sum(r[9] for r in sub_rows),
+        "active": any(r[10] and now_ms - r[10] < 30000 for r in sub_rows),
+        "list": [
+            {"sid": r[0], "agent": r[1], "title": r[2], "task": sub_tasks.get(r[0], ""),
+             "requests": r[3], "total": r[4],
+             "input": r[5], "output": r[6], "cache_read": r[7], "reasoning": r[8],
+             "cache_write": r[9], "last": (r[10] or 0),
+             "active": bool(r[10] and now_ms - r[10] < 30000)}
+            for r in sub_rows
+        ],
+    }
+    # 工具调用明细（tool_usage 表，本会话按工具分组；status=running 的行不计入）
+    tool_rows = con.execute(
+        """select tool_name, count(*), coalesce(sum(duration_ms),0),
+                  sum(case when status='error' then 1 else 0 end)
+           from tool_usage where session_id=? and status in ('completed','error')
+           group by tool_name order by count(*) desc, tool_name""",
+        (sid,),
+    ).fetchall()
+    tools = {
+        "total": sum(r[1] for r in tool_rows),
+        "errors": sum(r[3] or 0 for r in tool_rows),
+        "list": [
+            {"name": r[0], "count": r[1], "duration_ms": r[2], "errors": r[3] or 0}
+            for r in tool_rows
+        ],
+    }
+    return {
+        "sid": sid,
+        "title": srow["title"] if srow is not None else "",
+        "active": active,
+        "turns": u["turns"] if u else 0,
+        "requests": u["requests"] if u else 0,
+        "input": u["input"] if u else 0,
+        "output": u["output"] if u else 0,
+        "reasoning": u["reasoning"] if u else 0,
+        "cache_read": u["cache_read"] if u else 0,
+        "cache_write": u["cache_write"] if u else 0,
+        "total": u["total"] if u else 0,
+        "tool_calls": u["tool_calls"] if u else 0,
+        "retries": u["retries"] if u else 0,
+        "ctx": u["last_request_input"] if u else 0,
+        "updated": (_ts(lr[0]).strftime("%H:%M:%S") if lr and lr[0] else ""),
+        "sub": sub,
+        "tools": tools,
+        "last_turn": lt,
+        "last": {
+            "duration_ms": last["duration_ms"] if last else 0,
+            "ttft_ms": last[1] if last else 0,
+            "model": last["model_id"] if last else "",
+            "tps": tps,
+        },
+        # 代码变更统计（session 表 summary_* 列，ZCode 目前未填充、全库为 NULL，有值才会显示）
+        "code": {
+            "add": (srow["summary_additions"] if srow is not None else None),
+            "del": (srow["summary_deletions"] if srow is not None else None),
+            "files": (srow["summary_files"] if srow is not None else None),
+        },
+        # 最近一次"上下文超限被拒"的时刻（该请求 status=error，不会进 completed 统计）；
+        # 晚于最近成功请求 = 仍处于超限状态，进度条亮红告警
+        "ctx_exc": con.execute(
+            """select coalesce(max(coalesce(completed_at, started_at)),0)
+               from model_usage where session_id=? and context_exceeded=1""",
+            (sid,),
+        ).fetchone()[0],
+        "context_window": ctx_auto or cfg["context_window"],
+        "context_auto": ctx_auto is not None,
+        "last_at": (lr[0] if lr and lr[0] else 0),
+        "is_sub": sid.startswith("sess_subagent"),
+        "parent": (srow["parent_id"] if srow is not None else None),
+    }
+
+
+_EMPTY_TURN = {"requests": 0, "retries": 0, "tool_calls": 0, "tool_errors": 0, "input": 0,
+               "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0,
+               "total": 0, "duration_ms": 0, "ttft_ms": 0}
+
+
+# ---------- 远端数据源（SSH，v9）----------
+# SSH 远程场景：桌面客户端连的是远端 zcode-server，会话数据落在远端机的
+# ~/.zcode/cli/db/db.sqlite，本地库里查不到。config.json 配了 remote 时，
+# force 会话中本地无数据的 sid 改为 SSH 到远端执行同一份 zusage.py json，
+# 把远端快照（结构同源）打上 remote 标记合并进本 payload；today 同理带回远端值。
+# 服务器侧只需部署同一份 zusage.py（无需 config 的 remote 段，保持关闭防递归）。
+
+_REMOTE_NEG_TTL_OK = 2 * 60 * 1000      # 远端确认"无此会话"后多久内不再问（远端新会话极少数竞态下最迟 2 分钟自愈）
+_REMOTE_NEG_TTL_ERR = 60 * 1000         # ssh 失败/超时：短退避，尽快自愈
+_REMOTE_NEG = {}                        # sid -> [查询时刻ms, 生效TTLms]
+
+
+def _remote_cfg(cfg):
+    """config.json 的 remote 段 → 归一化配置或 None。字段：
+    enabled(true) / ssh("ssh 主机别名" 或 argv 数组) / script(远端 zusage.py 路径) /
+    python(远端解释器) / timeout_s(ssh 超时) / host_label(徽标显示名)。"""
+    r = cfg.get("remote")
+    if not isinstance(r, dict) or not r.get("enabled"):
+        return None
+    ssh = r.get("ssh") or ""
+    if isinstance(ssh, list):
+        ssh_argv = [str(x) for x in ssh]
+    else:
+        try:
+            ssh_argv = shlex.split(str(ssh))
+        except ValueError:
+            ssh_argv = str(ssh).split()
+    if not ssh_argv:
+        return None
+    return {
+        "ssh_argv": ssh_argv,
+        "script": str(r.get("script") or ".zcode/zcode-token-usage-statusbar/zusage.py"),
+        "python": str(r.get("python") or "python3"),
+        "timeout_s": min(14.0, max(1.0, float(r.get("timeout_s") or 6))),
+        "host_label": str(r.get("host_label") or (ssh_argv[-1] if len(ssh_argv) > 1 else "remote")),
+    }
+
+
+def _remote_exec(sids, rcfg):
+    """SSH 执行远端 zusage.py json <sids>。返回 (by_sid, remote_today, err)。
+    sid 在进入该函数前已过 [A-Za-z0-9_-]+ 白名单（snapshot 与泵双重校验），
+    ssh 远端命令按 shell 拼接，此处不再引入任何可注入内容。"""
+    cmd = rcfg["ssh_argv"] + [rcfg["python"], rcfg["script"], "json", ",".join(sids)]
+    err = None
+    payload = None
+    try:
+        p = subprocess.run(cmd, capture_output=True, timeout=rcfg["timeout_s"])
+        out = p.stdout.decode("utf-8", "replace")
+        if p.returncode != 0:
+            err = f"ssh rc={p.returncode}: {p.stderr.decode('utf-8', 'replace').strip()[:160]}"
+        else:
+            # 取最后一行能解析的 JSON 对象：容忍远端登录 banner 混进 stdout
+            for line in reversed(out.splitlines()):
+                line = line.strip()
+                if line.startswith("{"):
+                    try:
+                        payload = json.loads(line)
+                        break
+                    except ValueError:
+                        continue
+            if payload is None:
+                err = "remote returned no JSON payload"
+    except subprocess.TimeoutExpired:
+        err = f"ssh timeout after {rcfg['timeout_s']:g}s"
+    except OSError as e:
+        err = f"ssh spawn failed: {e}"
+    if payload is None:
+        return {}, None, err or "remote query failed"
+    # known_sids = 远端库里真实存在的 force 会话（session 行或任一 usage 行）。
+    # 远端对未知 sid 也会产出零值快照，不按它过滤的话"确无此会话"永远判不了，
+    # 负缓存失效 → 本地新会话每轮都白跑一次 ssh。缺 known_sids 字段 = 远端是旧版
+    # 脚本：退化为按活跃度识别（零值快照 requests/last_at 恒为 0）。
+    known = payload.get("known_sids")
+    legacy = not isinstance(known, list)
+    known = set(known or [])
+    by = {}
+    for rec in payload.get("recent") or []:
+        if not isinstance(rec, dict) or rec.get("sid") not in sids:
+            continue
+        # 远端旧版脚本（无 known_sids）退化为按活跃度识别：零值快照 requests/last_at 恒为 0
+        found = (rec["sid"] in known) if not legacy else (
+            (rec.get("requests") or 0) > 0 or (rec.get("last_at") or 0) > 0)
+        if found:
+            rec["remote"] = True
+            rec["remote_host"] = rcfg["host_label"]
+            by[rec["sid"]] = rec
+    return by, payload.get("today"), err
+
+
+def _remote_fetch(force_sids, have_local, rcfg):
+    """本地库不存在的 force 会话 → 远端补齐。带负缓存：远端确认无此会话按 TTL 免问；
+    ssh 失败用短 TTL 快速自愈。have_local = 本地 session/usage 表真实存在的 sid 集合
+    （本地新会话即便还没有请求也不会去远端白跑）。"""
+    now_ms = int(time.time() * 1000)
+    missing = []
+    for s in force_sids:
+        if s in have_local:
+            continue
+        ent = _REMOTE_NEG.get(s)
+        if ent and now_ms - ent[0] < ent[1]:
+            continue
+        missing.append(s)
+    if not missing:
+        return {}, None, None
+    by, today, err = _remote_exec(missing, rcfg)
+    if len(_REMOTE_NEG) > 256:
+        _REMOTE_NEG.clear()   # 防长驻膨胀，正常会话数到不了
+    for s in missing:
+        if s in by:
+            _REMOTE_NEG.pop(s, None)
+        else:
+            _REMOTE_NEG[s] = (now_ms, _REMOTE_NEG_TTL_ERR if err else _REMOTE_NEG_TTL_OK)
+    return by, today, err
+
+
+def snapshot(force_sid=""):
+    """单次快照：最新会话 + 最近 6+6 会话池 + 今日。
+    force_sid：各窗口当前会话 id，逗号分隔（泵按窗口汇总上报：主进程 IPC 映射的焦点会话 +
+    overlay localStorage 键兜底），全部强制纳入快照——不在 6+6 池里的会话（新开的、久远的）
+    也能被各窗口找到自己的会话并显示（v32 起；v34 改为多窗口多 sid）。"""
+    cfg = load_config()
+    con = connect()
+    try:
+        force_sids = []
+        for fs in str(force_sid).split(","):
+            fs = fs.strip()
+            if fs and re.fullmatch(r"[A-Za-z0-9_-]+", fs) and fs not in force_sids:
+                force_sids.append(fs)
+        today = _cached_agg("today", lambda: range_usage(
+            con, _epoch_ms(_day_start()), _epoch_ms(_day_start() + timedelta(days=1))))
+        rows = _scan_session_ids(con)
+        # v9：force 会话在本库的真实存在性（session 行或任一 usage 行）。远端数据源
+        # 双向依赖它：本地已存在 → 不去远端白跑；远端按同款判定区分"确无此会话"与
+        # "零值快照"（负缓存的依据）。两次索引点查 <1ms。
+        known_sids = []
+        if force_sids:
+            qmarks = ",".join("?" * len(force_sids))
+            have_local = {r[0] for r in con.execute(
+                f"select id from session where id in ({qmarks})", force_sids)}
+            have_local |= {r[0] for r in con.execute(
+                f"select distinct session_id from model_usage where session_id in ({qmarks})",
+                force_sids)}
+            known_sids = [s for s in force_sids if s in have_local]
+        # 远端补齐（v9）：本地不存在的 force 会话（SSH 远程会话）改查远端库
+        rcfg = _remote_cfg(cfg)
+        remote_by, remote_today, remote_err = {}, None, None
+        if rcfg and force_sids:
+            remote_by, remote_today, remote_err = _remote_fetch(force_sids, have_local, rcfg)
+        # 本地库里没有的 force 会话（远端/他机会话，或数据还没落库）。渲染端据此给提示：
+        # 零值不再只能靠用户猜"插件坏了"（issue #14），也区分"远端也没查到"（issue #10）。
+        not_local = [s for s in force_sids if s not in have_local] if force_sids else []
+        latest_sid = max(rows, key=lambda r: r[1])[0] if rows else None
+        if latest_sid:
+            base = _session_snapshot(con, latest_sid, cfg)
+        else:
+            # 空库（无任何 completed 请求）fallback：字段必须与 _session_snapshot 对齐，
+            # 否则 snapshot() 顶层读 base["code"]/["tools"]/["ctx_exc"] 直接 KeyError（v32 审查修复）
+            base = {"sid": "", "title": "", "active": False, "turns": 0, "requests": 0,
+                    "input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0,
+                    "total": 0, "tool_calls": 0, "retries": 0, "ctx": 0, "updated": "",
+                    "last_turn": dict(_EMPTY_TURN),
+                    "last": {"duration_ms": 0, "ttft_ms": 0, "model": "", "tps": 0},
+                    "code": {"add": None, "del": None, "files": None}, "ctx_exc": 0,
+                    "tools": {"total": 0, "errors": 0, "list": []},
+                    "sub": {"requests": 0, "total": 0, "input": 0, "output": 0, "cache_read": 0,
+                            "reasoning": 0, "cache_write": 0, "active": False, "list": []},
+                    "context_window": cfg["context_window"], "context_auto": False}
+        normal = sorted((r for r in rows if not str(r[0]).startswith("sess_subagent")),
+                        key=lambda r: -r[1])[:6]
+        suba = sorted((r for r in rows if str(r[0]).startswith("sess_subagent")),
+                      key=lambda r: -r[1])[:6]
+        ids = [r[0] for r in normal] + [r[0] for r in suba]
+        seen = set()
+        ids = [x for x in ids if not (x in seen or seen.add(x))]
+        if latest_sid and latest_sid not in ids:
+            ids.insert(0, latest_sid)
+        # 远端命中的会话不进本地 ids 循环（本地 _session_snapshot 查不到只会产出零值行）
+        remote_ids = [s for s in force_sids if s in remote_by]
+        for fs in reversed(force_sids):
+            if fs not in ids and fs not in remote_ids:
+                ids.insert(0, fs)
+        # recent 池瘦身（v8）：状态条只渲染 1 个会话，完整快照只给兜底候选
+        # （force + latest + 最近活跃前 2），其余长尾行走轻量查询（单会话 38ms→2ms）。
+        full_n = len(force_sids) + 3
+        rec = []
+        for i, sid in enumerate(ids):
+            if sid == latest_sid:
+                rec.append(base)   # base 本就是 latest 的完整快照，不重算第二遍
+            elif i < full_n:
+                rec.append(_session_snapshot(con, sid, cfg))
+            else:
+                rec.append(_light_snapshot(con, sid, cfg))
+        # rec 建好后把远端快照挂到池首：overlay 按 sid 匹配 mine，顺序只影响兜底展示
+        rec = [remote_by[s] for s in reversed(remote_ids)] + rec
+        return {
+            "session": base,
+            "last_turn": base["last_turn"],
+            "last": base["last"],
+            "today": {
+                "requests": today[0], "input": today[1], "output": today[2],
+                "cache_read": today[3], "total": today[4],
+                "reasoning": today[6], "retries": today[7], "cache_write": today[8],
+            },
+            # 远端数据源（v9）：显示远端会话时 overlay 用 remote_today 替代本地 today
+            "remote_today": remote_today,
+            "remote_error": remote_err,
+            "not_local": not_local,               # 不在本地库的 force 会话 id（issue #14 提示用）
+            "remote_enabled": bool(rcfg),         # 是否配了 remote 段（区分"没配"与"配了没查到"）
+            "known_sids": known_sids,
+            "context_window": base["context_window"],
+            "context_auto": base["context_auto"],
+            "code": base["code"],
+            "ctx_exc": base["ctx_exc"],
+            "tools": base["tools"],
+            "recent": rec,
+        }
+    finally:
+        con.close()
+
+
+# ---------- CLI ----------
+
+def serve():
+    """常驻查询服务（v8 泵配套）：省每次 ~60-100ms 的解释器启动+模块加载费。
+    stdin 每行一个请求（空行 = 无强制会话），stdout 每行一个 JSON 快照。
+    stdin EOF = 泵已退出（管道断开），随即退出——孤儿进程自清理。
+    每请求 snapshot() 内部新开 sqlite 连接：不持长读事务，WAL checkpoint 不受阻碍。"""
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            return
+        try:
+            out = json.dumps(snapshot(line.strip()))
+        except Exception as e:
+            out = json.dumps({"error": str(e)[:200]})   # 单次查询失败不杀常驻进程
+        sys.stdout.write(out + "\n")
+        sys.stdout.flush()
+
+
+def main(argv):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    cmd = argv[0] if argv else "now"
+    con = connect()
+    if cmd == "now":
+        print(render_current(con))
+    elif cmd == "json":
+        # ensure_ascii 默认 True：全部 \u 转义，保证注入 executeJavaScript 时无 U+2028 类语法风险
+        # 可选第二参数：强制纳入快照的会话 id，逗号分隔（各窗口当前会话，泵汇总上报）
+        force_sid = argv[1] if len(argv) > 1 else ""
+        print(json.dumps(snapshot(force_sid)))
+    elif cmd == "serve":
+        con.close()   # serve 自管连接（每请求新开），退掉 main 预建的这把
+        serve()
+    elif cmd == "today":
+        print(render_today(con))
+    elif cmd == "days":
+        print(render_days(con, int(argv[1]) if len(argv) > 1 else 7))
+    elif cmd == "sessions":
+        print(render_sessions(con, int(argv[1]) if len(argv) > 1 else 10))
+    elif cmd == "models":
+        print(render_models(con, int(argv[1]) if len(argv) > 1 else 7))
+    elif cmd == "workspace":
+        print(render_workspace(con, argv[1] if len(argv) > 1 else ""))
+    elif cmd == "session":
+        print(render_session_detail(con, argv[1] if len(argv) > 1 else ""))
+    elif cmd == "watch":
+        sec = int(argv[1]) if len(argv) > 1 else 5
+        while True:
+            print("\x1b[2J\x1b[H", end="")
+            print(render_current(con), flush=True)
+            print(L(f"\n(每 {sec}s 刷新, Ctrl+C 退出)", f"\n(refreshes every {sec}s, Ctrl+C to quit)"), flush=True)
+            time.sleep(sec)
+    else:
+        print(__doc__)
+    con.close()
+
+
+def render_today(con):
+    today = range_usage(con, _epoch_ms(_day_start()), _epoch_ms(_day_start() + timedelta(days=1)))
+    head = L(f"■ 今日 ({datetime.now():%Y-%m-%d %a})", f"■ Today ({datetime.now():%Y-%m-%d %a})")
+    row = L(f"  {today[0]} 次请求  input {fmt(today[1])} (cache read {fmt(today[3])})  "
+            f"output {fmt(today[2])}  合计 {fmt(today[4])}",
+            f"  {today[0]} requests  input {fmt(today[1])} (cache read {fmt(today[3])})  "
+            f"output {fmt(today[2])}  total {fmt(today[4])}")
+    return head + "\n" + row
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
