@@ -1254,6 +1254,30 @@
       }
       return last;
     }
+    /* 权限确认面板内的锚点改判：composer 被面板顶掉（display:none）后，面板里的
+     * 反馈输入框是该 pane 唯一候选——它比面板卡矮得多，cardOf 的高度熔断会在到达面板卡
+     * 之前 break，落到面板内部的选项/反馈包裹层，条就冒进面板里（最初的 bug：确认时条
+     * 跑进对话框）。输入框带 data-permission-* 标记时改判面板视觉卡：第一个「有边框且
+     * 有背景」的祖先（选项按钮只有背景无边框会跳过，rounded-2xl 面板卡二者俱全）。
+     * 普通输入框不走这条（closest 不命中），行为与 v62 完全一致。 */
+    function isCardLike(el) {
+      try {
+        var cs = getComputedStyle(el);
+        return cs.borderTopWidth !== "0px" && cs.backgroundColor !== "rgba(0, 0, 0, 0)";
+      } catch (e) { return false; }
+    }
+    function panelCardOf(el) {
+      try {
+        if (!el.closest || !el.closest('[data-permission-option-kind],[data-permission-feedback-option],[data-permission-rule-scopes]')) return null;
+      } catch (e) { return null; }
+      for (var p = el; p && p !== document.body; p = p.parentElement) {
+        if (isCardLike(p)) return p;
+      }
+      return null;
+    }
+    function anchorCardOf(el) {
+      return panelCardOf(el) || cardOf(el);
+    }
     /* 读原生 UI 的上下文总量（输入框工具行按钮的文本/aria-label，如"…总量 1,000,000"）。
      * 服务端下发、自动跟随模型，优先级高于 catalog 查表和 config fallback。 */
     var nativeCtx = { val: 0, at: 0 };
@@ -1282,7 +1306,7 @@
       composer = el;
       cardCache = null;
       if (composer) {
-        var c = cardOf(composer);
+        var c = anchorCardOf(composer);
         if (c && c !== document.body) cardCache = c;
       }
       if (cardCache) ensureCardPad();
@@ -1311,7 +1335,7 @@
       if (!composer && slot === 0) collectDiag();   // 一直找不到输入框的窗口：周期性写环境诊断（everMounted 门防覆盖）
       if (composer) {
         if (!cardCache || !cardCache.isConnected) {
-          var c = cardOf(composer);
+          var c = anchorCardOf(composer);
           cardCache = c && c !== document.body ? c : null;
         }
         if (cardCache) {
