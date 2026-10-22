@@ -171,6 +171,7 @@ python patch_install.py install
 | `zusage.py` | 重跑 install.py 同步副本后，泵检测到副本 mtime 变化即自动重启常驻 python（~2 秒生效）；一次性回退模式下仍是每次轮询新进程、下次轮询生效 |
 | `config.json`（数据目录） | 下次拉取时生效（拉取由 db 写入触发；完全空闲时最迟一个兜底心跳，默认 30s） |
 | `inject-main.cjs` 本身 / 首次安装 / 标准↔dev 互切 | 重跑 `python install.py` 后**需重启 ZCode**（注入行含绝对路径，脚本自动替换旧行） |
+| ZCode 官方升级覆盖 asar | 跑 `python autopatch.py apply` 补回注入（只解析头部即可判断，已注入时秒退） |
 
 ## 配置（config.json）
 
@@ -201,6 +202,22 @@ python patch_install.py install
 - 依赖 fuses `EmbeddedAsarIntegrityValidation=0`。官方一旦收紧此 fuse 或改入口结构，注入路线即失效（届时 `python install.py --remove` 剥离注入行即恢复原样）。
 - 修改客户端 asar 属非官方注入方式，ZCode 升级会覆盖，需重跑 install。
 - 上下文超限亮红依赖 db 中 `context_exceeded` 标记行；触发条件是请求真被服务端拒绝，无法本地模拟测试。
+
+## 升级 ZCode 之后（补注入）
+
+官方升级会整包覆盖 `app.asar`，注入行随之消失。`autopatch.py` 专门处理这件事，
+不必重跑整个安装：
+
+```bash
+python autopatch.py check   # 退出码 0=已注入 / 1=需要补 / 2=环境问题
+python autopatch.py apply   # 只在需要时补注入（静默，不弹监控窗口）
+```
+
+`check` 只解析 asar 头部（实测 74~99ms），开销可忽略，适合每次登录或由启动包装脚本调用；
+`apply` 只在检查失败时才重打包（307MB，十几秒）。
+
+接法建议：Windows 计划任务在登录时触发一次 `apply`——已注入时它 100ms 就退出，
+几乎无感，且完全不碰 ZCode 自己的启动路径，升级重建快捷方式也不受影响。
 
 ## 卸载
 
