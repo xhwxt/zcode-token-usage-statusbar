@@ -190,20 +190,26 @@ python patch_install.py install
   "resident": true,         // 常驻查询 python（zusage.py serve，省每次启动费 ~17MB 常驻内存）；false=回退一次性短进程
   "hot_reload": true,       // overlay.js 热更新开关（调试用）；false=改完需重启 ZCode
   "diag": false,            // 诊断落盘（写 diag-*.json），排障时才开，开着会持续 IO
-  "archive_days": 7,        // 超过 N 天未活动的会话视为旧会话；0 = 不归档
-  "archive_mode": "fold",   // off=不处理 / fold=折叠到底部 / hide=完全隐藏
-  "archive_hide": false,    // true = 旧会话不计入今日/汇总统计
+  "archive_days": 7,        // 超过 N 天未活动的会话视为旧会话；0 = 关闭
+  "archive_mode": "skip",   // off=不处理 / count=只统计 / skip=旧会话不进候选池（省查询）
   "context_window": 1000000 // 上下文兜底值（原生读数/模型目录都失败时用）
 }
 ```
 
-> 归档是按「会话自己的最后活动时间」判断的，正在用的会话不会被误标。
-> 它不提升启动速度（ZCode 本来就不预加载会话正文，实测占比不到 2ms），
-> 价值在于让列表和统计不被历史会话淹没。
+> 归档是按「会话自己的最后活动时间」判断的，正在用的会话和最新会话永远不会被误标。
+> 统计数字是全库口径：本机 76 个会话在 7 天阈值下会报出 51 个旧会话。
+> **`skip` 是唯一能减少查询量的模式**（1 天阈值下候选池从 12 个降到 2 个）；
+> `count` 只影响统计提示，不改变加载行为。
+>
+> 它不提升 ZCode 启动速度（客户端本来就不预加载会话正文，实测占比不到 2ms），
+> 插件也无法改动 ZCode 自己的侧栏列表——这里说的「不加载」指的是不进插件的候选池。
 
 ## 数据口径、性能与排查
 
 各数字的统计口径、性能实测数据、诊断手段（diag）与踩坑记录，见 **[docs/design-notes.md](docs/design-notes.md)**。
+
+装好之后怎么用（三个入口、每项设置改什么、升级 ZCode 后怎么补注入、出问题怎么排查），见
+**[docs/USAGE.md](docs/USAGE.md)**。启动开销的归因与实测见 [docs/PERF.md](docs/PERF.md)。
 
 ## 已知限制
 
