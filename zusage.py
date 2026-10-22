@@ -944,9 +944,36 @@ def _snapshot_with(con, force_sid=""):
                 "sub": {"requests": 0, "total": 0, "input": 0, "output": 0, "cache_read": 0,
                         "reasoning": 0, "cache_write": 0, "active": False, "list": []},
                 "context_window": cfg["context_window"], "context_auto": False}
-    normal = sorted((r for r in rows if not str(r[0]).startswith("sess_subagent")),
+    # 旧会话（v64）：阈值按各会话自己的最后活动时间算，不看"当前是否打开"——
+    # 正在用的会话 activity 一定新鲜，不会被误标。
+    # 模式只有两种实际行为（插件改不了 ZCode 自己的侧栏，所以不承诺"折叠"）：
+    #   count 老会话照常进候选池，只在统计里报出来
+    #   skip  老会话不进候选池 —— 唯一真正省掉每会话聚合查询的模式
+    # 旧值 fold / hide 作为别名保留，免得已写好的 config.json 失效。
+    days = cfg.get("archive_days")
+    try:
+        days = float(days) if days is not None else 7.0
+    except (TypeError, ValueError):
+        days = 7.0
+    amode = str(cfg.get("archive_mode") or "skip")
+    amode = {"fold": "count", "hide": "skip"}.get(amode, amode)
+    if amode not in ("off", "count", "skip"):
+        amode = "skip"
+    cutoff = _epoch_ms(datetime.now() - timedelta(days=days)) if days > 0 and amode != "off" else None
+
+    def _is_old(last):
+        return bool(cutoff is not None and last and last < cutoff)
+
+    # 强制会话（各窗口焦点）永远保留：正在看的会话不该因为阈值而被藏掉
+    keep = set(force_sids)
+    if latest_sid:
+        keep.add(latest_sid)
+    scanned = rows
+    if amode == "skip" and cutoff is not None:
+        scanned = [r for r in rows if r[0] in keep or not _is_old(r[1])]
+    normal = sorted((r for r in scanned if not str(r[0]).startswith("sess_subagent")),
                     key=lambda r: -r[1])[:6]
-    suba = sorted((r for r in rows if str(r[0]).startswith("sess_subagent")),
+    suba = sorted((r for r in scanned if str(r[0]).startswith("sess_subagent")),
                   key=lambda r: -r[1])[:6]
     ids = [r[0] for r in normal] + [r[0] for r in suba]
     seen = set()
@@ -971,21 +998,22 @@ def _snapshot_with(con, force_sid=""):
             rec.append(_light_snapshot(con, sid, cfg))
     # rec 建好后把远端快照挂到池首：overlay 按 sid 匹配 mine，顺序只影响兜底展示
     rec = [remote_by[s] for s in reversed(remote_ids)] + rec
-    # 旧会话标记（v64）：按 config.archive_days 给每个候选打 old 标记，
-    # 渲染端据此折叠/隐藏。用各会话自己的最后活动时间判断，不看"当前是否打开"——
-    # 正在用的会话 activity 一定新鲜，不会被误标。
-    days = cfg.get("archive_days")
-    try:
-        days = float(days) if days is not None else 7.0
-    except (TypeError, ValueError):
-        days = 7.0
-    cutoff = _epoch_ms(datetime.now() - timedelta(days=days)) if days > 0 else None
-    archived = 0
+    # 旧会话统计（v64）：按全库会话算，不看池。池只装最近 6+6 个，池内几乎不可能是旧的，
+    # 拿池当分母会得到一个恒为 0 的计数（实测 7 天阈值下池内旧会话为 0，而全库有 51 个）。
+    total_sessions = len(rows)
+    old_sessions = 0
+    if cutoff is not None:
+        old_sessions = sum(1 for r in rows if r[0] not in keep and _is_old(r[1]))
+    # fold 模式：老会话只在统计里体现，不进池——所以池内标记恒为 false；这里仍给每个
+    # 行打 old 字段（结构完整），值由"是否在池内且已过期"决定，实际始终 False。
     for r in rec:
-        last = r.get("last_at") or 0
-        r["old"] = bool(cutoff is not None and last and last < cutoff)
-        if r["old"]:
-            archived += 1
+        r["old"] = False
+    # hide 模式真正跳过加载的数量：池外的旧会话数
+    hidden = 0
+    if amode == "skip":
+        in_pool = {x.get("sid") for x in rec}
+        hidden = sum(1 for r in rows
+                     if r[0] not in in_pool and r[0] not in keep and _is_old(r[1]))
     return {
         "session": base,
         "last_turn": base["last_turn"],
@@ -1007,12 +1035,14 @@ def _snapshot_with(con, force_sid=""):
         "ctx_exc": base["ctx_exc"],
         "tools": base["tools"],
         "recent": rec,
-        # 归档元信息（v64）：渲染端按 mode 决定折叠还是隐藏，并显示"已归档 N 个"
+        # 归档元信息（v64）：old = 全库超过阈值的会话数，total = 全库会话数。
+        # 两者都不按池算——池只有 12 个"最近"会话，拿它当分母没有参考意义。
         "archive": {
             "days": days,
-            "mode": cfg.get("archive_mode") or "fold",
-            "count": archived,
-            "total": len(rec),
+            "mode": amode,
+            "old": old_sessions,
+            "hidden": hidden,          # hide 模式下因阈值而没进池的会话数
+            "total": total_sessions,
         },
     }
 

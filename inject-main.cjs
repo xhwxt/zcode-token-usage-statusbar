@@ -83,7 +83,12 @@ function pushOnce(wc, payload) {
    * overlay 收到 mine 字段就优先显示它，不再多窗口共享同一个猜测。
    * 必须对象合并后序列化，禁止对 JSON 字符串做括号手术——v34 首版 slice 掐尾少补一个
    * 右括号，生成语法错误代码且失败只进静默 catch，全部窗口停在初始零值（实测翻车）。 */
-  const obj = activeSid.has(wc.id) ? Object.assign({}, payload, { mine: activeSid.get(wc.id) || "" }) : payload;
+  /* v64：语言以 config.json 为准随快照下发。overlay 的语言原先只存渲染进程 localStorage，
+   * 完整设置窗改 config.lang 对条面毫无效果；这里带上 cfg.lang，overlay 收到即切换并回写
+   * localStorage（保持旧缓存兼容）。 */
+  const lang = readCfgCached().lang === "en" ? "en" : "zh";
+  const base = Object.assign({}, payload, { lang });
+  const obj = activeSid.has(wc.id) ? Object.assign({}, base, { mine: activeSid.get(wc.id) || "" }) : base;
   /* U+2028/2029 转义：JSON.stringify 会输出裸字符，放进 executeJavaScript 字符串字面量
    * 有语法风险（zusage.py 侧 ensure_ascii 的同款考量；会话标题可能含任意文本） */
   const js = `window.__zusageUpdate && window.__zusageUpdate(${JSON.stringify(obj).replace(/[\u2028\u2029]/g, (c) => c === "\u2028" ? "\\u2028" : "\\u2029")})`;
@@ -115,10 +120,12 @@ try {
 const CFG_EDITABLE = {
   activity_min_ms: "int", heartbeat_ms: "int", hot_reload: "bool", diag: "bool",
   resident: "bool", lang: "enum", context_window: "int",
-  archive_days: "int", archive_hide: "bool", archive_mode: "enum",
+  archive_days: "int", archive_mode: "enum",
 };
 const CFG_LANGS = ["zh", "en"];
-const CFG_ARCHIVE_MODES = ["off", "hide", "fold"];
+/* 旧会话处理：count = 只统计不干预；skip = 老会话不进候选池（真正省查询）；
+ * off = 关闭。fold/hide 是 v64 早期用过的名字，作为别名继续接受。 */
+const CFG_ARCHIVE_MODES = ["off", "count", "skip", "fold", "hide"];
 
 function coerce(key, val) {
   const kind = CFG_EDITABLE[key];
@@ -150,11 +157,12 @@ function cfgPublic() {
   if (out.context_window === undefined) out.context_window = 128000;
   if (out.lang === undefined) out.lang = "zh";
   if (out.archive_days === undefined) out.archive_days = 7;
-  if (out.archive_mode === undefined) out.archive_mode = "fold";
+  if (out.archive_mode === undefined) out.archive_mode = "skip";
+  /* 旧名归一：设置窗只认 count/skip/off，读历史配置时把 fold/hide 翻过来 */
+  out.archive_mode = { fold: "count", hide: "skip" }[out.archive_mode] || out.archive_mode;
   out.hot_reload = c.hot_reload !== false;
   out.diag = c.diag === true;
   out.resident = c.resident !== false;
-  out.archive_hide = c.archive_hide === true;
   out.__python_path = c.python_path || "";
   return out;
 }
@@ -183,6 +191,11 @@ function cfgWrite(patch) {
   }
   cfgMtime = 0;          // 让 readCfgCached 立刻重读
   cfgCache = null;
+  /* 语言等纯显示项不走查询：立刻按新配置重推最近快照（含 lang），条面即时切换，
+   * 不必等下一次 db 写入。其余字段也顺带享受"保存即生效"。 */
+  if (lastPayload) {
+    for (const wc of webContents.getAllWebContents()) pushOnce(wc, lastPayload);
+  }
   scheduleRetry(200);    // 立即按新配置拉一次
   return { ok: true, changed, cfg: cfgPublic() };
 }

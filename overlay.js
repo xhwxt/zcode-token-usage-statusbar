@@ -71,6 +71,14 @@
   window.__zusageUpdate = function (d) {
     if (stale()) return;
     state.data = d;
+    /* v64：语言以 config.json 为准（主进程随快照下发）。收到不同语言就整条重建，
+     * 免得"设置窗里改了语言、条面还是旧的"。localStorage 仍写一份作离线兜底。
+     * buildPanel/rebuildExcBubble 是各实例的闭包方法，只能经 renderAll(true) 走 rebuild。 */
+    if (d && (d.lang === "en" || d.lang === "zh") && d.lang !== state.lang) {
+      state.lang = d.lang;
+      lsSet(LS.lang, state.lang);
+      try { renderAll(true); } catch (e) { }
+    }
     for (var i = 0; i < instances.length; i++) {
       try { instances[i].render(d); } catch (e) { FATAL.updateErr = String((e && e.stack) || e); }
     }
@@ -954,26 +962,32 @@
       panel.querySelector(".zu-ctxov").value = state.ctxOv;
       syncArchNote();
     }
-    /* v64：归档现状（读取快照里的 archive 元信息，不额外查询） */
+    /* v64：归档现状（读取快照里的 archive 元信息，不额外查询）。
+     * 数字是全库口径：old = 超过阈值的会话数，total = 全库会话数。
+     * skip 模式额外报 hidden（因阈值而未进候选池的会话数）。 */
     function syncArchNote() {
       var el = panel.querySelector(".zu-archnote");
       if (!el) return;
       var a = state.data && state.data.archive;
       if (!a) { el.textContent = L("暂无数据", "no data yet"); return; }
-      var n = a.count | 0, total = a.total | 0;
-      if (!a.days) {
-        el.textContent = L("未启用（阈值为 0）", "disabled (threshold is 0)");
+      var n = a.old | 0, total = a.total | 0, skipped = a.hidden | 0;
+      if (!a.days || a.mode === "off") {
+        el.textContent = L("未启用（阈值 0 或处理方式为不处理）", "disabled (threshold 0 or mode off)");
         return;
       }
       if (!n) {
-        el.textContent = L(a.days + " 天内有活动的会话共 " + total + " 个，无旧会话",
+        el.textContent = L("全部 " + total + " 个会话在 " + a.days + " 天内都有活动",
           "all " + total + " sessions active within " + a.days + " days");
         return;
       }
-      var modeTxt = a.mode === "hide" ? L("隐藏", "hidden")
-        : a.mode === "fold" ? L("折叠", "folded") : L("不处理", "untouched");
-      el.textContent = L(n + " / " + total + " 个会话超过 " + a.days + " 天未活动（" + modeTxt + "）",
-        n + " / " + total + " sessions idle over " + a.days + " days (" + modeTxt + ")");
+      if (a.mode === "skip") {
+        el.textContent = L(n + " / " + total + " 个会话超过 " + a.days + " 天未活动，其中 " +
+          skipped + " 个不加载",
+          n + " / " + total + " sessions idle over " + a.days + " days, " + skipped + " not loaded");
+        return;
+      }
+      el.textContent = L(n + " / " + total + " 个会话超过 " + a.days + " 天未活动（仅统计）",
+        n + " / " + total + " sessions idle over " + a.days + " days (stats only)");
     }
     gear.addEventListener("click", function (e) {
       e.stopPropagation();
@@ -1033,6 +1047,9 @@
       if (t2.name === "zu-lang") {
         state.lang = t2.value;
         persist();
+        /* v64：同时写回 config.json，让完整设置窗与齿轮面板共用同一事实源
+         * （否则两处各改各的，下次开设置窗会显示与条面不一致的语言）。 */
+        bridgeCall("cfg:set", { lang: state.lang }).catch(function () { });
         buildPanel();   // 面板自身文案随语言重建（含 radio 勾选态）
         rebuildExcBubble();
         renderAll(true);   // 条面单位与 tooltip 文案随语言刷新（含各实例面板文案重建）

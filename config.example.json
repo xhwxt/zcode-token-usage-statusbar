@@ -5,8 +5,7 @@
   "hot_reload": true,
   "diag": false,
   "archive_days": 7,
-  "archive_mode": "fold",
-  "archive_hide": false,
+  "archive_mode": "skip",
   "context_window": 1000000,
   "lang": "zh",
   "remote": {

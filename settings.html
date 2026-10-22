@@ -460,20 +460,13 @@ button.linkish:hover{color:var(--ink);border:0}
     </div>
 
     <div class="row">
-      <div class="lbl"><b>处理方式</b><em>旧会话在列表里怎么显示</em></div>
+      <div class="lbl"><b>处理方式</b><em>count 只统计；skip 让旧会话不进候选池</em></div>
       <div class="ctl">
         <select id="archive_mode">
           <option value="off">不处理</option>
-          <option value="fold">折叠到底部</option>
-          <option value="hide">完全隐藏</option>
+          <option value="count">只统计（不干预加载）</option>
+          <option value="skip">不加载旧会话</option>
         </select>
-      </div>
-    </div>
-
-    <div class="row">
-      <div class="lbl"><b>从统计中排除</b><em>今日与汇总不把旧会话算进去</em></div>
-      <div class="ctl">
-        <label class="check"><input type="checkbox" id="archive_hide"><span>排除旧会话</span></label>
       </div>
     </div>
   </div>
@@ -559,8 +552,8 @@ button.linkish:hover{color:var(--ink);border:0}
 "use strict";
 var api = window.__zusageApi || null;
 var FIELDS = ["activity_min_ms","heartbeat_ms","resident","archive_days","archive_mode",
-              "archive_hide","lang","context_window","hot_reload","diag"];
-var BOOLS = { resident:1, archive_hide:1, hot_reload:1, diag:1 };
+              "lang","context_window","hot_reload","diag"];
+var BOOLS = { resident:1, hot_reload:1, diag:1 };
 
 function setStatus(msg, cls) {
   var el = document.getElementById("status");
@@ -568,14 +561,18 @@ function setStatus(msg, cls) {
   el.className = cls || "";
 }
 
-/* 归档现状：用真实数字排成看板（规范第 4 条：数字即装饰，但必须是真的） */
+/* 归档现状：用真实数字排成看板（规范第 4 条：数字即装饰，但必须是真的）。
+ * 第三格说清楚"这个模式实际做了什么"——只有 hide 会少跑查询，其余只是显示层差别。 */
 function renderArch(cfg) {
   var el = document.getElementById("archstat");
   var days = parseFloat(cfg.archive_days);
+  var mode = cfg.archive_mode || "fold";
   if (!el) return;
-  if (!isFinite(days) || days <= 0) {
+  if (!isFinite(days) || days <= 0 || mode === "off") {
     el.innerHTML = '<span class="cap">未启用</span>' +
-      '<span class="sep">│</span><span class="num">阈值 0</span>';
+      '<span class="sep">│</span><span class="num">阈值 ' + (isFinite(days) ? days : 0) + '</span>' +
+      '<span class="cap">天</span>' +
+      '<span class="sep">│</span><span class="num">全部加载</span>';
     return;
   }
   el.innerHTML =
@@ -584,10 +581,10 @@ function renderArch(cfg) {
     '<span class="cap">天</span>' +
     '<span class="sep">│</span>' +
     '<span class="cap">处理</span>' +
-    '<span class="num">' + ({off:"不处理",fold:"折叠",hide:"隐藏"}[cfg.archive_mode] || "折叠") + '</span>' +
+    '<span class="num">' + ({count:"只统计",skip:"不加载"}[mode] || "只统计") + '</span>' +
     '<span class="sep">│</span>' +
-    '<span class="cap">统计</span>' +
-    '<span class="num">' + (cfg.archive_hide ? "已排除" : "包含") + '</span>';
+    '<span class="cap">额外开销</span>' +
+    '<span class="num">' + (mode === "skip" ? "节省" : "不省") + '</span>';
 }
 
 function fill(cfg, runtime) {
@@ -628,6 +625,14 @@ function load() {
     setStatus("已加载");
   } catch (e) { setStatus("读取失败：" + String(e.message || e), "err"); }
 }
+
+/* 改归档两项时立刻刷新看板，不必等保存（看板描述的是"将要生效"的配置） */
+["archive_days", "archive_mode"].forEach(function (k) {
+  var el = document.getElementById(k);
+  if (!el) return;
+  el.addEventListener("input", function () { renderArch(readForm()); });
+  el.addEventListener("change", function () { renderArch(readForm()); });
+});
 
 document.getElementById("advBtn").addEventListener("click", function () {
   var body = document.getElementById("advBody");
