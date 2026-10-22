@@ -126,6 +126,19 @@ One command does it all: locate the ZCode installation (`ZCODE_ASAR` environment
 
 Reads `~/.zcode/cli/db/db.sqlite` (`model_usage` / `turn_usage` / `tool_usage` — one row per model request), strictly read-only, never online. Numbers refresh event-driven when a request completes; when idle there are zero extra processes and zero polling.
 
+## Re-applying after a ZCode update
+
+ZCode updates overwrite `app.asar`, which removes the injection. `autopatch.py` puts it back
+without redoing the whole installation:
+
+```bash
+python autopatch.py check   # exit 0 = injected, 1 = needs re-patch, 2 = environment problem
+python autopatch.py apply   # re-inject only if needed (silent, no monitor window)
+```
+
+`check` only parses the asar header (~100ms) and is cheap enough to run on every login or
+from a launcher wrapper. `apply` repacks only when the check fails.
+
 ## Uninstall
 
 ```bash
@@ -139,7 +152,7 @@ Uninstall does not rely on a backup: it only adds/removes this tool's own inject
 - Accounting semantics: totals (`total` / 合计) = input + output as recorded by the client (`computed_total_tokens`); cache-read tokens are already **inside** input — don't add them again. Reasoning tokens are provider-reported only (e.g. DeepSeek reports them inside output; some GLM model ids never report them), so treat the reasoning split as informational.
 - A session's usage is attributed to the workspace directory it currently belongs to; `model_usage` has no workspace dimension, so usage from before a session was moved to another workspace counts toward the new one. Subagent sessions carry the same directory as their parent — the `workspace:` scope groups them via `parent_id` to avoid double counting.
 - Data semantics, performance measurements, diagnostics and pitfall notes (Chinese) live in [docs/design-notes.md](docs/design-notes.md).
-- Patching app.asar is an unofficial injection route; ZCode updates overwrite it — re-run install after upgrading.
+- Patching app.asar is an unofficial injection route; ZCode updates overwrite it — run `python autopatch.py apply` (or re-run install) after upgrading.
 - Non-default install locations: pass `--root <ZCode directory>` (recommended — the platform's fixed `resources/app.asar` is appended) or `--asar <full app.asar path>`, or set the `ZCODE_ASAR` environment variable; the location is remembered after the first successful run.
 - Auto-detection and the fallback scan only accept a target confirmed to be ZCode (a sibling `ZCode.exe`, or a package `name` containing zcode), so other Electron apps on the same machine (e.g. opencode) are never injected (added with the issue #6 fix).
 - macOS support was added in v60 (issue #2). Windows is the fully tested platform; the author has no macOS device, so macOS is untested — issues and feedback are welcome.

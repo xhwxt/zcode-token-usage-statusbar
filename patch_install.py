@@ -300,8 +300,9 @@ def cleanup_legacy_bak():
 
 # ---------- 安装 / 卸载 ----------
 
-def install(finalize=False):
-    """返回 True=已安装/已指向当前目录，False=失败或待收尾。"""
+def install(finalize=False, monitor=True):
+    """返回 True=已安装/已指向当前目录，False=失败或待收尾。
+    monitor=False：不弹安装监控窗口（autopatch 等自动场景用，避免干扰）。"""
     assert LOADER.exists(), L(f"loader 缺失：{LOADER}", f"loader missing: {LOADER}")
     if not os.access(ASAR, os.W_OK) or not os.access(ASAR.parent, os.W_OK):
         print(L(f"[权限] app.asar 或所在目录不可写（Linux 上 /opt 等系统位置需要 root）：{ASAR}",
@@ -334,22 +335,25 @@ def install(finalize=False):
             os.replace(TMP, ASAR)
             print(L("\n客户端运行中，但 asar 原子替换成功（运行中进程仍读旧数据）。",
                     "\nZCode is running, but the asar was replaced atomically (running processes keep reading the old data)."))
-            print(L("重启 ZCode 后悬浮条生效；已弹出监控窗口，确认生效后自动关闭。",
-                    "The floating bar activates after restarting ZCode; a monitor window has opened and will close itself once the load is confirmed."))
+            print(L("重启 ZCode 后悬浮条生效。" + ("已弹出监控窗口，确认生效后自动关闭。" if monitor else ""),
+                    "The floating bar activates after restarting ZCode." + (
+                        " A monitor window has opened and will close itself once the load is confirmed." if monitor else "")))
             cleanup_legacy_bak()
-            launch_monitor(time.time())
+            if monitor: launch_monitor(time.time())
             return True
         except OSError as e:
-            print(L(f"\n运行中替换失败（{e}）。已弹出监控窗口：完全退出 ZCode 后会自动完成替换，",
-                    f"\nReplacement while running failed ({e}). A monitor window has opened: it finishes the replacement once ZCode quits completely,"))
+            print(L(f"\n运行中替换失败（{e}）。" + ("已弹出监控窗口：完全退出 ZCode 后会自动完成替换，" if monitor else "完全退出 ZCode 后重试，"),
+                    f"\nReplacement while running failed ({e}). " + (
+                        "A monitor window has opened: it finishes the replacement once ZCode quits completely," if monitor else "Retry after fully quitting ZCode,")))
             print(L("或之后手动执行：python patch_install.py install --finalize",
                     "or run manually afterwards: python patch_install.py install --finalize"))
-            launch_monitor(time.time())
+            if monitor: launch_monitor(time.time())
             return False
     os.replace(TMP, ASAR)
     print(L("完成。启动 ZCode 即可在窗口底部看到悬浮条。", "Done. Start ZCode and the floating bar appears at the bottom of the window."))
     cleanup_legacy_bak()
-    launch_monitor(time.time())
+    if monitor:
+        launch_monitor(time.time())
     return True
 
 
