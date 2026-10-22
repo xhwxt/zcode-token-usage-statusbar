@@ -241,6 +241,9 @@ python patch_install.py install
 装好之后怎么用（三个入口、每项设置改什么、升级 ZCode 后怎么补注入、出问题怎么排查），见
 **[docs/USAGE.md](docs/USAGE.md)**。启动开销的归因与实测见 [docs/PERF.md](docs/PERF.md)。
 
+本仓库是 fork。上游没合并时怎么用上这些改动（离线包 / fork 分支 / 只挑单个修复），
+见 **[docs/IF-UPSTREAM-IGNORES.md](docs/IF-UPSTREAM-IGNORES.md)**。
+
 ## 已知限制
 
 - 口径说明：合计 = input + output（客户端 `computed_total_tokens` 原值），缓存读已含在 input 内、不要重复相加；reasoning（模型推理/思维链 token）仅部分提供方上报（DeepSeek 系上报且含在 output 内，部分 GLM 模型 id 恒不上报），推理拆分仅供参考。
