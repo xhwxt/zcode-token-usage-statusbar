@@ -1,93 +1,464 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-ef-theme="dark" data-ef-accent="yellow">
 <head>
 <meta charset="utf-8">
 <title>ZCode Token 用量 · 设置</title>
 <style>
-  :root{
-    --bg:#16181d; --card:#1e2129; --line:#2c313c; --fg:#e6e8ee; --dim:#8b93a5;
-    --brand:#57c7ff; --ok:#3ddc97; --warn:#ffb454; --err:#ff6b6b;
-  }
-  *{box-sizing:border-box}
-  body{
-    margin:0; padding:22px 24px 28px; background:var(--bg); color:var(--fg);
-    font:13px/1.55 -apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
-    -webkit-font-smoothing:antialiased;
-  }
-  h1{font-size:15px;font-weight:600;margin:0 0 3px;letter-spacing:.2px}
-  .sub{color:var(--dim);font-size:12px;margin-bottom:18px}
-  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:14px}
-  .card > .cap{font-size:11px;font-weight:600;color:var(--dim);letter-spacing:.6px;text-transform:uppercase;margin-bottom:4px}
-  .row{display:flex;align-items:flex-start;gap:12px;padding:9px 0;border-top:1px solid var(--line)}
-  .row:first-of-type{border-top:0}
-  .row .lbl{flex:0 0 190px;padding-top:2px}
-  .row .lbl b{display:block;font-weight:500;font-size:12.5px}
-  .row .lbl em{display:block;color:var(--dim);font-size:11px;font-style:normal;margin-top:2px}
-  .row .ctl{flex:1 1 auto;display:flex;align-items:center;gap:9px;flex-wrap:wrap;min-width:0}
-  input[type=number],input[type=text],select{
-    background:#12141a;color:var(--fg);border:1px solid var(--line);border-radius:6px;
-    padding:6px 9px;font:inherit;font-size:12.5px;min-width:110px;
-  }
-  input[type=number]{width:120px}
-  input[type=text]{width:100%}
-  select{min-width:140px}
-  input:focus,select:focus{outline:none;border-color:var(--brand)}
-  input[type=checkbox]{accent-color:var(--brand);width:15px;height:15px;margin:2px 0 0}
-  .hint{color:var(--dim);font-size:11px}
-  .mono{font-family:Consolas,"SF Mono",Menlo,monospace;font-size:11.5px;color:var(--dim);word-break:break-all}
-  .footer{display:flex;align-items:center;gap:10px;margin-top:20px;position:sticky;bottom:0;background:var(--bg);padding:12px 0 2px}
-  button{
-    background:#252a34;color:var(--fg);border:1px solid var(--line);border-radius:7px;
-    padding:8px 17px;font:inherit;font-size:12.5px;cursor:pointer;transition:.15s;
-  }
-  button:hover{background:#2e343f}
-  button.primary{background:var(--brand);border-color:var(--brand);color:#08222e;font-weight:600}
-  button.primary:hover{filter:brightness(1.08)}
-  button:disabled{opacity:.5;cursor:default}
-  #status{margin-left:auto;font-size:12px;color:var(--dim);min-height:18px}
-  #status.ok{color:var(--ok)} #status.err{color:var(--err)} #status.warn{color:var(--warn)}
-  .adv-toggle{background:none;border:0;color:var(--dim);font-size:11.5px;padding:2px 0;cursor:pointer;text-decoration:underline}
-  .adv-toggle:hover{background:none;color:var(--fg)}
-  .hidden{display:none}
+/* ============================================================
+   终末地风味（endfield-ui）· 遵循 hhikr/endfield-ui-skill 规范
+   - 唯一强调色：acid yellow #FFFA00，只做填充，只表示"当前/可点/注意"
+   - 切角 = 可点击；展示容器一律直角；radius 全程 0
+   - 1px 细线分区，无阴影无发光无渐变（斜线纹为硬边允许）
+   - 宽体大写拉丁眉标 + 粗体中文；数字用 tabular figures
+   使用 dark 主题（设置窗口常驻系统侧，深色更不刺眼）
+   ============================================================ */
+:root{
+  --paper:#191919;
+  --panel:#222222;
+  --ink:#EDEDED;
+  --ink2:#A3A3A3;
+  --rule:#353535;
+  --chip:#2E2E2E;
+  --signal:#FFFA00;
+  --on-signal:#161616;
+  --trace:var(--signal);
+  --tag-bg:#3A3A3A;
+  --tag-fg:#EDEDED;
+  --danger:#FF8A7A;
+  --tri-a:#FF00F0;
+  --tri-b:#FFFA00;
+  --tri-c:#00FFA2;
+
+  --font-ui:"Saira","Noto Sans SC","Microsoft YaHei",system-ui,sans-serif;
+  --font-text:"Noto Sans SC","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:ui-monospace,"Cascadia Code",Consolas,monospace;
+  --wide:112%;
+  --wider:125%;
+
+  --cut:7px;
+  --cut-btn:8px;
+
+  --mech:cubic-bezier(.7,0,.2,1);
+  --snap:cubic-bezier(.16,1,.3,1);
+  --ease:cubic-bezier(.2,.7,.1,1);
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  background:var(--paper);
+  color:var(--ink);
+  font-family:var(--font-text);
+  font-size:15px;
+  line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+  overflow:hidden;
+}
+/* 底色等高线质感：只此一处，墨色 9%，不闭合 */
+body::before{
+  content:"";
+  position:fixed; inset:0;
+  background-image:
+    repeating-radial-gradient(circle at 12% -10%, transparent 0 42px,
+      rgba(237,237,237,.09) 42px 43px, transparent 43px 86px),
+    repeating-radial-gradient(circle at 92% 112%, transparent 0 52px,
+      rgba(237,237,237,.07) 52px 53px, transparent 53px 106px);
+  pointer-events:none;
+  z-index:0;
+}
+
+/* 三色条：屏幕开始处，只出现一次 */
+.tri{height:3px;display:flex;position:relative;z-index:2}
+.tri i{flex:1}
+.tri i:nth-child(1){background:var(--tri-a)}
+.tri i:nth-child(2){background:var(--tri-b)}
+.tri i:nth-child(3){background:var(--tri-c)}
+
+/* 深色命令栏：两套主题都深色；当前分区一小块黄 */
+.cmdbar{
+  display:flex;align-items:stretch;gap:0;
+  background:#161616;color:#EDEDED;
+  border-bottom:1px solid #000;
+  position:relative;z-index:2;
+}
+.cmdbar .brand{
+  display:flex;align-items:center;gap:10px;
+  padding:10px 18px;
+  border-right:1px solid #2a2a2a;
+}
+.cmdbar .brand .mark{
+  width:11px;height:11px;background:var(--signal);
+  clip-path:polygon(0 0,100% 0,100% 40%,40% 100%,0 100%);
+}
+.cmdbar .brand b{
+  font-family:var(--font-ui);
+  font-weight:700;font-size:13px;
+  letter-spacing:.14em;text-transform:uppercase;
+  color:#EDEDED;
+}
+.cmdbar .crumbs{
+  display:flex;align-items:center;gap:0;
+  font-family:var(--font-ui);font-size:12px;letter-spacing:.1em;
+  text-transform:uppercase;color:#8b8b8b;
+}
+.cmdbar .crumbs span{padding:0 12px}
+.cmdbar .crumbs span.on{
+  background:var(--signal);color:var(--on-signal);
+  font-weight:700;height:100%;display:flex;align-items:center;
+}
+.cmdbar .spacer{flex:1}
+.cmdbar .ver{
+  display:flex;align-items:center;padding:0 16px;
+  font-family:var(--font-mono);font-size:11px;color:#6f6f6f;
+}
+
+/* 主体：单栏阅读型布局 */
+.wrap{
+  position:relative;z-index:1;
+  height:calc(100vh - 3px - 45px);
+  overflow-y:auto;
+  padding:26px 28px 0;
+}
+.wrap::-webkit-scrollbar{width:10px}
+.wrap::-webkit-scrollbar-track{background:transparent}
+.wrap::-webkit-scrollbar-thumb{background:var(--rule);border:3px solid var(--paper)}
+
+/* // 眉标 + 中英成对标题 */
+.eyebrow{
+  font-family:var(--font-ui);
+  font-size:11px;letter-spacing:.14em;
+  text-transform:uppercase;
+  color:var(--ink2);
+  font-stretch:var(--wider);
+  margin:0 0 2px;
+}
+.eyebrow::before{content:"// ";color:var(--trace);font-weight:700}
+h2{
+  font-family:var(--font-text);
+  font-size:22px;font-weight:700;
+  line-height:1.45;margin:0 0 4px;
+}
+.lede{
+  color:var(--ink2);font-size:13px;margin:0 0 20px;
+  max-width:40rem;
+}
+.lede .mono{color:var(--ink2)}
+
+/* 分区：细线分隔，不用卡片边框+阴影 */
+.sec{border-top:1px solid var(--rule);padding:18px 0 6px}
+.sec:first-of-type{border-top:1px solid var(--trace)}
+.sec > .head{
+  display:flex;align-items:baseline;gap:10px;margin-bottom:4px;
+}
+.sec > .head .no{
+  font-family:var(--font-ui);font-stretch:var(--wider);
+  font-size:11px;font-weight:700;letter-spacing:.1em;
+  color:var(--ink2);
+}
+.sec > .head h3{
+  font-family:var(--font-text);font-size:15px;font-weight:700;
+  margin:0;line-height:1.5;
+}
+.sec > .head .en{
+  font-family:var(--font-ui);font-stretch:var(--wider);
+  font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--ink2);margin-left:auto;
+}
+
+/* 字段行 */
+.row{
+  display:flex;align-items:flex-start;gap:18px;
+  padding:11px 0;border-top:1px solid var(--rule);
+}
+.row:first-of-type{border-top:0}
+.row .lbl{flex:0 0 200px;padding-top:1px}
+.row .lbl b{
+  display:block;font-weight:600;font-size:13.5px;line-height:1.5;
+}
+.row .lbl em{
+  display:block;font-style:normal;font-size:11.5px;
+  color:var(--ink2);line-height:1.5;margin-top:2px;
+}
+.row .ctl{
+  flex:1 1 auto;display:flex;align-items:center;gap:10px;
+  flex-wrap:wrap;min-width:0;
+}
+
+/*控件：输入框直角 + 1px；获得焦点时 trace 色边 */
+input[type=number],select{
+  background:var(--panel);
+  color:var(--ink);
+  border:1px solid var(--rule);
+  border-radius:0;
+  padding:7px 10px;
+  font-family:var(--font-ui);
+  font-size:13px;
+  font-variant-numeric:tabular-nums;
+  font-stretch:var(--wide);
+  min-width:120px;
+  transition:border-color .15s var(--ease),background .15s var(--ease);
+}
+input[type=number]{width:128px}
+select{min-width:160px;cursor:pointer}
+input:focus,select:focus{
+  outline:none;border-color:var(--signal);background:#1b1b1b;
+}
+input[type=number]::-webkit-inner-spin-button{
+  opacity:.35;
+}
+
+/* 复选：方形墨块，选中填黄 */
+label.check{
+  display:inline-flex;align-items:center;gap:9px;
+  cursor:pointer;font-size:13px;user-select:none;
+  padding:5px 0;
+}
+label.check input{
+  appearance:none;-webkit-appearance:none;
+  width:15px;height:15px;margin:0;
+  border:1px solid var(--ink2);
+  border-radius:0;
+  background:transparent;
+  position:relative;cursor:pointer;
+  transition:background .1s var(--ease),border-color .1s var(--ease);
+}
+label.check input:checked{
+  background:var(--signal);border-color:var(--signal);
+}
+label.check input:checked::after{
+  content:"";
+  position:absolute;left:4px;top:1px;
+  width:4px;height:8px;
+  border-right:2px solid var(--on-signal);
+  border-bottom:2px solid var(--on-signal);
+  transform:rotate(42deg);
+}
+label.check input:focus-visible{
+  outline:2px solid var(--trace);outline-offset:2px;
+}
+
+/* 单位/提示小字 */
+.unit{
+  font-family:var(--font-ui);font-stretch:var(--wider);
+  font-size:10px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--ink2);
+}
+
+/* 只读字段：宽体小字 + 竖线分隔 */
+.meta{
+  font-family:var(--font-ui);font-stretch:var(--wide);
+  font-size:11.5px;color:var(--ink2);
+  font-variant-numeric:tabular-nums;
+  word-break:break-all;line-height:1.5;
+}
+
+/* 按钮：切角 = 可点击；悬停黄从左侧擦入 */
+button{
+  font-family:var(--font-ui);
+  font-stretch:var(--wide);
+  font-size:12px;font-weight:700;
+  letter-spacing:.08em;text-transform:uppercase;
+  color:var(--ink);
+  background:var(--chip);
+  border:1px solid var(--rule);
+  border-radius:0;
+  padding:9px 18px;
+  cursor:pointer;
+  position:relative;
+  overflow:hidden;
+  clip-path:polygon(0 0,100% 0,100% calc(100% - var(--cut-btn)),calc(100% - var(--cut-btn)) 100%,0 100%);
+  transition:color .12s var(--ease),border-color .12s var(--ease);
+  isolation:isolate;
+}
+button::before{
+  content:"";
+  position:absolute;inset:0;
+  background:var(--signal);
+  transform:scaleX(0);
+  transform-origin:left center;
+  transition:transform .22s var(--mech);
+  z-index:-1;
+}
+button:hover{border-color:var(--signal);color:var(--on-signal)}
+button:hover::before{transform:scaleX(1)}
+button:active{transform:translateY(1px)}
+button:focus-visible{outline:2px solid var(--trace);outline-offset:2px}
+button:disabled{opacity:.45;cursor:default}
+button:disabled:hover::before{transform:scaleX(0)}
+button:disabled:hover{color:var(--ink);border-color:var(--rule)}
+
+/* 主按钮：静止墨底，悬停擦黄 */
+button.primary{
+  background:var(--ink);
+  color:var(--paper);
+  border-color:var(--ink);
+}
+button.primary:hover{color:var(--on-signal)}
+
+/* 高级开关：文字型，无切角（不是主要操作） */
+button.linkish{
+  background:none;border:0;
+  clip-path:none;padding:4px 0;
+  color:var(--ink2);
+  font-family:var(--font-ui);font-size:11.5px;
+  letter-spacing:.1em;text-transform:uppercase;
+  font-weight:600;
+}
+button.linkish::before{display:none}
+button.linkish:hover{color:var(--ink);border:0}
+
+/* 提示条：白底细框 + 前面一面黄色小旗（不用红色） */
+.note{
+  display:flex;gap:10px;
+  border:1px solid var(--rule);
+  background:var(--panel);
+  padding:11px 13px;
+  font-size:12.5px;
+  color:var(--ink2);
+  line-height:1.6;
+  margin:14px 0 0;
+}
+.note .flag{
+  flex:0 0 auto;width:3px;
+  background:var(--signal);
+  margin-right:2px;
+}
+.note b{color:var(--ink);font-weight:600}
+
+/* 归档现状：数字装饰（真实数据） */
+.statline{
+  display:flex;align-items:baseline;gap:14px;
+  font-family:var(--font-ui);
+  font-variant-numeric:tabular-nums;
+  font-stretch:var(--wide);
+  margin:2px 0 0;
+}
+.statline .big{
+  font-size:26px;font-weight:800;line-height:1;
+  color:var(--ink);
+  letter-spacing:-.01em;
+}
+.statline .big.flag{color:var(--on-signal);background:var(--signal);padding:2px 7px 4px}
+.statline .sep{color:var(--rule)}
+.statline .cap{
+  font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--ink2);
+}
+.statline .num{
+  font-size:13px;font-weight:700;color:var(--ink);
+}
+
+/* 底栏：吸底，细线分隔 */
+.foot{
+  position:sticky;bottom:0;
+  display:flex;align-items:center;gap:11px;
+  padding:14px 28px 16px;
+  margin:20px -28px 0;
+  background:linear-gradient(to top,var(--paper) 72%,transparent);
+  border-top:1px solid var(--rule);
+  z-index:3;
+}
+.foot .grow{flex:1}
+#status{
+  font-family:var(--font-ui);font-stretch:var(--wide);
+  font-size:11.5px;letter-spacing:.06em;
+  color:var(--ink2);
+  font-variant-numeric:tabular-nums;
+  max-width:46%;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+#status.ok{color:var(--signal)}
+#status.err{color:var(--danger)}
+#status.warn{color:var(--ink2)}
+/* 保存成功时短暂闪一块黄，作为"已办"的机械回应 */
+#status.ok::before{content:"■ ";font-size:9px;vertical-align:1px}
+
+.hidden{display:none}
+@media (max-width:620px){
+  .row{flex-direction:column;gap:7px}
+  .row .lbl{flex:1 1 auto}
+  .wrap{padding:18px 16px 0}
+  .foot{padding:12px 16px 14px;margin-left:-16px;margin-right:-16px}
+}
 </style>
 </head>
 <body>
-  <h1>ZCode Token 用量 · 设置</h1>
-  <div class="sub">修改写入 <span class="mono" id="cfgpath">config.json</span></div>
 
-  <div class="card">
-    <div class="cap">刷新与采集</div>
+<div class="tri"><i></i><i></i><i></i></div>
+
+<div class="cmdbar">
+  <div class="brand"><span class="mark"></span><b>ZCode Token</b></div>
+  <div class="crumbs">
+    <span>Console</span>
+    <span class="on">Settings</span>
+  </div>
+  <div class="spacer"></div>
+  <div class="ver">token-usage-statusbar</div>
+</div>
+
+<div class="wrap">
+
+  <p class="eyebrow">Configuration</p>
+  <h2>状态条设置</h2>
+  <p class="lede">保存后约 1 秒生效。写入 <span class="mono" id="cfgpath">config.json</span></p>
+
+  <!-- 01 刷新与采集 -->
+  <div class="sec">
+    <div class="head">
+      <span class="no">01</span>
+      <h3>刷新与采集</h3>
+      <span class="en">Refresh</span>
+    </div>
+
     <div class="row">
       <div class="lbl"><b>活动期最小间隔</b><em>有数据库写入时的最快刷新节奏</em></div>
       <div class="ctl">
         <input type="number" id="activity_min_ms" min="300" step="100">
-        <span class="hint">毫秒，下限 300</span>
+        <span class="unit">ms / min 300</span>
       </div>
     </div>
+
     <div class="row">
       <div class="lbl"><b>兜底心跳</b><em>空闲时也定期检查一次，防文件事件丢失</em></div>
       <div class="ctl">
         <input type="number" id="heartbeat_ms" min="10000" step="1000">
-        <span class="hint">毫秒，下限 10000</span>
+        <span class="unit">ms / min 10000</span>
       </div>
     </div>
+
     <div class="row">
-      <div class="lbl"><b>常驻查询进程</b><em>复用 Python 进程省掉每次启动开销</em></div>
+      <div class="lbl"><b>常驻查询进程</b><em>复用 Python 进程，省掉每次启动开销</em></div>
       <div class="ctl">
-        <label><input type="checkbox" id="resident"> 启用（推荐）</label>
+        <label class="check"><input type="checkbox" id="resident"><span>启用（推荐）</span></label>
       </div>
     </div>
   </div>
 
-  <div class="card">
-    <div class="cap">旧会话归档</div>
+  <!-- 02 旧会话归档 -->
+  <div class="sec">
+    <div class="head">
+      <span class="no">02</span>
+      <h3>旧会话归档</h3>
+      <span class="en">Archive</span>
+    </div>
+
     <div class="row">
-      <div class="lbl"><b>归档阈值</b><em>超过这么多天未活动的会话视为旧会话</em></div>
+      <div class="lbl"><b>当前状态</b><em>依据各会话自己的最后活动时间判定</em></div>
       <div class="ctl">
-        <input type="number" id="archive_days" min="0" max="3650" step="1">
-        <span class="hint">天；0 = 不归档</span>
+        <div class="statline" id="archstat">
+          <span class="cap">loading</span>
+        </div>
       </div>
     </div>
+
+    <div class="row">
+      <div class="lbl"><b>归档阈值</b><em>超过这么多天未活动即视为旧会话</em></div>
+      <div class="ctl">
+        <input type="number" id="archive_days" min="0" max="3650" step="1">
+        <span class="unit">days / 0 = off</span>
+      </div>
+    </div>
+
     <div class="row">
       <div class="lbl"><b>处理方式</b><em>旧会话在列表里怎么显示</em></div>
       <div class="ctl">
@@ -98,16 +469,23 @@
         </select>
       </div>
     </div>
+
     <div class="row">
-      <div class="lbl"><b>从统计中排除</b><em>今日/汇总不把旧会话算进去</em></div>
+      <div class="lbl"><b>从统计中排除</b><em>今日与汇总不把旧会话算进去</em></div>
       <div class="ctl">
-        <label><input type="checkbox" id="archive_hide"> 排除旧会话</label>
+        <label class="check"><input type="checkbox" id="archive_hide"><span>排除旧会话</span></label>
       </div>
     </div>
   </div>
 
-  <div class="card">
-    <div class="cap">显示</div>
+  <!-- 03 显示 -->
+  <div class="sec">
+    <div class="head">
+      <span class="no">03</span>
+      <h3>显示</h3>
+      <span class="en">Display</span>
+    </div>
+
     <div class="row">
       <div class="lbl"><b>语言</b><em>状态条与设置界面</em></div>
       <div class="ctl">
@@ -117,45 +495,68 @@
         </select>
       </div>
     </div>
+
     <div class="row">
       <div class="lbl"><b>上下文窗口覆盖</b><em>留空 = 自动（原生 UI &gt; 模型目录）</em></div>
       <div class="ctl">
         <input type="number" id="context_window" min="1000" step="1000" placeholder="自动">
+        <span class="unit">tokens</span>
       </div>
     </div>
   </div>
 
-  <button class="adv-toggle" id="advBtn">▸ 高级</button>
-  <div class="card hidden" id="advCard">
-    <div class="cap">高级 / 排障</div>
-    <div class="row">
-      <div class="lbl"><b>热更新</b><em>overlay.js 改动后免重启自动重载</em></div>
-      <div class="ctl"><label><input type="checkbox" id="hot_reload"> 启用</label></div>
+  <!-- 高级 -->
+  <div class="sec">
+    <div class="head">
+      <span class="no">04</span>
+      <h3>高级</h3>
+      <span class="en">Diagnostics</span>
+      <button class="linkish" id="advBtn" style="margin-left:12px">展开</button>
     </div>
-    <div class="row">
-      <div class="lbl"><b>诊断落盘</b><em>写 diag-*.json 供排障，会持续 IO</em></div>
-      <div class="ctl"><label><input type="checkbox" id="diag"> 启用</label></div>
+
+    <div id="advBody" class="hidden">
+      <div class="row">
+        <div class="lbl"><b>热更新</b><em>overlay.js 改动后免重启自动重载</em></div>
+        <div class="ctl">
+          <label class="check"><input type="checkbox" id="hot_reload"><span>启用</span></label>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="lbl"><b>诊断落盘</b><em>写 diag-*.json 供排障，会持续 IO</em></div>
+        <div class="ctl">
+          <label class="check"><input type="checkbox" id="diag"><span>启用</span></label>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="lbl"><b>Python 路径</b><em>安装时探测，只读</em></div>
+        <div class="ctl"><div class="meta" id="python_path">—</div></div>
+      </div>
+
+      <div class="row">
+        <div class="lbl"><b>运行时目录</b><em>注入文件所在位置，只读</em></div>
+        <div class="ctl"><div class="meta" id="runtime">—</div></div>
+      </div>
     </div>
-    <div class="row">
-      <div class="lbl"><b>Python 路径</b><em>安装时探测到的解释器，只读</em></div>
-      <div class="ctl"><div class="mono" id="python_path"></div></div>
-    </div>
-    <div class="row">
-      <div class="lbl"><b>运行时目录</b><em>注入文件所在位置，只读</em></div>
-      <div class="ctl"><div class="mono" id="runtime"></div></div>
+
+    <div class="note">
+      <div class="flag"></div>
+      <div><b>归档不会加快启动。</b>ZCode 启动只读取会话元数据（实测 0.24–1.28 ms），
+      正文按需加载，因此归档的价值在于让列表与统计更清爽，而非提速。</div>
     </div>
   </div>
 
-  <div class="footer">
+  <div class="foot">
     <button class="primary" id="saveBtn">保存</button>
     <button id="reloadBtn">重新加载</button>
+    <div class="grow"></div>
     <div id="status"></div>
   </div>
+</div>
 
 <script>
 "use strict";
-/* 本窗口由主进程以 data: URL 打开，没有 __zusageReq 泵（那是主窗口 overlay 用的）。
- * 主进程通过 window.__zusageCfg 预置配置；保存走 window.__zusageSave 回调。 */
 var api = window.__zusageApi || null;
 var FIELDS = ["activity_min_ms","heartbeat_ms","resident","archive_days","archive_mode",
               "archive_hide","lang","context_window","hot_reload","diag"];
@@ -167,6 +568,28 @@ function setStatus(msg, cls) {
   el.className = cls || "";
 }
 
+/* 归档现状：用真实数字排成看板（规范第 4 条：数字即装饰，但必须是真的） */
+function renderArch(cfg) {
+  var el = document.getElementById("archstat");
+  var days = parseFloat(cfg.archive_days);
+  if (!el) return;
+  if (!isFinite(days) || days <= 0) {
+    el.innerHTML = '<span class="cap">未启用</span>' +
+      '<span class="sep">│</span><span class="num">阈值 0</span>';
+    return;
+  }
+  el.innerHTML =
+    '<span class="cap">阈值</span>' +
+    '<span class="num">' + days + '</span>' +
+    '<span class="cap">天</span>' +
+    '<span class="sep">│</span>' +
+    '<span class="cap">处理</span>' +
+    '<span class="num">' + ({off:"不处理",fold:"折叠",hide:"隐藏"}[cfg.archive_mode] || "折叠") + '</span>' +
+    '<span class="sep">│</span>' +
+    '<span class="cap">统计</span>' +
+    '<span class="num">' + (cfg.archive_hide ? "已排除" : "包含") + '</span>';
+}
+
 function fill(cfg, runtime) {
   FIELDS.forEach(function (k) {
     var el = document.getElementById(k);
@@ -175,7 +598,8 @@ function fill(cfg, runtime) {
     else el.value = cfg[k] != null ? cfg[k] : "";
   });
   document.getElementById("python_path").textContent = cfg.__python_path || "(未设置)";
-  document.getElementById("runtime").textContent = runtime || "";
+  document.getElementById("runtime").textContent = runtime || "—";
+  renderArch(cfg);
 }
 
 function readForm() {
@@ -198,16 +622,32 @@ function load() {
   setStatus("读取中…");
   try {
     var got = api.get();
+    if (!got || !got.ok) { setStatus("读取失败：" + ((got && got.error) || "未知"), "err"); return; }
     fill(got.cfg, got.runtime);
     document.getElementById("cfgpath").textContent = got.path || "config.json";
-    setStatus("已加载", "ok");
+    setStatus("已加载");
   } catch (e) { setStatus("读取失败：" + String(e.message || e), "err"); }
 }
 
 document.getElementById("advBtn").addEventListener("click", function () {
-  var card = document.getElementById("advCard");
-  var open = card.classList.toggle("hidden") === false;
-  this.textContent = (open ? "▾" : "▸") + " 高级";
+  var body = document.getElementById("advBody");
+  var opened = body.classList.toggle("hidden") === false;
+  this.textContent = opened ? "收起" : "展开";
+  if (opened) {
+    /* 机械感：展开时逐行错位入场（规范：短、硬、不弹跳） */
+    var rows = body.querySelectorAll(".row");
+    for (var i = 0; i < rows.length; i++) {
+      (function (r, idx) {
+        r.style.opacity = "0";
+        r.style.transform = "translateY(-4px)";
+        setTimeout(function () {
+          r.style.transition = "opacity .2s cubic-bezier(.7,0,.2,1),transform .2s cubic-bezier(.7,0,.2,1)";
+          r.style.opacity = "1";
+          r.style.transform = "translateY(0)";
+        }, 38 * idx);
+      })(rows[i], i);
+    }
+  }
 });
 
 document.getElementById("saveBtn").addEventListener("click", function () {
@@ -219,8 +659,12 @@ document.getElementById("saveBtn").addEventListener("click", function () {
     var r = api.set(readForm());
     btn.disabled = false;
     if (!r || !r.ok) { setStatus("保存失败：" + ((r && r.error) || "未知"), "err"); return; }
-    if (r.cfg) fill(r.cfg, document.getElementById("runtime").textContent);
-    setStatus(r.changed ? "已保存 " + r.changed + " 项，约 1 秒内生效" : "没有变化", r.changed ? "ok" : "warn");
+    if (r.cfg) {
+      fill(r.cfg, document.getElementById("runtime").textContent);
+      document.getElementById("python_path").textContent =
+        r.cfg.__python_path || document.getElementById("python_path").textContent;
+    }
+    setStatus(r.changed ? "已保存 " + r.changed + " 项 · 约 1 秒生效" : "没有变化", r.changed ? "ok" : "warn");
   } catch (e) {
     btn.disabled = false;
     setStatus("保存失败：" + String(e.message || e), "err");
