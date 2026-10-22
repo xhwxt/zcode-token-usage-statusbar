@@ -9,3 +9,5 @@ diag-*.json
 .zcode/
 config.json
 .update-baseline.json
+dist/
+*.zip

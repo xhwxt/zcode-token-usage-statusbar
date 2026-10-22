@@ -112,6 +112,10 @@ ZCode 的插件机制（`plugin.json`）只能提供 MCP / skills / commands / h
 | 文件 | 作用 |
 |---|---|
 | `install.py` | **一键安装**：探测 ZCode 安装位置 → 复制运行时到数据目录 → 生成 config → 注入 asar → 注册 MCP → 装 /usage 命令 → 弹监控窗口。`--remove` 卸载，`--dry-run` 预览，`--no-mcp` 只装状态条，`--dev` 开发模式（不复制，注入直指本仓库目录）。 |
+| `bootstrap.py` | **给别人装用**：体检（Python 版本 / 文件齐备 / asar 定位 / ZCode 身份 / 注入状态 / 配置 / MCP）→ 按结论自动选动作。`--check` 只体检、`--repair` 只补注入、`--install` 完整安装、`--uninstall` 卸载、`--json` 机器可读。所有探测都打印试过哪些路径，不静默失败。 |
+| `package.py` | **打包**：生成自包含 zip（含 `INSTALL-给AI看.md`），对方解压跑 `python bootstrap.py` 即可，无需 git/联网/pip。`--no-docs` 出精简包。 |
+| `settings.html` + `settings-preload.cjs` | 独立设置窗（终末地风格）与其 preload 桥。字段编辑走主进程白名单 + 原子替换，`python_path` / `asar_path` 只读不下发。 |
+| `autopatch.py` | ZCode 升级后补注入：`check` 只解析 asar 头（74~99ms）返回退出码，`apply` 仅在需要时重打包。适合放进登录计划任务。 |
 | `overlay.js` | 状态条本体（渲染进程注入，自包含 IIFE）。fixed 悬浮在**窗口最底部**（条下只留 3px 缝，给输入卡片加 margin-bottom 上移让位），rAF 每帧跟随；输入框定位要求 textarea 在视口下半部（排除设置页等处的输入元素）。 |
 | `inject-main.cjs` | 主进程 loader：向每个窗口注入 overlay.js + **触发式监听 db 写入**（fs.watch db 目录，有写入→去抖 300ms→查询推送；空闲零进程零轮询，仅 30s 兜底心跳）。查询走**常驻 python**（`zusage.py serve` 行协议；意外退出自动重启、30s 内 3 次判不稳定回退一次性 spawn、zusage.py mtime 变化自动重启；stdin EOF 随泵退出自清理）。 |
 | `patch_install.py` | asar 注入/卸载工具（install.py 的底层，可单独用）：在入口 `out/main/index.js` 尾部追加/剥离本工具的 dynamic import 行 → 重打包 → 自检 → 原子替换。不制作也不依赖备份，卸载只动自己的注入行（其它工具后装的注入行不受影响）。幂等，自动替换旧注入行（迁移友好）。安装成功自动弹出监控窗口。 |
@@ -120,7 +124,7 @@ ZCode 的插件机制（`plugin.json`）只能提供 MCP / skills / commands / h
 | `usage_mcp.py` | 零依赖 stdio MCP server。 |
 | `config.example.json` | 运行配置模板（安装时生成到数据目录的 `config.json`；含本机路径，不入库）。 |
 
-**数据目录 `~/.zcode/zcode-token-usage-statusbar/`** 是标准安装的运行目录：运行时副本（`inject-main.cjs`/`overlay.js`/`zusage.py`/`usage_mcp.py`）、`config.json`、诊断产物 `diag-<n>.json`（每窗口一份，主进程定期回写）都在这里。本仓库只是源码，**clone 目录可以随意搬走或删除，不影响已安装的实例**。
+**数据目录 `~/.zcode/zcode-token-usage-statusbar/`** 是标准安装的运行目录：运行时副本（`inject-main.cjs`/`overlay.js`/`zusage.py`/`usage_mcp.py`/`settings.html`/`settings-preload.cjs`）、`config.json`、诊断产物 `diag-<n>.json`（每窗口一份，主进程定期回写）都在这里。本仓库只是源码，**clone 目录可以随意搬走或删除，不影响已安装的实例**。
 
 ## 安装（桌面版）
 
@@ -140,6 +144,31 @@ python install.py            # 加 --lang en 可让安装器/CLI/MCP 输出英�
 
 **ZCode 升级会覆盖 app.asar，重跑一次 `python install.py` 即可**（监控窗口提示"未检测到注入加载"通常就是这个原因）。
 
+### 让别人（或别的 AI）帮我装
+
+不想自己动手的话，把仓库打包成一个自包含的 zip 传给对方，对方解压后一条命令就行：
+
+```bash
+python package.py            # 生成 dist/zcode-token-usage-statusbar-v64.zip（约 1.5MB）
+```
+
+包里有 `INSTALL-给AI看.md`，用大白话写清了「按顺序跑哪三条命令、退出码各是什么意思、
+必须知道的四个前提」。整个过程不联网、不需要 git、不需要 pip。
+
+拿到包的人（或 AI）这样跑：
+
+```bash
+python bootstrap.py --check     # 先体检：0=健康 1=需要修 2=环境缺失
+python bootstrap.py             # 体检 + 按需自动修复（最省心）
+python bootstrap.py --install   # 完整安装 / 重装
+python bootstrap.py --repair    # 只补注入（ZCode 升级后最常见）
+python bootstrap.py --uninstall # 卸载
+```
+
+`bootstrap.py` 只做三件事：确认这是 ZCode（同级有 `ZCode.exe` 或包名含 zcode，
+避免误注入别的 Electron 应用）、校验运行时文件齐不齐、把结论翻译成可执行的下一步。
+加 `--json` 给机器读，适合让 AI 直接判断该走哪条分支。
+
 <details>
 <summary>手动分步安装（等价于 install.py 做的事）</summary>
 
@@ -147,6 +176,7 @@ python install.py            # 加 --lang en 可让安装器/CLI/MCP 输出英�
 # 0) 数据目录：复制运行时 + 配置（改 python_path 为你的 python.exe 绝对路径）
 mkdir -p ~/.zcode/zcode-token-usage-statusbar
 cp inject-main.cjs overlay.js zusage.py usage_mcp.py ~/.zcode/zcode-token-usage-statusbar/
+cp settings.html settings-preload.cjs ~/.zcode/zcode-token-usage-statusbar/   # 独立设置窗
 cp config.example.json ~/.zcode/zcode-token-usage-statusbar/config.json   # 然后编辑它
 
 # 1) 状态条：注入 asar（注入行须指向数据目录的 inject-main.cjs；ZCode 运行中也可执行；
