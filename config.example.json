@@ -4,6 +4,9 @@
   "heartbeat_ms": 30000,
   "hot_reload": true,
   "diag": false,
+  "archive_days": 7,
+  "archive_mode": "fold",
+  "archive_hide": false,
   "context_window": 1000000,
   "lang": "zh",
   "remote": {

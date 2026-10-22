@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>ZCode Token 用量 · 设置</title>
+<style>
+  :root{
+    --bg:#16181d; --card:#1e2129; --line:#2c313c; --fg:#e6e8ee; --dim:#8b93a5;
+    --brand:#57c7ff; --ok:#3ddc97; --warn:#ffb454; --err:#ff6b6b;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:22px 24px 28px; background:var(--bg); color:var(--fg);
+    font:13px/1.55 -apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  h1{font-size:15px;font-weight:600;margin:0 0 3px;letter-spacing:.2px}
+  .sub{color:var(--dim);font-size:12px;margin-bottom:18px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:14px}
+  .card > .cap{font-size:11px;font-weight:600;color:var(--dim);letter-spacing:.6px;text-transform:uppercase;margin-bottom:4px}
+  .row{display:flex;align-items:flex-start;gap:12px;padding:9px 0;border-top:1px solid var(--line)}
+  .row:first-of-type{border-top:0}
+  .row .lbl{flex:0 0 190px;padding-top:2px}
+  .row .lbl b{display:block;font-weight:500;font-size:12.5px}
+  .row .lbl em{display:block;color:var(--dim);font-size:11px;font-style:normal;margin-top:2px}
+  .row .ctl{flex:1 1 auto;display:flex;align-items:center;gap:9px;flex-wrap:wrap;min-width:0}
+  input[type=number],input[type=text],select{
+    background:#12141a;color:var(--fg);border:1px solid var(--line);border-radius:6px;
+    padding:6px 9px;font:inherit;font-size:12.5px;min-width:110px;
+  }
+  input[type=number]{width:120px}
+  input[type=text]{width:100%}
+  select{min-width:140px}
+  input:focus,select:focus{outline:none;border-color:var(--brand)}
+  input[type=checkbox]{accent-color:var(--brand);width:15px;height:15px;margin:2px 0 0}
+  .hint{color:var(--dim);font-size:11px}
+  .mono{font-family:Consolas,"SF Mono",Menlo,monospace;font-size:11.5px;color:var(--dim);word-break:break-all}
+  .footer{display:flex;align-items:center;gap:10px;margin-top:20px;position:sticky;bottom:0;background:var(--bg);padding:12px 0 2px}
+  button{
+    background:#252a34;color:var(--fg);border:1px solid var(--line);border-radius:7px;
+    padding:8px 17px;font:inherit;font-size:12.5px;cursor:pointer;transition:.15s;
+  }
+  button:hover{background:#2e343f}
+  button.primary{background:var(--brand);border-color:var(--brand);color:#08222e;font-weight:600}
+  button.primary:hover{filter:brightness(1.08)}
+  button:disabled{opacity:.5;cursor:default}
+  #status{margin-left:auto;font-size:12px;color:var(--dim);min-height:18px}
+  #status.ok{color:var(--ok)} #status.err{color:var(--err)} #status.warn{color:var(--warn)}
+  .adv-toggle{background:none;border:0;color:var(--dim);font-size:11.5px;padding:2px 0;cursor:pointer;text-decoration:underline}
+  .adv-toggle:hover{background:none;color:var(--fg)}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+  <h1>ZCode Token 用量 · 设置</h1>
+  <div class="sub">修改写入 <span class="mono" id="cfgpath">config.json</span></div>
+
+  <div class="card">
+    <div class="cap">刷新与采集</div>
+    <div class="row">
+      <div class="lbl"><b>活动期最小间隔</b><em>有数据库写入时的最快刷新节奏</em></div>
+      <div class="ctl">
+        <input type="number" id="activity_min_ms" min="300" step="100">
+        <span class="hint">毫秒，下限 300</span>
+      </div>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>兜底心跳</b><em>空闲时也定期检查一次，防文件事件丢失</em></div>
+      <div class="ctl">
+        <input type="number" id="heartbeat_ms" min="10000" step="1000">
+        <span class="hint">毫秒，下限 10000</span>
+      </div>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>常驻查询进程</b><em>复用 Python 进程省掉每次启动开销</em></div>
+      <div class="ctl">
+        <label><input type="checkbox" id="resident"> 启用（推荐）</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="cap">旧会话归档</div>
+    <div class="row">
+      <div class="lbl"><b>归档阈值</b><em>超过这么多天未活动的会话视为旧会话</em></div>
+      <div class="ctl">
+        <input type="number" id="archive_days" min="0" max="3650" step="1">
+        <span class="hint">天；0 = 不归档</span>
+      </div>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>处理方式</b><em>旧会话在列表里怎么显示</em></div>
+      <div class="ctl">
+        <select id="archive_mode">
+          <option value="off">不处理</option>
+          <option value="fold">折叠到底部</option>
+          <option value="hide">完全隐藏</option>
+        </select>
+      </div>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>从统计中排除</b><em>今日/汇总不把旧会话算进去</em></div>
+      <div class="ctl">
+        <label><input type="checkbox" id="archive_hide"> 排除旧会话</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="cap">显示</div>
+    <div class="row">
+      <div class="lbl"><b>语言</b><em>状态条与设置界面</em></div>
+      <div class="ctl">
+        <select id="lang">
+          <option value="zh">中文</option>
+          <option value="en">English</option>
+        </select>
+      </div>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>上下文窗口覆盖</b><em>留空 = 自动（原生 UI &gt; 模型目录）</em></div>
+      <div class="ctl">
+        <input type="number" id="context_window" min="1000" step="1000" placeholder="自动">
+      </div>
+    </div>
+  </div>
+
+  <button class="adv-toggle" id="advBtn">▸ 高级</button>
+  <div class="card hidden" id="advCard">
+    <div class="cap">高级 / 排障</div>
+    <div class="row">
+      <div class="lbl"><b>热更新</b><em>overlay.js 改动后免重启自动重载</em></div>
+      <div class="ctl"><label><input type="checkbox" id="hot_reload"> 启用</label></div>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>诊断落盘</b><em>写 diag-*.json 供排障，会持续 IO</em></div>
+      <div class="ctl"><label><input type="checkbox" id="diag"> 启用</label></div>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>Python 路径</b><em>安装时探测到的解释器，只读</em></div>
+      <div class="ctl"><div class="mono" id="python_path"></div></div>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>运行时目录</b><em>注入文件所在位置，只读</em></div>
+      <div class="ctl"><div class="mono" id="runtime"></div></div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <button class="primary" id="saveBtn">保存</button>
+    <button id="reloadBtn">重新加载</button>
+    <div id="status"></div>
+  </div>
+
+<script>
+"use strict";
+/* 本窗口由主进程以 data: URL 打开，没有 __zusageReq 泵（那是主窗口 overlay 用的）。
+ * 主进程通过 window.__zusageCfg 预置配置；保存走 window.__zusageSave 回调。 */
+var api = window.__zusageApi || null;
+var FIELDS = ["activity_min_ms","heartbeat_ms","resident","archive_days","archive_mode",
+              "archive_hide","lang","context_window","hot_reload","diag"];
+var BOOLS = { resident:1, archive_hide:1, hot_reload:1, diag:1 };
+
+function setStatus(msg, cls) {
+  var el = document.getElementById("status");
+  el.textContent = msg || "";
+  el.className = cls || "";
+}
+
+function fill(cfg, runtime) {
+  FIELDS.forEach(function (k) {
+    var el = document.getElementById(k);
+    if (!el) return;
+    if (BOOLS[k]) el.checked = !!cfg[k];
+    else el.value = cfg[k] != null ? cfg[k] : "";
+  });
+  document.getElementById("python_path").textContent = cfg.__python_path || "(未设置)";
+  document.getElementById("runtime").textContent = runtime || "";
+}
+
+function readForm() {
+  var out = {};
+  FIELDS.forEach(function (k) {
+    var el = document.getElementById(k);
+    if (!el) return;
+    if (BOOLS[k]) out[k] = el.checked;
+    else if (k === "lang" || k === "archive_mode") out[k] = el.value;
+    else {
+      var v = String(el.value).trim();
+      if (v !== "") out[k] = parseInt(v, 10);
+    }
+  });
+  return out;
+}
+
+function load() {
+  if (!api) { setStatus("桥未就绪：请从状态条 ⚙ 重新打开", "err"); return; }
+  setStatus("读取中…");
+  try {
+    var got = api.get();
+    fill(got.cfg, got.runtime);
+    document.getElementById("cfgpath").textContent = got.path || "config.json";
+    setStatus("已加载", "ok");
+  } catch (e) { setStatus("读取失败：" + String(e.message || e), "err"); }
+}
+
+document.getElementById("advBtn").addEventListener("click", function () {
+  var card = document.getElementById("advCard");
+  var open = card.classList.toggle("hidden") === false;
+  this.textContent = (open ? "▾" : "▸") + " 高级";
+});
+
+document.getElementById("saveBtn").addEventListener("click", function () {
+  if (!api) { setStatus("桥未就绪", "err"); return; }
+  var btn = this;
+  btn.disabled = true;
+  setStatus("保存中…");
+  try {
+    var r = api.set(readForm());
+    btn.disabled = false;
+    if (!r || !r.ok) { setStatus("保存失败：" + ((r && r.error) || "未知"), "err"); return; }
+    if (r.cfg) fill(r.cfg, document.getElementById("runtime").textContent);
+    setStatus(r.changed ? "已保存 " + r.changed + " 项，约 1 秒内生效" : "没有变化", r.changed ? "ok" : "warn");
+  } catch (e) {
+    btn.disabled = false;
+    setStatus("保存失败：" + String(e.message || e), "err");
+  }
+});
+
+document.getElementById("reloadBtn").addEventListener("click", load);
+load();
+</script>
+</body>
+</html>

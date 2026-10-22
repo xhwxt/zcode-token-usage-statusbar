@@ -107,6 +107,158 @@ try {
   });
 } catch (e) { LOG("ipc hook failed:", e.message); }
 
+/* ---------- 设置浮窗 IPC（v64） ----------
+ * 渲染端要能读写 config.json 才谈得上「独立设置窗口」。只暴露白名单字段，
+ * 其余键（含 asar_path 等安装位置）原样保留不回显、不可改——安装路径由 autopatch
+ * 与 install.py 负责，让用户在悬浮条里改它只会把注入链搞断。
+ * 写入走「读-合并白名单-原子替换」，避免半截文件让 readCfg 回退到默认值。 */
+const CFG_EDITABLE = {
+  activity_min_ms: "int", heartbeat_ms: "int", hot_reload: "bool", diag: "bool",
+  resident: "bool", lang: "enum", context_window: "int",
+  archive_days: "int", archive_hide: "bool", archive_mode: "enum",
+};
+const CFG_LANGS = ["zh", "en"];
+const CFG_ARCHIVE_MODES = ["off", "hide", "fold"];
+
+function coerce(key, val) {
+  const kind = CFG_EDITABLE[key];
+  if (!kind) return undefined;
+  if (kind === "int") {
+    const n = typeof val === "number" ? val : parseInt(String(val), 10);
+    if (!Number.isFinite(n) || n < 0) return undefined;
+    return key === "activity_min_ms" ? Math.max(300, n)
+      : key === "heartbeat_ms" ? Math.max(10000, n)
+        : key === "context_window" ? Math.max(1000, n)
+          : Math.min(Math.max(n, 0), 3650);
+  }
+  if (kind === "bool") return val === true || val === "true" || val === 1;
+  if (kind === "enum") {
+    const s = String(val);
+    if (key === "lang") return CFG_LANGS.includes(s) ? s : undefined;
+    if (key === "archive_mode") return CFG_ARCHIVE_MODES.includes(s) ? s : undefined;
+  }
+  return undefined;
+}
+
+function cfgPublic() {
+  const c = readCfg();
+  const out = {};
+  for (const k of Object.keys(CFG_EDITABLE)) if (c[k] !== undefined) out[k] = c[k];
+  /* 未显式设置时给出运行时实际生效值，面板才不会显示空白 */
+  if (out.activity_min_ms === undefined) out.activity_min_ms = 1500;
+  if (out.heartbeat_ms === undefined) out.heartbeat_ms = 30000;
+  if (out.context_window === undefined) out.context_window = 128000;
+  if (out.lang === undefined) out.lang = "zh";
+  if (out.archive_days === undefined) out.archive_days = 7;
+  if (out.archive_mode === undefined) out.archive_mode = "fold";
+  out.hot_reload = c.hot_reload !== false;
+  out.diag = c.diag === true;
+  out.resident = c.resident !== false;
+  out.archive_hide = c.archive_hide === true;
+  out.__python_path = c.python_path || "";
+  return out;
+}
+
+function cfgWrite(patch) {
+  let cur = {};
+  try { cur = JSON.parse(fs.readFileSync(CONFIG, "utf8")); } catch (e) { cur = {}; }
+  if (!cur || typeof cur !== "object") cur = {};
+  let changed = 0;
+  for (const k of Object.keys(patch || {})) {
+    const v = coerce(k, patch[k]);
+    if (v === undefined) continue;
+    if (cur[k] === v) continue;
+    cur[k] = v;
+    changed++;
+  }
+  if (!changed) return { ok: true, changed: 0, cfg: cfgPublic() };
+  const tmp = CONFIG + ".tmp";
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(cur, null, 2), "utf8");
+    fs.renameSync(tmp, CONFIG);   // 原子替换，读侧永不会看到半截文件
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch (e2) { }
+    LOG("config write failed:", e.message);
+    return { ok: false, error: e.message };
+  }
+  cfgMtime = 0;          // 让 readCfgCached 立刻重读
+  cfgCache = null;
+  scheduleRetry(200);    // 立即按新配置拉一次
+  return { ok: true, changed, cfg: cfgPublic() };
+}
+
+try {
+  const { ipcMain } = require("electron");
+  /* 同步通道：设置窗口首屏要立刻拿到值，异步会让表单先闪空值。
+   * 只在设置窗口的 preload 里调用，调用频率极低（打开/保存各一次）。 */
+  ipcMain.on("zusage:cfg:get-sync", (e) => {
+    try { e.returnValue = { ok: true, ...settingsBridgePayload() }; }
+    catch (err) { e.returnValue = { ok: false, error: String(err && err.message || err) }; }
+  });
+  ipcMain.on("zusage:cfg:set-sync", (e, patch) => {
+    try { e.returnValue = cfgWrite(patch || {}); }
+    catch (err) { e.returnValue = { ok: false, error: String(err && err.message || err) }; }
+  });
+  ipcMain.handle("zusage:cfg:get", () => {
+    try { return { ok: true, ...settingsBridgePayload() }; }
+    catch (e2) { return { ok: false, error: String(e2 && e2.message || e2) }; }
+  });
+  ipcMain.handle("zusage:cfg:set", (e, patch) => {
+    try { return cfgWrite(patch || {}); }
+    catch (e2) { return { ok: false, error: String(e2 && e2.message || e2) }; }
+  });
+} catch (e) { LOG("settings ipc failed:", e.message); }
+
+/* 设置浮窗开关（渲染端发来 → 主进程开一个独立 BrowserWindow）。
+ * 页面从 settings.html 读入后以 data: URL 加载，不额外分发静态文件。
+ * 配置读写通过 preload 注入的 __zusageApi 直接走主进程函数（同一进程内的闭包），
+ * 不需要再绕 IPC 通道。 */
+let settingsWin = null;
+function openSettingsWindow() {
+  try {
+    if (settingsWin && !settingsWin.isDestroyed()) {
+      settingsWin.focus();
+      /* 重开时把最新配置塞回去，避免看到陈旧值 */
+      try { settingsWin.webContents.reload(); } catch (e) { }
+      return { ok: true, reused: true };
+    }
+    const { BrowserWindow } = require("electron");
+    const pagePath = path.join(HERE, "settings.html");
+    if (!fs.existsSync(pagePath)) return { ok: false, error: "settings.html missing" };
+    const html = fs.readFileSync(pagePath, "utf8");
+
+    settingsWin = new BrowserWindow({
+      width: 730, height: 780, minWidth: 560, minHeight: 460,
+      title: "ZCode Token 用量 · 设置",
+      backgroundColor: "#16181d",
+      autoHideMenuBar: true,
+      webPreferences: {
+        preload: path.join(HERE, "settings-preload.cjs"),
+        contextIsolation: false,
+        nodeIntegration: false,
+        sandbox: false,
+      },
+    });
+    settingsWin.setMenuBarVisibility(false);
+    settingsWin.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
+    settingsWin.on("closed", () => { settingsWin = null; });
+    return { ok: true };
+  } catch (e) {
+    LOG("open settings failed:", e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+/* preload 侧只做一件事：把主进程的实现挂到 window.__zusageApi。
+ * 配置对象用结构化克隆传过去（preload 与主进程同进程，直接引用函数即可）。 */
+function settingsBridgePayload() {
+  return { cfg: cfgPublic(), runtime: HERE, path: CONFIG };
+}
+try {
+  const { ipcMain } = require("electron");
+  ipcMain.handle("zusage:settings:open", () => openSettingsWindow());
+} catch (e) { LOG("settings open ipc failed:", e.message); }
+
 /* db 活动戳：db.sqlite / -wal / -shm 的最新 mtime。WAL 模式下写入主要落在 -wal。 */
 let DB_DIR = null;
 function dbDir() {
@@ -401,13 +553,58 @@ watchDb();
 startResident();
 maybeSpawn({ firstRun: true });   // 启动先拉一次
 
+/* ---------- 渲染端 → 主进程 的请求泵（v64 设置窗口用） ----------
+ * overlay 没有 ipcRenderer（contextIsolation），又不该为此常开一个定时器。
+ * 做法：渲染端把请求压进 window.__zusageReq 数组，主进程在一次 executeJavaScript
+ * 里原子取走（数组清空）并回填 window.__zusageRes[id]。只在有请求时才有一次往返，
+ * 空闲时由下面的 400ms 轻量轮询承担（读取一个可能不存在的数组，成本近乎为零）。 */
+let reqTimer = 0;
+async function pumpRequests() {
+  const wcs = webContents.getAllWebContents().filter((wc) => isMainWindowState(wc) && !wc.isDestroyed());
+  for (const wc of wcs) {
+    let reqs = null;
+    try {
+      /* 原子取走队列：读 + 清空在同一个脚本里完成，避免重复处理 */
+      reqs = await wc.executeJavaScript(
+        "(function(){var a=window.__zusageReq;if(!a||!a.length)return [];window.__zusageReq=[];return a})()",
+        true
+      );
+    } catch (e) { continue; }
+    if (!Array.isArray(reqs) || !reqs.length) continue;
+    const results = {};
+    for (const r of reqs) {
+      if (!r || typeof r !== "object") continue;
+      const id = String(r.id || "");
+      if (!id) continue;
+      try {
+        if (r.type === "cfg:get") results[id] = { ok: true, cfg: cfgPublic(), runtime: HERE };
+        else if (r.type === "cfg:set") results[id] = cfgWrite(r.patch || {});
+        else if (r.type === "settings:open") results[id] = openSettingsWindow();
+        else results[id] = { ok: false, error: "unknown request " + String(r.type) };
+      } catch (e) {
+        results[id] = { ok: false, error: String(e && e.message || e) };
+      }
+    }
+    if (Object.keys(results).length) {
+      const js = "window.__zusageRes=Object.assign(window.__zusageRes||{},"
+        + JSON.stringify(results) + ");";
+      wc.executeJavaScript(js, true).catch(() => { });
+    }
+  }
+}
+function startReqPump() {
+  if (reqTimer) return;
+  reqTimer = setInterval(() => { pumpRequests().catch(() => { }); }, 400);
+}
+startReqPump();
+
 function injectOverlay(wc) {
   if (!overlaySrc || !isMainWindowState(wc)) return;
+  /* v64：overlay 跑在 contextIsolation 的渲染进程里，拿不到 ipcRenderer，
+   * 也无法自建窗口。设置面板的数据读写走上面的请求泵（window.__zusageReq/Res）。
+   * v63 首屏快速路径保留：overlay 装好后立刻补推最近一次快照。 */
   wc.executeJavaScript(overlaySrc, true)
     .then(() => {
-      /* v63 首屏快速路径：overlay 装好后立刻补推最近一次快照。
-       * 老实现要等下一次 db 写入/心跳才推数据，新窗口打开后条是零值（"生效慢"体感主因）。
-       * 有缓存就立即推，无缓存则由可能仍在跑的启动查询负责。 */
       if (lastPayload) pushOnce(wc, lastPayload);
     })
     .catch(() => { });

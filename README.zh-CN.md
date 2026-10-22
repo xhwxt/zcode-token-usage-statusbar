@@ -177,6 +177,11 @@ python patch_install.py install
 
 位置：标准安装在数据目录 `~/.zcode/zcode-token-usage-statusbar/config.json`（`--dev` 安装在仓库目录）。
 
+**图形界面**：点状态条上的 ⚙ → 「打开完整设置…」，会开一个独立设置窗口，
+上面这些字段都能直接改（保存即写入，约 1 秒生效）。
+`python_path` 与 `asar_path` 属于安装信息，只显示不可改——改错了会把注入链搞断，
+要换位置请用 `install.py --root` / `--asar`。
+
 ```json
 {
   "python_path": "python.exe 绝对路径",
@@ -184,9 +189,17 @@ python patch_install.py install
   "heartbeat_ms": 30000,    // 兜底心跳：防 fs.watch 文件事件丢失；空闲时拉取只由此触发
   "resident": true,         // 常驻查询 python（zusage.py serve，省每次启动费 ~17MB 常驻内存）；false=回退一次性短进程
   "hot_reload": true,       // overlay.js 热更新开关（调试用）；false=改完需重启 ZCode
+  "diag": false,            // 诊断落盘（写 diag-*.json），排障时才开，开着会持续 IO
+  "archive_days": 7,        // 超过 N 天未活动的会话视为旧会话；0 = 不归档
+  "archive_mode": "fold",   // off=不处理 / fold=折叠到底部 / hide=完全隐藏
+  "archive_hide": false,    // true = 旧会话不计入今日/汇总统计
   "context_window": 1000000 // 上下文兜底值（原生读数/模型目录都失败时用）
 }
 ```
+
+> 归档是按「会话自己的最后活动时间」判断的，正在用的会话不会被误标。
+> 它不提升启动速度（ZCode 本来就不预加载会话正文，实测占比不到 2ms），
+> 价值在于让列表和统计不被历史会话淹没。
 
 ## 数据口径、性能与排查
 

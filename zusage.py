@@ -971,6 +971,21 @@ def _snapshot_with(con, force_sid=""):
             rec.append(_light_snapshot(con, sid, cfg))
     # rec 建好后把远端快照挂到池首：overlay 按 sid 匹配 mine，顺序只影响兜底展示
     rec = [remote_by[s] for s in reversed(remote_ids)] + rec
+    # 旧会话标记（v64）：按 config.archive_days 给每个候选打 old 标记，
+    # 渲染端据此折叠/隐藏。用各会话自己的最后活动时间判断，不看"当前是否打开"——
+    # 正在用的会话 activity 一定新鲜，不会被误标。
+    days = cfg.get("archive_days")
+    try:
+        days = float(days) if days is not None else 7.0
+    except (TypeError, ValueError):
+        days = 7.0
+    cutoff = _epoch_ms(datetime.now() - timedelta(days=days)) if days > 0 else None
+    archived = 0
+    for r in rec:
+        last = r.get("last_at") or 0
+        r["old"] = bool(cutoff is not None and last and last < cutoff)
+        if r["old"]:
+            archived += 1
     return {
         "session": base,
         "last_turn": base["last_turn"],
@@ -992,6 +1007,13 @@ def _snapshot_with(con, force_sid=""):
         "ctx_exc": base["ctx_exc"],
         "tools": base["tools"],
         "recent": rec,
+        # 归档元信息（v64）：渲染端按 mode 决定折叠还是隐藏，并显示"已归档 N 个"
+        "archive": {
+            "days": days,
+            "mode": cfg.get("archive_mode") or "fold",
+            "count": archived,
+            "total": len(rec),
+        },
     }
 
 

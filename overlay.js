@@ -74,6 +74,11 @@
     for (var i = 0; i < instances.length; i++) {
       try { instances[i].render(d); } catch (e) { FATAL.updateErr = String((e && e.stack) || e); }
     }
+    try {
+      for (var ai = 0; ai < instances.length; ai++) {
+        try { instances[ai].syncArch && instances[ai].syncArch(); } catch (e2) { }
+      }
+    } catch (e) { }
   };
   function refreshWants() {
     /* 各 pane 会话 id 汇总给泵：__zusageWantSids（新泵按数组强制纳入快照），
@@ -254,6 +259,10 @@
       ".panel .pver{color:var(--color-brand,#57c7ff);font-weight:400;font-size:12px;background:rgba(87,199,255,.12);background:color-mix(in srgb,var(--color-brand,#57c7ff) 12%,transparent);border-radius:999px;padding:1px 8px}" +
       ".panel label em{font-style:normal;color:var(--color-foreground-subtle,#6f7989);display:block}" +
       ".panel input[type=checkbox]{accent-color:var(--color-brand,#57c7ff);margin-top:3px}" +
+      ".panel .zu-opencfg{display:block;width:100%;margin:2px 0 6px;padding:6px 10px;border-radius:6px;" +
+      "border:1px solid var(--zu-line,#2c313c);background:var(--zu-btnbg,#252a34);color:inherit;" +
+      "font:inherit;font-size:12px;cursor:pointer;text-align:center}" +
+      ".panel .zu-opencfg:hover{background:var(--zu-btnbg2,#2e343f)}" +
       ".panel .pnote{line-height:1.6;color:var(--color-foreground-subtle,#6f7989);margin-top:3px}" +
       /* 子代理明细面板（v49）：点击条目弹出的固定面板（与设置面板同机制，互斥打开）；
        * 面板不随鼠标消失，绕开悬停+tab 的全部几何问题。 */
@@ -345,6 +354,12 @@
       '<label><input type="radio" name="zu-lang" value="zh"><span>中文</span></label>' +
       '<label><input type="radio" name="zu-lang" value="en"><span>English</span></label>' +
       '<div class="hr"></div>' +
+      '<div class="cap">' + L("旧会话归档", "Old sessions") + '</div>' +
+      '<div class="zu-archnote pnote"></div>' +
+      '<div class="hr"></div>' +
+      '<button class="zu-opencfg" type="button">' + L("打开完整设置…", "Open full settings…") + '</button>' +
+      '<div class="pnote">' + L("刷新频率、归档阈值、Python 路径等都在完整设置里。",
+        "Refresh rate, archive threshold, Python path and more live in the full settings window.") + '</div>' +
       '<div class="pnote">' + L("悬停条面各项看明细；点击子代理项看全部明细面板。数据源 ~/.zcode/cli/db/db.sqlite（只读），请求完成后才落库，数值随上次完成请求变化。",
         "Hover bar items for details; click the sub-agent item for the full detail panel. Data source ~/.zcode/cli/db/db.sqlite (read-only); rows are written when requests complete, numbers follow the latest completed request.") + '</div>';
       panel.querySelectorAll('input[name=zu-lang]').forEach(function (r) {
@@ -937,6 +952,28 @@
         cb.checked = !!state.show[cb.dataset.k];
       });
       panel.querySelector(".zu-ctxov").value = state.ctxOv;
+      syncArchNote();
+    }
+    /* v64：归档现状（读取快照里的 archive 元信息，不额外查询） */
+    function syncArchNote() {
+      var el = panel.querySelector(".zu-archnote");
+      if (!el) return;
+      var a = state.data && state.data.archive;
+      if (!a) { el.textContent = L("暂无数据", "no data yet"); return; }
+      var n = a.count | 0, total = a.total | 0;
+      if (!a.days) {
+        el.textContent = L("未启用（阈值为 0）", "disabled (threshold is 0)");
+        return;
+      }
+      if (!n) {
+        el.textContent = L(a.days + " 天内有活动的会话共 " + total + " 个，无旧会话",
+          "all " + total + " sessions active within " + a.days + " days");
+        return;
+      }
+      var modeTxt = a.mode === "hide" ? L("隐藏", "hidden")
+        : a.mode === "fold" ? L("折叠", "folded") : L("不处理", "untouched");
+      el.textContent = L(n + " / " + total + " 个会话超过 " + a.days + " 天未活动（" + modeTxt + "）",
+        n + " / " + total + " sessions idle over " + a.days + " days (" + modeTxt + ")");
     }
     gear.addEventListener("click", function (e) {
       e.stopPropagation();
@@ -947,6 +984,49 @@
         subPanel.classList.remove("open");   // 两面板同位重叠，互斥打开（v49）
         hideTip(true, "gear-open");   // 移向齿轮的路上可能触发过条目 tooltip，开面板时一并收掉
       }
+    });
+    /* v64：完整设置窗口。渲染进程没有 ipcRenderer，请求压进 __zusageReq，
+     * 由主进程的请求泵取走并调用 openSettingsWindow()。 */
+    var reqSeq = 0;
+    function bridgeCall(type, payload) {
+      return new Promise(function (resolve, reject) {
+        var id = "o" + (++reqSeq) + "_" + Date.now();
+        window.__zusageReq = window.__zusageReq || [];
+        var req = { id: id, type: type };
+        if (payload) req.patch = payload;
+        window.__zusageReq.push(req);
+        var tries = 0;
+        var timer = setInterval(function () {
+          var res = window.__zusageRes && window.__zusageRes[id];
+          if (res) {
+            clearInterval(timer);
+            try { delete window.__zusageRes[id]; } catch (e) { }
+            resolve(res);
+          } else if (++tries > 20) {   // 400ms × 20 = 8s
+            clearInterval(timer);
+            reject(new Error("timeout"));
+          }
+        }, 400);
+      });
+    }
+    panel.addEventListener("click", function (e) {
+      if (stale()) return;
+      var b = e.target && e.target.closest ? e.target.closest(".zu-opencfg") : null;
+      if (!b) return;
+      e.stopPropagation();
+      bridgeCall("settings:open").then(function (r) {
+        if (!r || !r.ok) {
+          b.textContent = L("打开失败：" + ((r && r.error) || "未知"), "Failed: " + ((r && r.error) || "unknown"));
+          setTimeout(function () {
+            if (b.isConnected) b.textContent = L("打开完整设置…", "Open full settings…");
+          }, 2600);
+        }
+      }).catch(function () {
+        b.textContent = L("主进程无响应", "main process not responding");
+        setTimeout(function () {
+          if (b.isConnected) b.textContent = L("打开完整设置…", "Open full settings…");
+        }, 2600);
+      });
     });
     panel.addEventListener("change", function (e) {
       var t2 = e.target;
@@ -1647,6 +1727,7 @@
         heavy();   // 立即对账（composer 重建/pane 关闭的最快收敛路径）
       },
       render: render,
+      syncArch: syncArchNote,
       rebuild: function () { buildPanel(); rebuildExcBubble(); syncPanel(); },
       getSid: function () { return pickedSid || ""; },
     };
