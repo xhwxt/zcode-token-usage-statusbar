@@ -141,13 +141,34 @@
       } catch (e) { FATAL.coordErr = String((e && e.stack) || e); }
     }
     tick();
-    setInterval(tick, 600);
+    /* v63：原先固定 600ms 全页 querySelectorAll + 每个候选 getBoundingClientRect
+     * （强制同步布局），空转时也在跑。改为自适应调度：窗口不可见直接停；
+     * 输入框数量/位置的变化只在用户操作后发生，静置 30s 后退到 2s 一轮，
+     * 任何鼠标/键盘/滚动/尺寸变化立即恢复 600ms。 */
+    var COORD_FAST = 600, COORD_IDLE = 2000, COORD_IDLE_AFTER = 30000;
+    var lastAct = Date.now(), coordTimer = 0;
+    function bumpAct() { lastAct = Date.now(); }
+    ["mousemove", "mousedown", "keydown", "wheel", "input", "focusin"].forEach(function (ev) {
+      document.addEventListener(ev, bumpAct, { capture: true, passive: true });
+    });
+    window.addEventListener("resize", bumpAct, { passive: true });
+    function coordLoop() {
+      if (stale()) return;
+      if (!document.hidden) {
+        tick();
+        var idle = Date.now() - lastAct > COORD_IDLE_AFTER;
+        coordTimer = setTimeout(coordLoop, idle ? COORD_IDLE : COORD_FAST);
+      } else {
+        coordTimer = setTimeout(coordLoop, COORD_IDLE);   // 隐藏时低速轮询，恢复可见立刻回到快档
+      }
+    }
+    coordTimer = setTimeout(coordLoop, COORD_FAST);
   }
 
   /* ---------- 实例工厂（v61.1）：一个 pane 一套 条/面板/气泡/tooltip/定位循环。
    * slot 0 保留 #zusage-bar/#zusage-tip 兼容 id（泵热更新按它清理），其余实例仅类名。 */
   function spawnInstance(pid, slot) {
-    var VERSION = "v62";   // v62：模态弹窗（模型配置等）打开时整体收起 + 弹窗内编辑框不再被当输入框（issue #9）；零值会话的来源提示（issue #14）   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
+    var VERSION = "v63";   // v63：性能（可见性判定 TTL 缓存、窗口隐藏不渲染、协调/对账自适应调度）；v62：模态弹窗打开时整体收起 + 弹窗内编辑框不再被当输入框（issue #9）；零值会话的来源提示（issue #14）   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
     /* ---------- 状态（实例级） ---------- */
     var excOn = false,    // 本 pane 会话处于"上下文超限被拒"状态（render 时按 picked 会话计算）
       excGone = false,    // 用户点 ✕ 关闭了本次气泡；超限解除后自动复位
@@ -1122,12 +1143,38 @@
       } catch (e) { }
       return false;
     }
+    /* ---------- 判定缓存（v63） ----------
+     * track() 每帧对输入框整条祖先链逐个 getComputedStyle，reallyVisible 内部还会再算
+     * 一遍，60fps 下稳定产生数千次样式查询/秒 —— 悬浮条常驻 CPU 的最大来源。
+     * 幽灵子树/遮挡命中只随布局与样式变化，而条本身有 400ms 隐藏迟滞，
+     * 120~150ms 的判定陈旧肉眼不可感；纯 TTL 缓存不受流式输出的高频 DOM 变更干扰。 */
+    var GHOST_TTL = 120, COVER_TTL = 150;
+    var ghostCache = new WeakMap();   // el -> { val, at }
+    var coverCache = new WeakMap();   // el -> { key, val, at }
+    function ghostOf(el) {
+      if (!el) return false;
+      var now = Date.now(), hit = ghostCache.get(el);
+      if (hit && now - hit.at < GHOST_TTL) return hit.val;
+      var val = inGhostSubtree(el);
+      ghostCache.set(el, { val: val, at: now });
+      return val;
+    }
     /* 模态弹窗打开判定（v62，issue #9）：Radix Dialog 往 body 挂一层「固定全屏 + 带底色 +
      * z-index 抬升」的遮罩（下拉菜单/选择器只设 body pointer-events:none、不挂遮罩——v61
      * 实测），且文档里同时存在 [role="dialog"]。此时聊天区整体不可交互，条必须整体收起：
      * 模型配置弹窗里的「推理参数映射」编辑框正好落在视口下半部，会被 findComposer 的
      * 启发式当聊天输入框，条就冒在弹窗里（用户 issue #9 截图）。
      * 自己的浮层（.zu-bar/.zu-back/.zu-sheet——移动端抽屉遮罩是同款全屏底色）不算。 */
+    /* v63：modalOpen 逐帧遍历 body 全部子层并逐个 getComputedStyle（弹窗/菜单多时
+     * 每帧十余次样式查询）。弹层开关远慢于 150ms，加 TTL 缓存后逐帧零开销。 */
+    var MODAL_TTL = 150, modalAt = 0, modalVal = false;
+    function modalOpenCached() {
+      var now = Date.now();
+      if (now - modalAt < MODAL_TTL) return modalVal;
+      modalAt = now;
+      modalVal = modalOpen();
+      return modalVal;
+    }
     function modalOpen() {
       try {
         if (!document.querySelector('[role="dialog"]')) return false;
@@ -1151,8 +1198,18 @@
     }
     function reallyVisible(el, ownOK) {
       if (!visible(el)) return false;
-      if (inGhostSubtree(el)) return false;   // 设置页等幽灵壳：视觉已隐藏（v61）
+      if (ghostOf(el)) return false;   // 设置页等幽灵壳：视觉已隐藏（v61，v63 加 TTL 缓存）
       var r = el.getBoundingClientRect();
+      var key = ownOK ? "o" : "n";
+      var now = Date.now(), ch = coverCache.get(el);
+      /* 命中测试结果绑定在「元素矩形」上：矩形变了必须重算，同矩形同模式下 TTL 内复用 */
+      if (ch && ch.key === key && ch.rect === r.left + "," + r.top + "," + r.width + "," + r.height &&
+        now - ch.at < COVER_TTL) return ch.val;
+      var val = hitSelf(el, r, ownOK);
+      coverCache.set(el, { val: val, at: now, key: key, rect: r.left + "," + r.top + "," + r.width + "," + r.height });
+      return val;
+    }
+    function hitSelf(el, r, ownOK) {
       var hit;
       try { hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); } catch (e) { return true; }
       if (!hit) return false;
@@ -1358,8 +1415,18 @@
      * 瞬时盖到输入框中心不算"被盖住"——逐帧严格判定会造成显示/隐藏来回横跳（闪烁）；
      * 设置页等真正的覆盖层不在卡片内，仍判为盖住。
      * 条外挂在输入框上方，不参与对输入框中心的遮挡（v12-v14 内嵌形态的自遮挡闪烁根因）。 */
+    /* v63：cardCache 豁免链每次都要 contains() 上溯，加 TTL 缓存与 reallyVisible 共享
+     * coverCache（键用 "c" 区分模式），同一帧内两条路径不再各做一次命中测试。 */
     function coverOK(el) {
       var r = el.getBoundingClientRect();
+      var rectKey = r.left + "," + r.top + "," + r.width + "," + r.height;
+      var now = Date.now(), ch = coverCache.get(el);
+      if (ch && ch.key === "c" && ch.rect === rectKey && now - ch.at < COVER_TTL) return ch.val;
+      var val = cardHitOK(el, r);
+      coverCache.set(el, { val: val, at: now, key: "c", rect: rectKey });
+      return val;
+    }
+    function cardHitOK(el, r) {
       var hit;
       try { hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); } catch (e) { return true; }
       if (!hit) return false;
@@ -1458,13 +1525,16 @@
     function track() {
       if (stale()) return;   // 旧实例罢工，把舞台让给新实例
       try {
+        /* v63：窗口不可见（最小化/切到别的应用）时渲染无意义，整帧跳过；
+         * 可见性恢复后 rAF 自然续跑 —— 挂机/最小化时 CPU 归零。 */
+        if (document.hidden) return;
         syncExcBubble();   // 超限气泡：显示/隐藏/贴条定位（内部自判状态，隐藏分支零开销）
         if (!composer || !composer.isConnected) { hideSince = 0; hideBar(); return; }
         if (cardCache && cardCache.style.marginBottom !== CARD_MARGIN) ensureCardPad();   // 流式期间 React 重置内联边距时立刻补回
         var r = composer.getBoundingClientRect();
         var on = r.width > 60 && r.height > 14 && r.bottom > 0 && r.top < innerHeight &&
-          !inGhostSubtree(composer) &&   // 设置页等幽灵壳（opacity-0/inert）：视觉已隐藏（v61）
-          !modalOpen() &&                // v62：模态弹窗（模型配置等）打开时整体收起，弹窗内容不归条管（issue #9）
+          !ghostOf(composer) &&   // 设置页等幽灵壳（opacity-0/inert）：视觉已隐藏（v61，v63 TTL 缓存）
+          !modalOpenCached() &&   // v62：模态弹窗打开时整体收起（v63 加 TTL 缓存，避免逐帧遍历 body 子层）
           (reallyVisible(composer, true) || coverOK(composer));
         if (!on) {
           if (slot === 0) diagHidden(r);   // 隐藏现场周期转储（v61，节流 4s；仅 0 号实例写，槽位共享）
@@ -1544,8 +1614,25 @@
       }
     }
 
-    setInterval(heavy, 600);
+    /* v63：heavy 负责 composer 重新对账（含 findComposer 的 querySelectorAll + 逐元素
+     * getBoundingClientRect）。composer 只会在路由切换/分屏变化时被 React 重建，
+     * 静置后无需 600ms 一轮：30s 无交互退回 2s，任一新实例挂载或窗口可见性变化立即回快档。 */
+    var heavyIdleAfter = 30000, heavyLastAct = Date.now(), heavyTimer = 0;
+    function heavyBump() { heavyLastAct = Date.now(); }
+    ["mousemove", "mousedown", "keydown", "wheel"].forEach(function (ev) {
+      document.addEventListener(ev, heavyBump, { capture: true, passive: true });
+    });
+    function heavyLoop() {
+      if (stale()) return;
+      if (!document.hidden) {
+        heavy();
+        heavyTimer = setTimeout(heavyLoop, Date.now() - heavyLastAct > heavyIdleAfter ? 2000 : 600);
+      } else {
+        heavyTimer = setTimeout(heavyLoop, 2000);
+      }
+    }
     heavy();
+    heavyTimer = setTimeout(heavyLoop, 600);
     requestAnimationFrame(track);
 
     syncPanel();

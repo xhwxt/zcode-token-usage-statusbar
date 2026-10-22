@@ -137,14 +137,23 @@ let pushCount = 0;
 let lastSpawn = 0;    // 上次发起查询时刻（activity_min_ms 限频用）
 let lastStamp = 0;    // 上次拉取时的 db mtime（去重：无新写入不拉）
 let lastWants = "";   // 上次查询用的会话 id 集合（变化即拉，防"会话切了但 db 没写入"滞留旧数据）
+let lastPayload = null;   // v63：最近一次快照缓存，新窗口/重载后立即补推，免等下一次写入
+
+/* 诊断写盘：定位问题用，稳定运行时应关闭。
+ * 老实现无条件每 ~15 次推送执行一次 executeJavaScript 取 diag 再同步写盘（每窗口一个文件），
+ * 长会话里是持续的额外 IPC + JSON 序列化 + 同步磁盘 IO。默认关闭，需要时 config.diag=true 打开。 */
+function diagEnabled() {
+  return readCfgCached().diag === true;
+}
 
 function handlePayload(payload) {
   if (!payload || typeof payload !== "object") return;
+  lastPayload = payload;   // 缓存供新窗口/重载即时补推（v63）
   remoteSids.clear();
   for (const r of (payload.recent || [])) if (r && r.remote && r.sid) remoteSids.add(r.sid);
   for (const wc of webContents.getAllWebContents()) pushOnce(wc, payload);
-  // 定位诊断：每 ~15 次拉取收集每个窗口各自的 __zusageDiag，附加泵侧证据后写 diag-<n>.json（多窗口互不覆盖）
-  if (++pushCount % 15 === 1) {
+  // 定位诊断（默认关闭）：每 ~15 次拉取收集每个窗口各自的 __zusageDiag 写 diag-<n>.json
+  if (diagEnabled() && ++pushCount % 15 === 1) {
     let idx = 0;
     for (const wc of webContents.getAllWebContents()) {
       if (!isMainWindowState(wc) || wc.isDestroyed()) continue;
@@ -156,7 +165,7 @@ function handlePayload(payload) {
             try {
               const obj = JSON.parse(s);
               obj.pump = {
-                version: 10,
+                version: 11,
                 resident: !!pyRes,
                 activeMap: Array.from(activeSid.entries()).slice(0, 12),
                 wants: lastWants,
@@ -281,11 +290,12 @@ function scheduleRetry(ms) {
   clearTimeout(retryTimer);
   retryTimer = setTimeout(maybeSpawn, ms);
 }
-function maybeSpawn() {
+function maybeSpawn(opts) {
   if (busy) { scheduleRetry(300); return; }
   const st = dbStamp();
   const cfg = readCfgCached();
   const wait = Math.max(300, cfg.activity_min_ms | 0 || 1500);
+  const firstRun = !!(opts && opts.firstRun);
   /* 先取各窗口的"当前会话 id"：主进程 IPC 映射（应用自己上报的焦点会话，v6）优先，
    * overlay 从 localStorage 键读出的 __zusageWantSid 兜底；无窗口时直接短路（空闲零进程的
    * 设计意图）；executeJavaScript 挂 1s 超时，防渲染进程卡死导致泵永不 settle。
@@ -293,6 +303,21 @@ function maybeSpawn() {
    * mine 模式下 WantSid 已非主数据源，省掉活跃期每 1.5s × N 窗口的页面求值。 */
   const wcs = webContents.getAllWebContents().filter((wc) => isMainWindowState(wc) && !wc.isDestroyed());
   if (!wcs.length) return;
+  /* v63 启动快速路径：首轮若每个窗口都已有 IPC 映射，说明 focus 会话已知，
+   * 不必等页面 eval（最长 1s 超时）——直接按映射发起查询，条更早出数。 */
+  const allKnown = wcs.every((wc) => activeSid.has(wc.id));
+  if (firstRun && allKnown) {
+    const wants0 = [];
+    wcs.forEach((wc) => {
+      const s = activeSid.get(wc.id) || "";
+      if (s && /^[A-Za-z0-9_-]{1,80}$/.test(s) && !wants0.includes(s)) wants0.push(s);
+    });
+    lastWants = wants0.join(",");
+    lastSpawn = Date.now();
+    if (st) lastStamp = st;
+    runQuery(lastWants);
+    return;
+  }
   const withTimeout = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r(""), ms))]);
   /* 各窗口的 pane 会话 id（v10，__zusageWantSids 数组，分屏多实例状态条用）+ 旧单值兜底。
    * v8 曾在 mine 模式跳过页面求值；分屏后每 pane 有自己的会话，必须读回数组才能全部纳入快照。 */
@@ -350,10 +375,11 @@ function watchDb() {
 
 /* overlay / zusage.py 热更新检查（stat mtime，开销可忽略）；config.hot_reload=false 可关闭
  * （发布/稳定形态：改文件需重启 ZCode 才生效），开关改动随下次心跳生效。
- * zusage.py 变化时重启常驻进程（serve 进程驻内存的是旧代码）；顺带 stat config mtime。 */
+ * zusage.py 变化时重启常驻进程（serve 进程驻内存的是旧代码）；顺带 stat config mtime。
+ * v63：默认 5s 一轮（原 2s），热更新只服务于开发调试；config.hot_reload=true 时维持 2s 快检。 */
 let overlayMtimeKnown = false;
 let zusageMtime = 0;
-setInterval(() => {
+function hotCheck() {
   const cfg = readCfgCached();
   if (cfg.hot_reload === false) return;
   hotReloadIfChanged();
@@ -366,18 +392,34 @@ setInterval(() => {
     zusageMtime = m;
     overlayMtimeKnown = true;
   } catch (e) { }
-}, 2000);
+}
+setInterval(hotCheck, readCfg().hot_reload === true ? 2000 : 5000);
 setInterval(maybeSpawn, Math.max(10000, readCfg().heartbeat_ms | 0 || 30000));   // 兜底心跳：防文件事件丢失
 watchDb();
-maybeSpawn();   // 启动先拉一次
+/* v63：常驻解析器提前预热（省首帧 ~60-100ms 解释器启动），再走启动快速路径查询。
+ * 预热失败无副作用：runQuery 内部会按需启动/回退一次性 spawn。 */
+startResident();
+maybeSpawn({ firstRun: true });   // 启动先拉一次
 
 function injectOverlay(wc) {
   if (!overlaySrc || !isMainWindowState(wc)) return;
-  wc.executeJavaScript(overlaySrc, true).catch(() => { });
+  wc.executeJavaScript(overlaySrc, true)
+    .then(() => {
+      /* v63 首屏快速路径：overlay 装好后立刻补推最近一次快照。
+       * 老实现要等下一次 db 写入/心跳才推数据，新窗口打开后条是零值（"生效慢"体感主因）。
+       * 有缓存就立即推，无缓存则由可能仍在跑的启动查询负责。 */
+      if (lastPayload) pushOnce(wc, lastPayload);
+    })
+    .catch(() => { });
 }
 
 const hook = (wc) => {
   if (!isMainWindowState(wc)) return;
+  /* v63：did-finish-load 要等页面所有资源（图片/字体/懒加载 chunk）结束才触发，
+   * 是"重启后条要等好几秒才出现"的主因。dom-ready 在 DOM 可用时就到，
+   * overlay 自己会轮询等输入框挂载，早注入没有副作用；did-finish-load 保留兜底
+   * （SPA 内部导航后重新装载的情况）。 */
+  wc.on("dom-ready", () => injectOverlay(wc));
   wc.on("did-finish-load", () => injectOverlay(wc));
   if (wc.isLoading()) return;
   injectOverlay(wc);
@@ -385,4 +427,4 @@ const hook = (wc) => {
 app.on("web-contents-created", (e, wc) => hook(wc));
 for (const wc of webContents.getAllWebContents()) hook(wc);
 
-LOG("injected v10 (per-pane wants array), resident query mode + remote SSH datasource (per-window active session via IPC, fs.watch db dir, remote poll_ms while remote session focused, zusage serve + one-shot fallback, activity_min_ms/heartbeat_ms, query timeout 15s)");
+LOG("injected v11 (v63 perf: dom-ready inject, snapshot warm-push, resident prewarm, diag off by default, 5s hot-check) resident query mode + remote SSH datasource (per-window active session via IPC, fs.watch db dir, remote poll_ms while remote session focused, zusage serve + one-shot fallback, activity_min_ms/heartbeat_ms, query timeout 15s)");
