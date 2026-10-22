@@ -3,6 +3,7 @@
   "activity_min_ms": 1500,
   "heartbeat_ms": 30000,
   "hot_reload": true,
+  "diag": false,
   "context_window": 1000000,
   "lang": "zh",
   "remote": {

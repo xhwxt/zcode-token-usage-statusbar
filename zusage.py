@@ -885,108 +885,114 @@ def _remote_fetch(force_sids, have_local, rcfg):
 
 
 def snapshot(force_sid=""):
-    """单次快照：最新会话 + 最近 6+6 会话池 + 今日。
+    """单次快照（自建连接的一次性入口，CLI/测试用）。
+    常驻 serve 走 _snapshot_with 复用连接（v63），避免每请求重连开销。"""
+    con = connect()
+    try:
+        return _snapshot_with(con, force_sid)
+    finally:
+        con.close()
+
+
+def _snapshot_with(con, force_sid=""):
+    """快照实现：调用方负责连接生命周期。
     force_sid：各窗口当前会话 id，逗号分隔（泵按窗口汇总上报：主进程 IPC 映射的焦点会话 +
     overlay localStorage 键兜底），全部强制纳入快照——不在 6+6 池里的会话（新开的、久远的）
     也能被各窗口找到自己的会话并显示（v32 起；v34 改为多窗口多 sid）。"""
     cfg = load_config()
-    con = connect()
-    try:
-        force_sids = []
-        for fs in str(force_sid).split(","):
-            fs = fs.strip()
-            if fs and re.fullmatch(r"[A-Za-z0-9_-]+", fs) and fs not in force_sids:
-                force_sids.append(fs)
-        today = _cached_agg("today", lambda: range_usage(
-            con, _epoch_ms(_day_start()), _epoch_ms(_day_start() + timedelta(days=1))))
-        rows = _scan_session_ids(con)
-        # v9：force 会话在本库的真实存在性（session 行或任一 usage 行）。远端数据源
-        # 双向依赖它：本地已存在 → 不去远端白跑；远端按同款判定区分"确无此会话"与
-        # "零值快照"（负缓存的依据）。两次索引点查 <1ms。
-        known_sids = []
-        if force_sids:
-            qmarks = ",".join("?" * len(force_sids))
-            have_local = {r[0] for r in con.execute(
-                f"select id from session where id in ({qmarks})", force_sids)}
-            have_local |= {r[0] for r in con.execute(
-                f"select distinct session_id from model_usage where session_id in ({qmarks})",
-                force_sids)}
-            known_sids = [s for s in force_sids if s in have_local]
-        # 远端补齐（v9）：本地不存在的 force 会话（SSH 远程会话）改查远端库
-        rcfg = _remote_cfg(cfg)
-        remote_by, remote_today, remote_err = {}, None, None
-        if rcfg and force_sids:
-            remote_by, remote_today, remote_err = _remote_fetch(force_sids, have_local, rcfg)
-        # 本地库里没有的 force 会话（远端/他机会话，或数据还没落库）。渲染端据此给提示：
-        # 零值不再只能靠用户猜"插件坏了"（issue #14），也区分"远端也没查到"（issue #10）。
-        not_local = [s for s in force_sids if s not in have_local] if force_sids else []
-        latest_sid = max(rows, key=lambda r: r[1])[0] if rows else None
-        if latest_sid:
-            base = _session_snapshot(con, latest_sid, cfg)
+    force_sids = []
+    for fs in str(force_sid).split(","):
+        fs = fs.strip()
+        if fs and re.fullmatch(r"[A-Za-z0-9_-]+", fs) and fs not in force_sids:
+            force_sids.append(fs)
+    today = _cached_agg("today", lambda: range_usage(
+        con, _epoch_ms(_day_start()), _epoch_ms(_day_start() + timedelta(days=1))))
+    rows = _scan_session_ids(con)
+    # v9：force 会话在本库的真实存在性（session 行或任一 usage 行）。远端数据源
+    # 双向依赖它：本地已存在 → 不去远端白跑；远端按同款判定区分"确无此会话"与
+    # "零值快照"（负缓存的依据）。两次索引点查 <1ms。
+    known_sids = []
+    if force_sids:
+        qmarks = ",".join("?" * len(force_sids))
+        have_local = {r[0] for r in con.execute(
+            f"select id from session where id in ({qmarks})", force_sids)}
+        have_local |= {r[0] for r in con.execute(
+            f"select distinct session_id from model_usage where session_id in ({qmarks})",
+            force_sids)}
+        known_sids = [s for s in force_sids if s in have_local]
+    # 远端补齐（v9）：本地不存在的 force 会话（SSH 远程会话）改查远端库
+    rcfg = _remote_cfg(cfg)
+    remote_by, remote_today, remote_err = {}, None, None
+    if rcfg and force_sids:
+        remote_by, remote_today, remote_err = _remote_fetch(force_sids, have_local, rcfg)
+    # 本地库里没有的 force 会话（远端/他机会话，或数据还没落库）。渲染端据此给提示：
+    # 零值不再只能靠用户猜"插件坏了"（issue #14），也区分"远端也没查到"（issue #10）。
+    not_local = [s for s in force_sids if s not in have_local] if force_sids else []
+    latest_sid = max(rows, key=lambda r: r[1])[0] if rows else None
+    if latest_sid:
+        base = _session_snapshot(con, latest_sid, cfg)
+    else:
+        # 空库（无任何 completed 请求）fallback：字段必须与 _session_snapshot 对齐，
+        # 否则 snapshot() 顶层读 base["code"]/["tools"]/["ctx_exc"] 直接 KeyError（v32 审查修复）
+        base = {"sid": "", "title": "", "active": False, "turns": 0, "requests": 0,
+                "input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0,
+                "total": 0, "tool_calls": 0, "retries": 0, "ctx": 0, "updated": "",
+                "last_turn": dict(_EMPTY_TURN),
+                "last": {"duration_ms": 0, "ttft_ms": 0, "model": "", "tps": 0},
+                "code": {"add": None, "del": None, "files": None}, "ctx_exc": 0,
+                "tools": {"total": 0, "errors": 0, "list": []},
+                "sub": {"requests": 0, "total": 0, "input": 0, "output": 0, "cache_read": 0,
+                        "reasoning": 0, "cache_write": 0, "active": False, "list": []},
+                "context_window": cfg["context_window"], "context_auto": False}
+    normal = sorted((r for r in rows if not str(r[0]).startswith("sess_subagent")),
+                    key=lambda r: -r[1])[:6]
+    suba = sorted((r for r in rows if str(r[0]).startswith("sess_subagent")),
+                  key=lambda r: -r[1])[:6]
+    ids = [r[0] for r in normal] + [r[0] for r in suba]
+    seen = set()
+    ids = [x for x in ids if not (x in seen or seen.add(x))]
+    if latest_sid and latest_sid not in ids:
+        ids.insert(0, latest_sid)
+    # 远端命中的会话不进本地 ids 循环（本地 _session_snapshot 查不到只会产出零值行）
+    remote_ids = [s for s in force_sids if s in remote_by]
+    for fs in reversed(force_sids):
+        if fs not in ids and fs not in remote_ids:
+            ids.insert(0, fs)
+    # recent 池瘦身（v8）：状态条只渲染 1 个会话，完整快照只给兜底候选
+    # （force + latest + 最近活跃前 2），其余长尾行走轻量查询（单会话 38ms→2ms）。
+    full_n = len(force_sids) + 3
+    rec = []
+    for i, sid in enumerate(ids):
+        if sid == latest_sid:
+            rec.append(base)   # base 本就是 latest 的完整快照，不重算第二遍
+        elif i < full_n:
+            rec.append(_session_snapshot(con, sid, cfg))
         else:
-            # 空库（无任何 completed 请求）fallback：字段必须与 _session_snapshot 对齐，
-            # 否则 snapshot() 顶层读 base["code"]/["tools"]/["ctx_exc"] 直接 KeyError（v32 审查修复）
-            base = {"sid": "", "title": "", "active": False, "turns": 0, "requests": 0,
-                    "input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0,
-                    "total": 0, "tool_calls": 0, "retries": 0, "ctx": 0, "updated": "",
-                    "last_turn": dict(_EMPTY_TURN),
-                    "last": {"duration_ms": 0, "ttft_ms": 0, "model": "", "tps": 0},
-                    "code": {"add": None, "del": None, "files": None}, "ctx_exc": 0,
-                    "tools": {"total": 0, "errors": 0, "list": []},
-                    "sub": {"requests": 0, "total": 0, "input": 0, "output": 0, "cache_read": 0,
-                            "reasoning": 0, "cache_write": 0, "active": False, "list": []},
-                    "context_window": cfg["context_window"], "context_auto": False}
-        normal = sorted((r for r in rows if not str(r[0]).startswith("sess_subagent")),
-                        key=lambda r: -r[1])[:6]
-        suba = sorted((r for r in rows if str(r[0]).startswith("sess_subagent")),
-                      key=lambda r: -r[1])[:6]
-        ids = [r[0] for r in normal] + [r[0] for r in suba]
-        seen = set()
-        ids = [x for x in ids if not (x in seen or seen.add(x))]
-        if latest_sid and latest_sid not in ids:
-            ids.insert(0, latest_sid)
-        # 远端命中的会话不进本地 ids 循环（本地 _session_snapshot 查不到只会产出零值行）
-        remote_ids = [s for s in force_sids if s in remote_by]
-        for fs in reversed(force_sids):
-            if fs not in ids and fs not in remote_ids:
-                ids.insert(0, fs)
-        # recent 池瘦身（v8）：状态条只渲染 1 个会话，完整快照只给兜底候选
-        # （force + latest + 最近活跃前 2），其余长尾行走轻量查询（单会话 38ms→2ms）。
-        full_n = len(force_sids) + 3
-        rec = []
-        for i, sid in enumerate(ids):
-            if sid == latest_sid:
-                rec.append(base)   # base 本就是 latest 的完整快照，不重算第二遍
-            elif i < full_n:
-                rec.append(_session_snapshot(con, sid, cfg))
-            else:
-                rec.append(_light_snapshot(con, sid, cfg))
-        # rec 建好后把远端快照挂到池首：overlay 按 sid 匹配 mine，顺序只影响兜底展示
-        rec = [remote_by[s] for s in reversed(remote_ids)] + rec
-        return {
-            "session": base,
-            "last_turn": base["last_turn"],
-            "last": base["last"],
-            "today": {
-                "requests": today[0], "input": today[1], "output": today[2],
-                "cache_read": today[3], "total": today[4],
-                "reasoning": today[6], "retries": today[7], "cache_write": today[8],
-            },
-            # 远端数据源（v9）：显示远端会话时 overlay 用 remote_today 替代本地 today
-            "remote_today": remote_today,
-            "remote_error": remote_err,
-            "not_local": not_local,               # 不在本地库的 force 会话 id（issue #14 提示用）
-            "remote_enabled": bool(rcfg),         # 是否配了 remote 段（区分"没配"与"配了没查到"）
-            "known_sids": known_sids,
-            "context_window": base["context_window"],
-            "context_auto": base["context_auto"],
-            "code": base["code"],
-            "ctx_exc": base["ctx_exc"],
-            "tools": base["tools"],
-            "recent": rec,
-        }
-    finally:
-        con.close()
+            rec.append(_light_snapshot(con, sid, cfg))
+    # rec 建好后把远端快照挂到池首：overlay 按 sid 匹配 mine，顺序只影响兜底展示
+    rec = [remote_by[s] for s in reversed(remote_ids)] + rec
+    return {
+        "session": base,
+        "last_turn": base["last_turn"],
+        "last": base["last"],
+        "today": {
+            "requests": today[0], "input": today[1], "output": today[2],
+            "cache_read": today[3], "total": today[4],
+            "reasoning": today[6], "retries": today[7], "cache_write": today[8],
+        },
+        # 远端数据源（v9）：显示远端会话时 overlay 用 remote_today 替代本地 today
+        "remote_today": remote_today,
+        "remote_error": remote_err,
+        "not_local": not_local,               # 不在本地库的 force 会话 id（issue #14 提示用）
+        "remote_enabled": bool(rcfg),         # 是否配了 remote 段（区分"没配"与"配了没查到"）
+        "known_sids": known_sids,
+        "context_window": base["context_window"],
+        "context_auto": base["context_auto"],
+        "code": base["code"],
+        "ctx_exc": base["ctx_exc"],
+        "tools": base["tools"],
+        "recent": rec,
+    }
 
 
 # ---------- CLI ----------
@@ -995,19 +1001,44 @@ def serve():
     """常驻查询服务（v8 泵配套）：省每次 ~60-100ms 的解释器启动+模块加载费。
     stdin 每行一个请求（空行 = 无强制会话），stdout 每行一个 JSON 快照。
     stdin EOF = 泵已退出（管道断开），随即退出——孤儿进程自清理。
-    每请求 snapshot() 内部新开 sqlite 连接：不持长读事务，WAL checkpoint 不受阻碍。"""
+    v63：连接按请求间隔复用。原先每请求新开 sqlite 连接 + 一次探测查询（326MB 库实测
+    ~3-6ms 固定开销，小请求占比可观）；现在保留单连接，出错或空闲超时后重建，
+    仍不持长读事务（每条查询执行完即结束，WAL checkpoint 不受阻碍）。"""
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
+    con = None
+    last_use = 0.0
     while True:
         line = sys.stdin.readline()
         if not line:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
             return
         try:
-            out = json.dumps(snapshot(line.strip()))
+            # 空闲超过 60s 或上次出错后连接置空：重建，避免长期持有失效句柄
+            if con is not None and (time.time() - last_use > 60):
+                try:
+                    con.close()
+                except Exception:
+                    pass
+                con = None
+            if con is None:
+                con = connect()
+            out = json.dumps(_snapshot_with(con, line.strip()))
+            last_use = time.time()
         except Exception as e:
             out = json.dumps({"error": str(e)[:200]})   # 单次查询失败不杀常驻进程
+            try:
+                if con is not None:
+                    con.close()
+            except Exception:
+                pass
+            con = None   # 下次请求重建连接（库被替换/句柄失效自愈）
         sys.stdout.write(out + "\n")
         sys.stdout.flush()
 
