@@ -987,12 +987,18 @@ def _snapshot_with(con, force_sid=""):
             ids.insert(0, fs)
     # recent 池瘦身（v8）：状态条只渲染 1 个会话，完整快照只给兜底候选
     # （force + latest + 最近活跃前 2），其余长尾行走轻量查询（单会话 38ms→2ms）。
+    # v64 修复（issue #22）：强制会话必须拿到完整快照，不能按"在池里的位置"降级。
+    # 旧实现只看 i < full_n，而 force 会话被插到池首后，只要它本来就排在最近 12 个
+    # 里（i >= 4）就会落到 _light_snapshot——requests/total 有值但 last_turn、last、
+    # tools.list 全空，正是"只显示总 token、其余数据项全空"的成因。远端会话走的是
+    # 同一条 json 子命令，因此同样中招。判定改为按 sid 是否强制会话，而不是按位置。
+    force_set = set(force_sids)
     full_n = len(force_sids) + 3
     rec = []
     for i, sid in enumerate(ids):
         if sid == latest_sid:
             rec.append(base)   # base 本就是 latest 的完整快照，不重算第二遍
-        elif i < full_n:
+        elif sid in force_set or i < full_n:
             rec.append(_session_snapshot(con, sid, cfg))
         else:
             rec.append(_light_snapshot(con, sid, cfg))
