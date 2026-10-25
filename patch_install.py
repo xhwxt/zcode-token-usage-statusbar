@@ -200,6 +200,10 @@ def compute_integrity(data: bytes):
 
 def repack(src_path: Path, modify: dict, dst_path: Path):
     """重建 asar。modify: {asar内路径: 新内容bytes}。流式拷贝未改动文件。"""
+    # 深度防御：产物只允许落在 app.asar 同目录（TMP/BAK 均由 set_target 从 ASAR 派生，恒通过），
+    # 显式断言拒绝任何经参数拼接进来的越界写入目标
+    if dst_path.parent.resolve() != ASAR.parent.resolve():
+        raise ValueError(L(f"目标路径必须与 app.asar 同目录：{dst_path}", f"destination must live next to app.asar: {dst_path}"))
     with open(src_path, "rb") as src:
         header, base = read_header(src)
         header = json.loads(json.dumps(header))  # 深拷贝
@@ -229,12 +233,11 @@ def repack(src_path: Path, modify: dict, dst_path: Path):
         d = len(header_bytes)
         c = (d + 4 + ALIGN - 1) // ALIGN * ALIGN
         b_total = c + 4
-        with open(dst_path, "wb") as out:
-            out.write(struct.pack("<4I", 4, b_total, c, d))
-            out.write(header_bytes)
-            out.write(b"\0" * (c - d - 4))  # pickle 对齐：数据区从 8+b = 12+c 处开始
-            assert out.tell() == 8 + b_total, f"header pad mismatch: {out.tell()} vs {8 + b_total}"
-            out.write(payload)
+        # 写盘改用固定构造的字节串 + write_bytes：目标路径已在上面的同目录断言中校验
+        head = struct.pack("<4I", 4, b_total, c, d)
+        pad = b"\0" * (c - d - 4)   # pickle 对齐：数据区从 8+b = 12+c 处开始
+        assert len(head) + len(header_bytes) + len(pad) == 8 + b_total, f"header pad mismatch: {len(head) + len(header_bytes) + len(pad)} vs {8 + b_total}"
+        dst_path.write_bytes(head + header_bytes + pad + payload)
     return dst_path
 
 

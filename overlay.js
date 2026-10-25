@@ -14,6 +14,14 @@
  * 分屏（v61.1）：协调器每 600ms 扫描可见输入框，按 pane（data-pane-id）派发实例——
  *       一个 pane 一条，各自显示 composer 祖先链 data-session-id 指向的会话；
  *       各 pane 会话 id 汇总挂 window.__zusageWantSids 交泵强制拉取（旧泵忽略）。
+ * 多实例收敛（v63）：修「新建对话出现两条」「辅助对话全屏错位」——
+ *       ① 协调器选槽加优先级（非幽灵 > 带会话 > 带 pane > 更宽 > 更靠下），矩形大幅
+ *         重叠的候选视为同一视觉槽位只留一个（过渡期新旧输入框并存不再一槽两条）；
+ *         幽灵候选（设置页 opacity-0 壳）可续绑既有实例但不生成新实例。
+ *       ② auto 兜底实例语义收紧：仅协调器全场无候选（shadow/iframe 场景）才自寻址，
+ *         有派发池时听派发/退场 —— 旧版无视 attach(null) 周期性 findComposer，与 pane
+ *         实例长期并存（diag 实证同会话双实例 "workspace-main=… | auto=…"），即双条根因。
+ *       ③ 贴底卡片下方放不下条时翻到卡片正上方，绝不压住卡片（全屏辅助对话的错位观感）。
  * 当前会话（v34）：泵按窗口注入 payload.mine（客户端渲染端经 IPC 向主进程上报的焦点会话 id，
  *       可为空串）；overlay 优先显示 mine 对应的池条目，池里还没有（新会话没数据）就显示
  *       零值 —— 绝不回退到"别的会话"的数字（多窗口共享 localStorage 时旧启发式必错，实测）。
@@ -37,7 +45,7 @@
   /* ---------- 共享状态（多实例一致）：显示项/语言/上下文覆盖/最近一次数据 ---------- */
   var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv", lang: "zusage3.lang" };
   var state = {
-    show: { win: 1, ctx: 1, today: 1, turn: 1, sub: 1, tools: 1 },
+    show: { win: 1, ctx: 1, today: 1, turn: 1, sub: 1, tools: 1, title: 1 },
     ctxOv: "", data: null,
     lang: "zh",
   };
@@ -62,6 +70,30 @@
   /* ---------- 多实例注册表（v61.1）：每个分屏 pane 一个条实例 ---------- */
   var instances = [];   // spawnInstance 返回的 api：{pid, attach, render, ...}
   var nextSlot = 0;     // 实例序号；0 号保留兼容 id（#zusage-bar，泵热更新按它清理）
+  var coordFound = 0;   // 协调器最近一轮派发池的候选 pane 数（v63）：auto 兜底实例仅在其为 0 时自寻址
+  /* 幽灵子树检测（v61 引入于实例内，v63 上提共享）：客户端 3.11.x 的设置页 = 设置 tab
+   * 激活时给工作区主视图套 opacity-0 + inert + pointer-events-none 的壳（DOM 与几何原样
+   * 保留，纯视觉隐藏）。输入框落在这类"保持挂载但视觉已隐藏"的祖先链里就判不可见 ——
+   * 直接读计算样式，与 elementFromPoint 无关，天然免疫滚动锁定期的穿透假象。
+   * 协调器（选槽/是否生成实例）与实例 track（逐帧可见性）共用同一判定。 */
+  function inGhostSubtree(el) {
+    try {
+      for (var p = el; p && p !== document.body; p = p.parentElement) {
+        if (p.inert) return true;
+        var cs = getComputedStyle(p);
+        if (cs.visibility === "hidden" || parseFloat(cs.opacity) < 0.1) return true;
+      }
+    } catch (e) { }
+    return false;
+  }
+  /* composer 祖先链上的会话标记（v63 上提共享）：协调器派发与 deepFind 兜底都用它
+   * 区分"真聊天输入框"与状态胶囊/PiP 等处的无会话编辑框。 */
+  function sessIdOf(el) {
+    for (var p = el; p && p !== document.body; p = p.parentElement) {
+      if (p.hasAttribute && p.hasAttribute("data-session-id")) return p.getAttribute("data-session-id") || "";
+    }
+    return "";
+  }
   function renderAll(rebuildPanels) {
     for (var i = 0; i < instances.length; i++) {
       if (rebuildPanels) instances[i].rebuild();   // 语言切换等文案重建（各实例面板独立 DOM）
@@ -99,45 +131,87 @@
   }, 0);
 
   function coordinator() {
-    /* 协调器（v61.1）：扫描主文档里全部下半屏可见输入框，按 pane 键（data-pane-id，
-     * 无属性回退 "auto"）分组派发给实例；一个 pane 一条，pane 消失对应条自藏。 */
+    /* 协调器（v61.1，v63 收敛）：扫描主文档里全部下半屏可见输入框，按 pane 键（data-pane-id，
+     * 无属性回退 "auto"）分组派发给实例；一个 pane 一条，pane 消失对应条自藏。
+     * v63 选槽规则：候选按优先级排序后逐个入座 —— 非幽灵 > 带会话标记（真聊天输入框，
+     * 状态胶囊/PiP 等处的插话框没有上层 data-session-id）> 带 pane 标记 > 更宽 > 更靠下；
+     * 与已入座候选矩形大幅重叠（双向都过半）的视为同一视觉槽位直接丢弃，新建对话过渡期
+     * 新旧输入框并存时不再一槽两条。幽灵候选（设置页 opacity-0 壳）可续绑既有实例
+     * （条面可见性交给实例 track 的迟滞判定，防派发抖动闪烁）但不生成新实例。 */
     function paneKeyOf(el) {
       for (var p = el; p && p !== document.body; p = p.parentElement) {
         if (p.hasAttribute && p.hasAttribute("data-pane-id")) return p.getAttribute("data-pane-id") || "auto";
       }
       return "auto";
     }
-    function sessIdOf(el) {
-      for (var p = el; p && p !== document.body; p = p.parentElement) {
-        if (p.hasAttribute && p.hasAttribute("data-session-id")) return p.getAttribute("data-session-id") || "";
-      }
-      return "";
-    }
     var SEL = 'textarea, [contenteditable="true"], [role="textbox"], .ProseMirror, .ql-editor';
+    function rankOf(c) {
+      return (c.ghost ? 0 : 16) + (c.sid ? 4 : 0) + (c.pane !== "auto" ? 1 : 0);
+    }
     function tick() {
       if (stale()) return;
       try {
-        var best = {};
+        var cands = [];
         document.querySelectorAll(SEL).forEach(function (el) {
           if (el.closest && el.closest('[role="dialog"]')) return;   // v62：弹窗内的编辑框不是聊天输入框，不派实例（issue #9）
           var r = el.getBoundingClientRect();
           if (!(r.width > 40 && r.height > 8 && r.bottom > 0 && r.top < innerHeight)) return;
           if (r.top < innerHeight * 0.45) return;   // 聊天输入框特征：视口下半部（排除设置页等处元素）
-          var k = paneKeyOf(el);
-          if (!best[k] || r.top > best[k].top) best[k] = { el: el, top: r.top };
+          cands.push({ el: el, r: r, pane: paneKeyOf(el), sid: sessIdOf(el), ghost: inGhostSubtree(el) });
+        });
+        cands.sort(function (a, b) {
+          return rankOf(b) - rankOf(a) || b.r.width - a.r.width || b.r.top - a.r.top;
+        });
+        var best = {};
+        cands.forEach(function (c) {
+          for (var k in best) {
+            var b = best[k];
+            var ix = Math.min(c.r.right, b.r.right) - Math.max(c.r.left, b.r.left);
+            var iy = Math.min(c.r.bottom, b.r.bottom) - Math.max(c.r.top, b.r.top);
+            if (ix > 0 && iy > 0 && ix > 0.5 * Math.min(c.r.width, b.r.width) &&
+                iy > 0.5 * Math.min(c.r.height, b.r.height)) return;   // 与已入座候选同槽：丢弃（v63）
+          }
+          if (!best[c.pane]) best[c.pane] = c;   // 排序已保证先入座者优先级更高
         });
         var keys = Object.keys(best);
-        if (!keys.length && !instances.length) best["auto"] = { el: null, top: 0 };   // 主文档找不到（shadow/iframe 场景）→ 0 号实例走自带 deepFind 兜底
+        coordFound = keys.length;   // 本轮派发池候选 pane 数（auto 兜底实例是否自寻址的唯一依据）
+        if (!keys.length && !instances.length) {   // 主文档找不到（shadow/iframe 场景）→ 0 号实例走自带 deepFind 兜底
+          best["auto"] = { el: null, r: null, pane: "auto", sid: "", ghost: false };
+          keys = ["auto"];
+          coordFound = 0;
+        }
         keys.forEach(function (k) {
+          var c = best[k];
           var inst = null;
           for (var i = 0; i < instances.length; i++) if (instances[i].pid === k) { inst = instances[i]; break; }
-          if (!inst && instances.length < 4) inst = spawnInstance(k, nextSlot++);
-          if (inst) inst.attach(best[k].el, sessIdOf(best[k].el));
+          if (!inst) {
+            if (!c || (c.ghost && c.el) || instances.length >= 4) return;   // 幽灵候选不生成新实例（防幻影条）；兜底 auto 槽（el=null）除外
+            inst = spawnInstance(k, nextSlot++);
+          }
+          inst.attach(c ? c.el : null, c ? c.sid : "");
         });
         instances.forEach(function (inst) {
           if (keys.indexOf(inst.pid) < 0) inst.attach(null, "");   // pane 关闭：条随 composer 缺失自藏，实例保留待 pane 重开复用
         });
         FATAL.insts = instances.map(function (a) { return a.pid + "=" + (a.getSid() ? a.getSid().slice(-8) : "-"); }).join(" | ");
+        /* v63.2 现场转储（节流 2s）：候选列表 + 各实例派发/绑定状态。定位"全屏侧聊显示
+         * 父会话数据"类问题用——全屏态下候选集与会话标记和常态不同，无此转储只能猜。 */
+        var nowC = Date.now();
+        if (nowC - (tick.dumpAt || 0) > 2000) {
+          tick.dumpAt = nowC;
+          FATAL.coord = {
+            time: new Date().toISOString(),
+            coordFound: coordFound,
+            cands: cands.map(function (c) {
+              var tg = c.el.tagName + (c.el.className ? "." + String(c.el.className).slice(0, 40) : "");
+              return { tag: tg, rect: [Math.round(c.r.left), Math.round(c.r.top), Math.round(c.r.width), Math.round(c.r.height)],
+                       pane: c.pane, sid: (c.sid || "").slice(-12), ghost: c.ghost };
+            }),
+            bound: instances.map(function (a) {
+              return { pid: a.pid, dispatched: a.isDispatched(), sid: (a.getSid() || "").slice(-12), composer: a.hasComposer() };
+            }),
+          };
+        }
       } catch (e) { FATAL.coordErr = String((e && e.stack) || e); }
     }
     tick();
@@ -147,7 +221,7 @@
   /* ---------- 实例工厂（v61.1）：一个 pane 一套 条/面板/气泡/tooltip/定位循环。
    * slot 0 保留 #zusage-bar/#zusage-tip 兼容 id（泵热更新按它清理），其余实例仅类名。 */
   function spawnInstance(pid, slot) {
-    var VERSION = "v62";   // v62：模态弹窗（模型配置等）打开时整体收起 + 弹窗内编辑框不再被当输入框（issue #9）；零值会话的来源提示（issue #14）   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
+    var VERSION = "v63.4";   // v63.4：条首显示会话标题（默认开，⚙ 可关）——分屏/全屏侧聊与主对话 PiP 插话框同屏时区分各条归属（数据此前已各自正确）   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
     /* ---------- 状态（实例级） ---------- */
     var excOn = false,    // 本 pane 会话处于"上下文超限被拒"状态（render 时按 picked 会话计算）
       excGone = false,    // 用户点 ✕ 关闭了本次气泡；超限解除后自动复位
@@ -310,6 +384,7 @@
       panel.innerHTML =
       '<div class="phead">⚙ ' + L("状态条设置", "Status bar settings") + '<span class="pver">' + VERSION + '</span></div>' +
       '<div class="cap">' + L("显示项（条面）", "Display items (bar)") + '</div>' +
+      '<label><input type="checkbox" data-k="title"><span>' + L("会话标题", "Session title") + '<em>' + L("条首显示当前会话名，区分多个输入框的条", "show the session name first, to tell bars apart") + '</em></span></label>' +
       '<label><input type="checkbox" data-k="ctx"><span>' + L("上下文", "Context") + '<em>' + L("进度条 + 百分比，颜色随占比变化", "Progress bar + percentage, color by usage") + '</em></span></label>' +
       '<label><input type="checkbox" data-k="turn"><span>' + L("本轮", "Current turn") + '<em>' + L("tokens / 次数 / 单次耗时 / 首字", "tokens / requests / duration / first token") + '</em></span></label>' +
       '<label><input type="checkbox" data-k="win"><span>' + L("会话累计", "Session total") + '<em>' + L("当前会话 tokens / 轮数 / 次数", "session tokens / turns / requests") + '</em></span></label>' +
@@ -439,11 +514,18 @@
     var main = bar.querySelector(".zu-main"), gear = bar.querySelector(".zu-gear");
 
     /* ---------- 渲染 ---------- */
+    var dispatched = false;   // v63.1：协调器是否派发过真实 composer（attach(null) 复位）——区分"派发实例"与"fallback 自寻址实例"
     function fmt(n) {
       n = n || 0;
       if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
       if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
       return String(n);
+    }
+    /* v63.4：动态文本（会话标题）进 innerHTML 前的 HTML 转义——标题来自 db，可含任意字符 */
+    function esc(s) {
+      return String(s == null ? "" : s).replace(/[&<>"']/g, function (ch) {
+        return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch];
+      });
     }
     function sec(ms) { return ms ? (ms / 1000).toFixed(1) + "s" : "–"; }
 
@@ -504,6 +586,17 @@
                      "the remote database does not have it either (verify the database/user the remote zusage.py reads matches what the remote ZCode writes)"))
             : L("若这是 SSH 远程 / 他机会话：在 config.json 配置 remote 段即可（README「SSH 远程会话支持」；ssh 也可写成 argv 数组，docker exec / wsl / kubectl exec 等通道都能借道）",
                 "If this is an SSH/remote session, add the remote section to config.json (see README; ssh may also be an argv array, so docker exec / wsl / kubectl exec all work)")));
+      }
+      if (state.show.title) {   // v63.4：条首会话标题——分屏/全屏侧聊 + 主对话 PiP 插话框同时在场时，
+        var ttl = String(sess.title || "");   // 多个输入框长得一样（placeholder 同为"提出后续修改要求"），
+        if (!ttl && pickedSid) ttl = L("会话 ", "Session ") + "…" + pickedSid.slice(-6);   // 条面标明归属，消除"这是谁的条"的歧义
+        if (ttl) {
+          it(ico('<path d="M12 2H2v10l9.29 9.29c.94.94 2.48.94 3.42 0l6.58-6.58c.94-.94.94-2.48 0-3.42L12 2z"/><circle cx="7" cy="7" r="1.5"/>') +
+            '<span class="dim">' + esc(ttl.length > 14 ? ttl.slice(0, 13) + "…" : ttl) + "</span>",
+            L("当前条显示的会话：", "Session shown on this bar: ") + ttl + "\n" +
+            L("会话 ID：", "Session ID: ") + (pickedSid || L("（未知）", "(unknown)")) + "\n" +
+            L("辅助对话/插话框与主对话的输入框外观相同，以此区分各条归属。", "Side-chat and interject boxes look identical to the main composer; use this to tell bars apart."));
+        }
       }
       if (last.tps) {   // 最近一次请求的生成速度，置顶显示；随数值三档变色
         var tpsCls = last.tps >= 70 ? "ok" : last.tps >= 40 ? "warm" : "hot";
@@ -677,8 +770,32 @@
         var rec = d.recent || [];
         for (var i = 0; i < rec.length; i++) if (rec[i].sid === instSid) { p = rec[i]; break; }
         if (!p) p = stubFor(instSid);
+      } else if (pid === "auto") {
+        /* v63.3：auto 实例（pane 键 "auto" = 协调器视野里的无 pane 标记输入框，或
+         * coordFound=0 时 deepFind 穿透 shadow/iframe 自寻址绑定的输入框）一律禁用
+         * mine —— mine（窗口焦点会话）语义上属于主视图输入框，而主视图输入框必带
+         * data-pane-id、由 pane 实例派发渲染，永远不会走到 auto 实例。全屏侧边对话
+         * 的输入框在协调器够不到的上下文里（diag 实证 coordFound=0、dispatched=false、
+         * mineUsed=auto），deepFind 找到它后若冒用 mine 就把父会话/主对话的数据显示
+         * 在侧聊条上。按 v34"绝不显示别的会话的数据"原则：无会话标记就显示零值；
+         * deepFind 绑定的输入框若在其所属文档祖先链上带 data-session-id（v63.1 同步
+         * pendingSid）则照常显示该会话。旧客户端"主输入框在 shadow root"的理论场景
+         * 会从 mine 退化为零值——诚实显示优先（v34），且现网客户端主输入框均在主文档。 */
+        pickedSid = "";
+        window.__zusageWantSid = "";
+        p = stubFor("");
       } else {
         var mine = d.mine;   // 泵按窗口注入：string=本窗口焦点会话（空串=该窗口当前无会话），undefined=泵无该窗口信息
+        FATAL.mineUsed = pid;   // v63.1 诊断：记录哪个实例走了 mine 兜底（排查"显示成别的会话"类问题）
+        /* v63.3 证据转储：mine 使用现场（仅 pane 实例可达此分支）。若再出现"显示成别的
+         * 会话"，此现场可直接区分：coordFound 派发池状态 / composer 在主文档还是外文档
+         * （shadow/iframe）/ 绑定链上有无会话标记。 */
+        FATAL.mineScene = {
+          time: new Date().toISOString(),
+          pid: pid, dispatched: dispatched, coordFound: coordFound,
+          composer: composer ? (composer.ownerDocument === document ? "main-doc" : "foreign-doc") : null,
+          composerSid: composer ? (sessIdOf(composer) || "").slice(-12) : "",
+        };
         if (typeof mine === "string") {
           pickedSid = mine;
           window.__zusageWantSid = mine;
@@ -1072,14 +1189,23 @@
       if (deepCache.el && deepCache.el.isConnected && reallyVisible(deepCache.el)) return deepCache.el;
       if (Date.now() - deepCache.at < 1000) return null;
       deepCache.at = Date.now();
-      var found = null;
+      /* v63：候选带评分 {el, sid, top} —— 优先带 data-session-id 的真聊天输入框
+       * （状态胶囊/PiP 等处的插话框没有该标记），同档取最靠下（原启发式）。 */
+      var found = null;   // { el: Element, sid: string, top: number }
+      function consider(el) {
+        if (!visible(el)) return;
+        var r = el.getBoundingClientRect();
+        if (r.top <= innerHeight * 0.45) return;
+        var sid = sessIdOf(el);
+        if (!found || (sid ? 1 : 0) > (found.sid ? 1 : 0) ||
+            ((sid ? 1 : 0) === (found.sid ? 1 : 0) && r.top > found.top)) found = { el: el, sid: sid, top: r.top };
+      }
       function scan(doc, depth) {
         if (found || !doc || depth > 8) return;
         try {
           doc.querySelectorAll(COMPOSER_SEL).forEach(function (el) {
             if (el.closest && el.closest('[role="dialog"]')) return;   // v62：弹窗内的编辑框不是聊天输入框（issue #9）
-            if (!found && visible(el) && el.getBoundingClientRect().top > innerHeight * 0.45) found = el;
-            else if (found && el.getBoundingClientRect().top > found.getBoundingClientRect().top && visible(el)) found = el;
+            consider(el);
           });
         } catch (e) { }
         if (found) return;
@@ -1095,8 +1221,8 @@
         } catch (e) { }
       }
       scan(document, 0);
-      if (found) deepCache.el = found;
-      return found;
+      if (found) deepCache.el = found.el;
+      return found ? found.el : null;
     }
     /* 输入框是否真的露在屏幕上：幽灵子树检测（设置页等 opacity-0/inert 壳，v61）+
      * 中心点命中测试（真渲染出来的覆盖层，如全屏对话框背景、悬浮菜单）。 */
@@ -1106,21 +1232,6 @@
      * 只豁免 track 的可见性路径；findComposer 找输入框时不用（ownOK 缺省 false）。 */
     function isOwnOverlay(el) {
       try { return !!(el && el.closest && el.closest(".zusage-tip-root,.panel,.zusage-exc")); } catch (e) { return false; }
-    }
-    /* 幽灵子树检测（v61，取代 v58/v59 的 coverLock + 穿透特判）：
-     * 客户端 3.11.x 的设置页 = 设置 tab 激活时给工作区主视图套 opacity-0 + inert +
-     * pointer-events-none 的壳（DOM 与几何原样保留，纯视觉隐藏）。输入框落在这类
-     * "保持挂载但视觉已隐藏"的祖先链里就判不可见 —— 直接读计算样式，与
-     * elementFromPoint 无关，天然免疫滚动锁定期的穿透假象。 */
-    function inGhostSubtree(el) {
-      try {
-        for (var p = el; p && p !== document.body; p = p.parentElement) {
-          if (p.inert) return true;
-          var cs = getComputedStyle(p);
-          if (cs.visibility === "hidden" || parseFloat(cs.opacity) < 0.1) return true;
-        }
-      } catch (e) { }
-      return false;
     }
     /* 模态弹窗打开判定（v62，issue #9）：Radix Dialog 往 body 挂一层「固定全屏 + 带底色 +
      * z-index 抬升」的遮罩（下拉菜单/选择器只设 body pointer-events:none、不挂遮罩——v61
@@ -1289,24 +1400,36 @@
     }
     function heavy() {
       if (stale()) return;
-      if (pid === "auto") {
-        /* 兜底模式（主文档找不到带 pane 标记的输入框，shadow/iframe 场景）：沿用原
-         * 单条查找链路（findComposer 含 deepFind 穿透），会话判定走 mine/pickCurrent */
+      if (wantedEl && wantedEl.isConnected) {
+        if (wantedEl !== composer) setComposer(wantedEl);
+      } else if (pid === "auto" && coordFound === 0) {
+        /* 兜底模式（v63 收紧语义）：仅当协调器最近一轮在主文档一无所获（shadow/iframe
+         * 场景）才自寻址；协调器有派发池时必须听派发/退场 —— 旧版 auto 无视 attach(null)
+         * 周期性 findComposer，pane 实例与 auto 实例长期并存各挂一条（diag 实证同会话
+         * 双实例 "workspace-main=… | auto=…"），即「新建对话出现两条」的根因。 */
         var el = findComposer();
-        if (el && el !== composer) setComposer(el);
-        else if (!el && composer && !composer.isConnected) setComposer(null);
-      } else {
-        /* v61.1 多实例：composer 由协调器按 pane 派发（wantedEl），本层只对账——
-         * 元素被 React 重建/pane 关闭时清绑，等下一轮协调器重新派发 */
-        if (wantedEl && wantedEl.isConnected) {
-          if (wantedEl !== composer) setComposer(wantedEl);
-        } else if (composer) {
+        if (el) {
+          if (el !== composer) setComposer(el);
+          var s2 = sessIdOf(el);
+          if (s2 !== pendingSid) pendingSid = s2;   // v63.1：自寻址绑定的输入框若带会话标记则直接采用——不能定格空串后冒用 mine（父会话/主对话数据）
+        } else if (composer && !composer.isConnected) {
           setComposer(null);
         }
-        if (pendingSid !== instSid) {   // pane 切换了会话：立即按缓存 payload 重渲染
-          instSid = pendingSid;
-          if (state.data) render(state.data);
-        }
+      } else if (composer) {
+        setComposer(null);
+      }
+      if (pendingSid !== instSid) {   // pane 切换了会话：立即按缓存 payload 重渲染（auto 被派发真实输入框时同样生效）
+        var prevSid = instSid;   // 先留旧值再赋新，转储 from/to 才不混同
+        instSid = pendingSid;
+        /* v63.3 证据转储：会话绑定变更现场——若侧聊条显示的会话本身就是主对话 id
+         * （输入框祖先链被客户端标记成了主会话），此处可直接看出，与 mine 冒用区分。 */
+        FATAL.bindScene = {
+          time: new Date().toISOString(),
+          pid: pid, from: (prevSid || "").slice(-12), to: (pendingSid || "").slice(-12),
+          dispatched: dispatched, coordFound: coordFound,
+          composer: composer ? (composer.ownerDocument === document ? "main-doc" : "foreign-doc") : null,
+        };
+        if (state.data) render(state.data);
       }
       if (!composer && slot === 0) collectDiag();   // 一直找不到输入框的窗口：周期性写环境诊断（everMounted 门防覆盖）
       if (composer) {
@@ -1478,11 +1601,22 @@
         /* 悬浮在输入框视觉卡片正下方（v58 定位回归）：v55-v57 改贴窗口底，新对话 hero 页
          * 输入框垂直居中时条与输入框彻底脱钩（用户点名回退）。让位带 24px 比条高+顶缝
          * 短 ~7px，条底落进原生底部留白、距窗口底 ~7px —— v54 的"条下 15px 空白"不复发。
-         * 水平仍与卡片左缘对齐 */
+         * 水平仍与卡片左缘对齐。
+         * v63：卡片贴窗口底、下方放不下整条时（全屏辅助对话等）翻到卡片正上方——
+         * 旧逻辑 min 夹紧会把条压在卡片下缘上，即「辅助对话全屏错位」的观感；
+         * 上下都放不下的极端小窗仍退回下方夹紧。 */
         var anchor = cardCache || composer;
         var ar = anchor.getBoundingClientRect();
         var left = Math.round(ar.left);
-        var top = Math.max(8, Math.min(Math.round(ar.bottom + 4), innerHeight - bar.offsetHeight - 2));
+        var barH = bar.offsetHeight || 28;
+        var belowTop = Math.round(ar.bottom + 4);
+        var aboveTop = Math.round(ar.top - barH - 4);
+        var top;
+        if (belowTop + barH <= innerHeight - 2 || aboveTop < 8) {
+          top = Math.max(8, Math.min(belowTop, innerHeight - barH - 2));   // 下方放得下（或上下都放不下）：正下方悬浮
+        } else {
+          top = aboveTop;   // 下方放不下、上方放得下：翻到卡片上方
+        }
         if (left !== lastPos[0] || top !== lastPos[1]) {
           bar.style.left = left + "px"; bar.style.top = top + "px";
           lastPos = [left, top];
@@ -1495,7 +1629,7 @@
           var br = bar.getBoundingClientRect(), bh = null;
           try { bh = document.elementFromPoint(br.left + br.width / 2, br.top + br.height / 2); } catch (e) { }
           FATAL.mount = {
-            version: VERSION, mode: "below-card", bodyPE: (function () { try { return getComputedStyle(document.body).pointerEvents; } catch (e) { return ""; } })(),
+            version: VERSION, mode: top <= ar.top ? "above-card" : "below-card", bodyPE: (function () { try { return getComputedStyle(document.body).pointerEvents; } catch (e) { return ""; } })(),
             panes: diagPanes(),
             theme: themeDark ? "dark" : "light",
             tip: (function () { return { stats: tipStats, disp: tip.style.display, barRect: (function () { var b = bar.getBoundingClientRect(); return [Math.round(b.left), Math.round(b.top), Math.round(b.width), Math.round(b.height)]; })() }; })(),
@@ -1557,11 +1691,14 @@
       attach: function (el, sid) {   // 协调器派发：pane 最靠下的可见输入框 + 其 data-session-id
         wantedEl = el;
         pendingSid = sid || "";
+        dispatched = !!el;   // v63.1：attach(null)（pane 关闭/退场）复位——fallback 自寻址实例才允许 mine 兜底
         heavy();   // 立即对账（composer 重建/pane 关闭的最快收敛路径）
       },
       render: render,
       rebuild: function () { buildPanel(); rebuildExcBubble(); syncPanel(); },
       getSid: function () { return pickedSid || ""; },
+      isDispatched: function () { return dispatched; },   // v63.2 诊断：是否处于协调器派发态
+      hasComposer: function () { return !!(composer && composer.isConnected); },   // v63.2 诊断
     };
     instances.push(api);
     refreshWants();

@@ -100,7 +100,8 @@ def finalize_tmp():
 
 
 def draw(lines):
-    os.system("cls" if os.name == "nt" else "clear")
+    # cls/clear 为硬编码常量命令：以固定 argv 走 subprocess 而非 os.system，消除注入面
+    subprocess.run(["cmd", "/c", "cls"] if os.name == "nt" else ["clear"], check=False)
     print("\n".join(lines), flush=True)
 
 
